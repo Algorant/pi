@@ -151,7 +151,7 @@ function updateWidget(state: TodoState, ctx: { ui: ExtensionContext["ui"] }): vo
 function createTool(state: TodoState, onUpdate: (ctx: ExtensionContext) => void) {
   return {
     name: "manage_todo_list",
-    exposure: "codemode",
+    exposure: "model-only",
     label: "Todo List",
     description: TOOL_DESCRIPTION,
     parameters: ManageTodoListParams,
