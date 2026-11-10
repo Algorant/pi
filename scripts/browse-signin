@@ -12,7 +12,7 @@ Usage:
   browse-signin remove <account>   delete that account's browse secrets
   browse-signin --help
 
-Accounts: ivan, household
+Accounts: personal, household
 
 add reads the username and password by reference from the personal pass-cli session
 using ~/.config/fnox/manifests/amazon.toml, then pipes each value on stdin to
@@ -26,9 +26,9 @@ die() { echo "browse-signin: $*" >&2; exit 1; }
 
 account_keys() {
   case ${1:-} in
-    ivan) printf '%s\n' AMAZON_IVAN_USERNAME AMAZON_IVAN_PASSWORD ;;
+    personal) printf '%s\n' AMAZON_PERSONAL_USERNAME AMAZON_PERSONAL_PASSWORD ;;
     household) printf '%s\n' AMAZON_HOUSEHOLD_USERNAME AMAZON_HOUSEHOLD_PASSWORD ;;
-    *) die "unknown account '$1'; choose ivan or household" ;;
+    *) die "unknown account '$1'; choose personal or household" ;;
   esac
 }
 
