@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "kind": "upstream",
+    "repository": "https://github.com/herdrdev/herdr-core.git",
+    "ref": "master",
+    "resolvedCommit": "dbcdcffc779f7516d5815cbd6f0a37da2b5e6628",
+    "upstreamSkill": "herdr-core",
+    "file": "SKILL.md"
+  },
+  "copiedAt": "2026-10-30",
+  "localChanges": [
+    "Appended one Local note section for accepted native helper and Task Worker entrypoints; upstream text is otherwise verbatim.",
+    "2026-11-09 (task-625): moved into the merged Pi `herdr` skill. The upstream body sits verbatim under its own section with a provenance line; the frontmatter name is `herdr` and its description appends the Herdr app widgets triggers; the Local note heading is one level deeper; a Herdr app widgets section (from Herdra) follows."
+  ],
+  "license": {
+    "spdx": "Apache-2.0",
+    "path": "LICENSE"
+  }
+}

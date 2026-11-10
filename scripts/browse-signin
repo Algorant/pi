@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# browse-signin: load an existing Amazon login by fnox reference into browse's secret store.
+set -euo pipefail
+
+MANIFEST=$HOME/.config/fnox/manifests/amazon.toml
+ORIGIN=https://www.amazon.com
+
+usage() {
+  cat <<'EOF'
+Usage:
+  browse-signin add <account>      load the existing login for an account into browse
+  browse-signin remove <account>   delete that account's browse secrets
+  browse-signin --help
+
+Accounts: personal, household
+
+add reads the username and password by reference from the personal pass-cli session
+using ~/.config/fnox/manifests/amazon.toml, then pipes each value on stdin to
+`browse secrets add` for the fixed Amazon origin. Values never appear in argv,
+logs or output. TOTP seeds are never read or stored.
+remove: run after every sign-in, including a failed one.
+EOF
+}
+
+die() { echo "browse-signin: $*" >&2; exit 1; }
+
+account_keys() {
+  case ${1:-} in
+    personal) printf '%s\n' AMAZON_PERSONAL_USERNAME AMAZON_PERSONAL_PASSWORD ;;
+    household) printf '%s\n' AMAZON_HOUSEHOLD_USERNAME AMAZON_HOUSEHOLD_PASSWORD ;;
+    *) die "unknown account '$1'; choose personal or household" ;;
+  esac
+}
+
+case ${1:-} in
+  -h | --help) usage ;;
+  add)
+    (($# == 2)) || die "usage: browse-signin add <account>"
+    account=$2
+    mapfile -t keys < <(account_keys "$account")
+    [[ -f $MANIFEST ]] || die "missing manifest $MANIFEST"
+    for index in 0 1; do
+      key=${keys[$index]}
+      if ((index == 0)); then field=username; else field=password; fi
+      secret="amazon-$account-$field"
+      fnox --non-interactive -c "$MANIFEST" exec -- bash -c '
+        [[ -n ${!1:-} ]] || { echo "browse-signin: fnox returned an empty value for $1" >&2; exit 3; }
+        printf %s "${!1}" | browse secrets add "$2" --origin "$3"
+      ' _ "$key" "$secret" "$ORIGIN"
+    done
+    ;;
+  remove)
+    (($# == 2)) || die "usage: browse-signin remove <account>"
+    account=$2
+    account_keys "$account" >/dev/null
+    browse secrets remove "amazon-$account-username"
+    exec browse secrets remove "amazon-$account-password"
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

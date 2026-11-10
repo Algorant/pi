@@ -1,0 +1,155 @@
+#!/usr/bin/env bun
+/**
+ * inbox — read and close agent-inbox history from this machine's local log
+ * (~/.local/state/pi-agency/inbox/log.jsonl; see pi-agency/inbox/envelope.ts).
+ *
+ *   inbox [open]            requests and blocked messages nobody has answered or closed
+ *   inbox recent [N]        the last N messages (default 20), newest first
+ *   inbox thread <id>       the whole conversation an id belongs to, with bodies, closes and
+ *                           reopens, each message's delivery (queued, delivered, failed) and
+ *                           its recipient's current hc status
+ *   inbox close <id> <note> mark a message closed
+ *   inbox reopen <id> [note] undo a close (a reply, dispatch, Task end or manual close)
+ *   inbox result <HC recipient> <outcome> queue a native program result (t7, a name, or machine/t7)
+ *   inbox exited <since> <exit> (run by child-exit when its child ends) tell this terminal's owner
+ *                           (hc parent, else its starter= label) that it ended, unless it sent any
+ *                           inbox message since <since>
+ *   inbox drop              (run by a sender's `hc exec --on`) queue the envelope on stdin
+ *                           for a terminal in this machine's hc core
+ *   add --json for machine-readable output
+ */
+import { hcJson, hcText, isHc } from "../extensions/pi-hc/core.ts";
+import { hcAddress, peerText } from "./whois.ts";
+import { dropHcEnvelope, dropLocalEnvelope, statusText, targetStatus, type TargetStatus } from "../extensions/pi-agency/inbox/send.ts";
+import {
+  ageText, appendEvent, closeMessage, deliveryState, headlineOf, ID_PATTERN, KINDS, localActor, localMachine, messages, newId, openMessages,
+  readEvents, reopenMessage, thread,
+  type Envelope, type MessageView,
+} from "../extensions/pi-agency/inbox/envelope.ts";
+
+const args = process.argv.slice(2);
+const json = args.includes("--json");
+const [command = "open", ...rest] = args.filter((arg) => arg !== "--json");
+
+function fail(message: string): never {
+  console.error(`inbox: ${message}`);
+  process.exit(1);
+}
+
+// The receiving half of a cross-machine HC send: this core resolves its own
+// terminal now and must be the core the sender addressed. The sender records
+// the send; the receiving Pi records delivery. Prints the queued envelope.
+if (command === "drop") {
+  let env: Envelope;
+  try { env = JSON.parse(await Bun.stdin.text()); } catch (error) { fail(`drop needs one envelope as JSON on stdin (${error})`); }
+  if (env?.v !== 1 || !ID_PATTERN.test(env.id) || !KINDS.includes(env.kind) || typeof env.to?.terminal !== "string" || typeof env.to.core !== "string"
+    || typeof env.from?.terminal !== "string" || typeof env.from.core !== "string") fail("drop needs a version-1 envelope from and to native HC terminals");
+  let to;
+  try { to = await hcAddress(env.to.terminal); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
+  if (to.core !== env.to.core) fail(`addressed to core ${env.to.core}, but this machine's hc core is ${to.core}`);
+  env.to = { ...env.to, terminal: to.terminal, label: to.label };
+  console.log(JSON.stringify({ env, file: dropLocalEnvelope(env) }));
+  process.exit(0);
+}
+
+const local = localMachine();
+const who = (view: MessageView) => `${peerText(view.from, local)} → ${peerText(view.to, local)}`;
+function row(view: MessageView): string {
+  const reply = view.reply_to ? ` ↩ ${view.reply_to}` : "";
+  const state = view.failed ? ` (not delivered: ${view.failed})` : view.closed ? ` (closed: ${view.closed.note})`
+    : view.lifecycle.at(-1)?.event === "reopened" ? " (reopened)" : "";
+  return `${view.id}  ${view.kind.padEnd(7)}  ${who(view).padEnd(40)}  ${ageText(view.at).padStart(4)}  ${view.headline}${reply}${state}`;
+}
+
+// Native program outcomes use the existing queue/journal, without inventing a
+// Pi session for a plain script. No transcript watcher or second transport.
+async function sendResult(recipient: string, body: string): Promise<never> {
+  const env: Envelope = { v: 1, id: newId(), at: new Date().toISOString(), kind: "result", reply_to: null,
+    from: { machine: local, ...await hcAddress(process.env.HC_TERMINAL_ID!) }, to: { machine: local, terminal: recipient, core: "", label: "" }, headline: headlineOf(body), body };
+  try { await dropHcEnvelope(env, recipient); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
+  appendEvent({ op: "send", env });
+  console.log(env.id);
+  process.exit(0);
+}
+
+if (command === "result") {
+  if (!isHc() || !rest[0] || !rest[1]?.trim()) fail("result needs an HC recipient and one outcome line");
+  await sendResult(rest[0], rest[1]);
+}
+
+// A child's end reaches its owner even when it never reported (it died before Pi loaded, crashed,
+// or is a plain program). Only the durable log decides "reported": any message this terminal sent
+// since it started. Its screen tail is evidence for the owner, never the decision.
+if (command === "exited") {
+  const [since, exit] = rest;
+  if (!isHc() || !since || !exit) fail("exited needs the child's start time and its exit");
+  const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
+  const core = (await hcJson(["server", "status"])).core?.id;
+  const reported = readEvents().some((event) => event.op === "send" && event.env.from.terminal === self.address
+    && event.env.from.core === core && event.env.at >= since);
+  if (reported) process.exit(0);
+  const owner = self.parent ?? self.labels?.starter;
+  if (!owner) fail(`${self.name ?? self.address} ended (${exit}) with no inbox report, and has no hc parent or starter label to tell`);
+  let tail: string;
+  try {
+    const lines = (await hcText(["read", self.address, "--lines", "60"])).split("\n").map((line) => line.trimEnd()).filter((line) => /[^\s─━═│┃╭╮╰╯├┤-]/.test(line));
+    tail = lines.slice(-15).map((line) => `    ${line.slice(0, 200)}`).join("\n") || "    (empty)";
+  } catch (error) { tail = `    (not readable: ${error instanceof Error ? error.message : error})`; }
+  const who = `${self.labels?.label ?? self.name ?? self.address} (${[self.name, self.address].filter(Boolean).join(", ")})`;
+  await sendResult(owner, `Child ${who} ended: ${exit}, without any inbox report from it\n`
+    + `It ran in ${self.cwd} on ${local}; a --rm terminal is gone now. Last screen lines:\n${tail}`);
+}
+
+const events = readEvents();
+if (command === "open") {
+  const open = openMessages(events);
+  if (json) console.log(JSON.stringify(open, null, 2));
+  else if (open.length === 0) console.log("No unanswered requests.");
+  else open.forEach((view) => console.log(row(view)));
+} else if (command === "recent") {
+  const count = Number(rest[0] ?? 20);
+  if (!Number.isInteger(count) || count <= 0) fail(`recent takes a positive count, got ${rest[0]}`);
+  const recent = [...messages(events).values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, count);
+  if (json) console.log(JSON.stringify(recent, null, 2));
+  else recent.forEach((view) => console.log(row(view)));
+} else if (command === "thread") {
+  const id = rest[0] ?? fail("thread needs a message id");
+  const views = thread(events, id);
+  if (views.length === 0) fail(`no message ${id} in the local log`);
+  let ownCore: string;
+  try { ownCore = (await hcJson(["server", "status"])).core.id; } catch (error) { fail(`hc server status: ${error instanceof Error ? error.message : error}`); }
+  // Each recipient's status is read once, now, from its own core.
+  const statuses = new Map<string, Promise<TargetStatus | undefined>>();
+  const status = (view: MessageView) => {
+    const key = `${view.to.core}:${view.to.terminal}`;
+    if (!statuses.has(key)) statuses.set(key, targetStatus(view.to, ownCore));
+    return statuses.get(key)!;
+  };
+  const detail = await Promise.all(views.map(async (view) => ({ delivery: deliveryState(view, ownCore), target: await status(view) })));
+  if (json) console.log(JSON.stringify(views.map((view, i) => ({ ...view, ...detail[i] })), null, 2));
+  else views.forEach((view, i) => {
+    console.log(row(view));
+    for (const line of view.body.split("\n")) console.log(`    ${line}`);
+    const { delivery, target } = detail[i]!;
+    console.log(`    ${delivery}${target ? ` · ${peerText(view.to, local)} is ${statusText(target)} now` : ""}`);
+    for (const entry of view.lifecycle) console.log(`    ${entry.event} ${ageText(entry.at)} ago: ${entry.note}`);
+  });
+} else if (command === "close") {
+  const [id, ...note] = rest;
+  if (!id || !ID_PATTERN.test(id)) fail("close needs a message id like m4f1a2c9");
+  if (note.join(" ").trim() === "") fail("close needs a note saying why");
+  if (!messages(events).has(id)) fail(`no message ${id} in the local log`);
+  closeMessage(id, note.join(" "), await localActor());
+  console.log(`Closed ${id}.`);
+} else if (command === "reopen") {
+  const [id, ...note] = rest;
+  if (!id || !ID_PATTERN.test(id)) fail("reopen needs a message id like m4f1a2c9");
+  const view = messages(events).get(id) ?? fail(`no message ${id} in the local log`);
+  if (view.kind !== "request" && view.kind !== "blocked") fail(`${id} is a ${view.kind}; only requests and blocked messages open and close`);
+  if (view.failed) fail(`${id} was never delivered (${view.failed}); send it again instead`);
+  if (!view.closed) fail(`${id} is already open`);
+  reopenMessage(id, note.join(" ").trim() || `was closed: ${view.closed.note}`, await localActor());
+  console.log(`Reopened ${id} (was closed: ${view.closed.note}).`);
+} else {
+  fail(`unknown command ${command} (open, recent, thread, close, reopen, result, exited)`);
+}

@@ -1,0 +1,30 @@
+#!/usr/bin/env bun
+/** Read-only native Pi inventory. No reloads, keys or process changes. */
+import { livePis } from "./live-pis.ts";
+
+const args = process.argv.slice(2);
+if (args.some((arg) => arg !== "--json" && arg !== "--help")) {
+  console.error("Usage: live-pis [--json] (read-only; no reloads)");
+  process.exit(2);
+}
+if (args.includes("--help")) {
+  console.log("Usage: live-pis [--json]\nRead local/connected native Pis, whois labels/roles, statuses and revisions.\nMissing loaded markers are unknown; idle/done does NOT prove an empty editor.\nExit 1 means incomplete inspection (unreachable machine, resource or Pi error).");
+  process.exit(0);
+}
+try {
+  const inventory = await livePis();
+  if (args.includes("--json")) console.log(JSON.stringify(inventory, null, 2));
+  else {
+    for (const machine of inventory.machines) {
+      console.log(`${machine.name}: ${machine.state} · target ${machine.targetRevision?.slice(0, 8) ?? "unknown"}${machine.resourcesDirty ? " · local changes present" : ""}${machine.error ? ` · ${machine.error}` : ""}`);
+      for (const pi of inventory.pis.filter((pi) => pi.machine === machine.name)) {
+        console.log(`  ${pi.label} · ${pi.role} · ${pi.status} · loaded ${pi.loadedRevision?.slice(0, 8) ?? "unknown"} · receiver ${pi.shortLived ? "unsupported child" : pi.reloadCapable ? "loaded" : "not loaded"}${pi.error ? ` · ${pi.error}` : ""}`);
+      }
+    }
+    console.log("Snapshot only: idle/done is not an empty-editor or dialog-safety guarantee.");
+  }
+  process.exit(inventory.machines.some((m) => m.error) || inventory.pis.some((p) => p.error) ? 1 : 0);
+} catch (error) {
+  console.error(`live-pis: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}

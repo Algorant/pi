@@ -1,0 +1,30 @@
+#!/usr/bin/env bun
+/**
+ * whois — the human name of any id (see whois.ts beside this file).
+ *
+ *   whois <id>...             one line each: <label>  (<kind>, <project>, <id>)
+ *   whois --json <id>...      a JSON array, one {label, kind, project, id} per id, or {id, error}
+ *   --cwd DIR                 the checkout whose board and branches bare ids name (default: here)
+ *
+ * Ids: an hc terminal (t17j, homelab-server/t3, a name), a Worker's durable name, a Task (task-81 on
+ * this board, herdra:task-81 on that project's board), an inbox message (m…), Herdra's open item
+ * (oN), a branch. Exits 1 when any id names nothing.
+ */
+import { whois, type Who } from "./whois.ts";
+
+const args = process.argv.slice(2);
+const json = args.includes("--json");
+const cwdAt = args.indexOf("--cwd");
+const cwd = cwdAt >= 0 ? args[cwdAt + 1] : undefined;
+if (cwdAt >= 0 && !cwd) { console.error("whois: --cwd needs a directory"); process.exit(2); }
+const ids = args.filter((arg, index) => arg !== "--json" && (cwdAt < 0 || (index !== cwdAt && index !== cwdAt + 1)));
+if (ids.length === 0) { console.error("whois: give one or more ids (whois [--json] [--cwd DIR] <id>...)"); process.exit(2); }
+
+const results: Array<Who | { id: string; error: string }> = await Promise.all(ids.map((id) =>
+  whois(id, { cwd }).catch((error) => ({ id, error: error instanceof Error ? error.message : String(error) }))));
+if (json) console.log(JSON.stringify(results, null, 2));
+else for (const result of results) {
+  if ("error" in result) console.error(`whois: ${result.error}`);
+  else console.log(`${result.label}  (${[result.kind, result.project, result.id].filter(Boolean).join(", ")})`);
+}
+process.exit(results.some((result) => "error" in result) ? 1 : 0);

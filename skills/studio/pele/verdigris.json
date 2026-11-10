@@ -1,0 +1,21 @@
+{
+  "--pele-bg": "#121515",
+  "--pele-fg": "#ebdbb2",
+  "--pele-muted": "#b4a58a",
+  "--pele-line": "#928374",
+  "--pele-surface": "#292d2a",
+  "--pele-surface-alt": "#32382f",
+  "--pele-border": "#665c54",
+  "--pele-accent": "#8ec07c",
+  "--pele-critical": "#74363d",
+  "--pele-series-1": "#8ec07c",
+  "--pele-series-2": "#83a598",
+  "--pele-series-3": "#e6bf86",
+  "--pele-series-4": "#8989b0",
+  "--pele-series-5": "#74363d",
+  "--pele-series-6": "#689d6a",
+  "--pele-series-7": "#d4be9a",
+  "--pele-series-8": "#458588",
+  "--pele-fg-on-light": "#1d2021",
+  "--pele-fg-on-dark": "#ebdbb2"
+}

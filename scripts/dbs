@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# dbs — one-way full-refresh mirror of a project's DuckDB/SQLite file to the
+# homelab Postgres, through the system `duckdb` CLI (postgres + sqlite
+# extensions). Reads dbs.toml in the current directory (the project root).
+# Reference: ~/.pi/agent/skills/utils/SKILL.md (Databases) and docs/dbs-stack.md.
+#
+# Exit: 0 ok · 1 stale or mismatch · 2 usage or environment error.
+# Output is names, counts, sizes and ages only; never a password or a data
+# value (except `dbs sql`, whose purpose is to show query results).
+set -euo pipefail
+umask 077
+
+DUCKDB=${DBS_DUCKDB:-duckdb}
+SSH_HOST=${DBS_SSH_HOST:-homelab-server}
+PG_TOOL='~/homelab-server/tools/postgres/postgres.py'   # path on $SSH_HOST (expanded there)
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SKILL_DIR=$(readlink -m "$(dirname "$SELF")/../skills/utils")
+
+usage() {
+  cat <<'EOF'
+usage: dbs <command> [options]      (run from the project root, next to dbs.toml)
+
+  bootstrap                          check dbs.toml, the duckdb CLI and extensions, the
+                                     Postgres database/role and the PGPASSWORD reference;
+                                     prints the next step for anything missing
+  mirror [--source N] [--via-ssh] [--dry-run]
+                                     full refresh of every table into Postgres in one
+                                     transaction; --dry-run lists tables and row counts
+                                     and writes nothing
+  status [--source N] [--via-ssh]    last mirror run, per-table counts, fresh or stale
+  verify [--source N] [--via-ssh] [--deep]
+                                     per-table row counts; --deep adds a two-way EXCEPT
+  sql [--local] [--source N] [--via-ssh] [--csv] "<select ...>"
+                                     read-only query against the mirror (or --local the
+                                     source file); prints query results by design
+
+The password reaches dbs only as PGPASSWORD:  fnox exec -- dbs mirror
+--via-ssh tunnels through $DBS_SSH_HOST (default homelab-server) when Postgres is not
+reachable directly. Environment: DBS_DUCKDB (CLI path), DBS_SSH_HOST.
+Exit: 0 ok · 1 stale or mismatch · 2 usage or environment error.
+EOF
+}
+
+die() {  # die MESSAGE [NEXT STEP]
+  echo "dbs: $1" >&2
+  [[ -z ${2:-} ]] || echo "  next: $2" >&2
+  exit 2
+}
+
+WORK=
+TUNNEL_SOCK=
+cleanup() {
+  if [[ -n $TUNNEL_SOCK && -S $TUNNEL_SOCK ]]; then
+    ssh -S "$TUNNEL_SOCK" -O exit "$SSH_HOST" >/dev/null 2>&1 || true
+  fi
+  [[ -z $WORK ]] || rm -rf "$WORK"
+}
+trap cleanup EXIT
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/dbs.XXXXXX")
+
+# ── dbs.toml: a strict subset (strings, string arrays, [[source]] tables) ─────
+PROJECT= PGH=db.example.com PGP=5432
+S_NAME=() S_ENGINE=() S_PATH=() S_SCHEMA=() S_EXCLUDE=()
+
+parse_config() {
+  [[ -f dbs.toml ]] || die "dbs.toml not found in $PWD" "run dbs from the project root, or add dbs.toml (see $SKILL_DIR/SKILL.md, Databases)"
+  local line n=0 idx=-1 key val s items item re_str='^"([^"\\#]*)"$' re_arr='^\[(.*)\]$' re_kv='^([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$'
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line%%#*}                                  # comments; values may not contain '#'
+    line=${line#"${line%%[![:space:]]*}"}; line=${line%"${line##*[![:space:]]}"}
+    [[ -n $line ]] || continue
+    if [[ $line == '[[source]]' ]]; then
+      idx=$((idx + 1)); S_NAME[idx]= S_ENGINE[idx]= S_PATH[idx]= S_SCHEMA[idx]= S_EXCLUDE[idx]=
+      continue
+    fi
+    [[ $line =~ $re_kv ]] || die "dbs.toml line $n is not 'key = value' or [[source]]" "dbs.toml supports only the keys in $SKILL_DIR/docs/dbs-stack.md"
+    key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    if [[ $val =~ $re_str ]]; then
+      s=${BASH_REMATCH[1]}
+    elif [[ $key == exclude && $val =~ $re_arr ]]; then
+      s= items=${BASH_REMATCH[1]}
+      IFS=, read -ra items <<<"$items"
+      for item in "${items[@]}"; do
+        [[ -z ${item//[[:space:]]/} ]] && continue
+        [[ $item =~ ^[[:space:]]*\"([A-Za-z_][A-Za-z0-9_]*)\"[[:space:]]*$ ]] || die "dbs.toml line $n: exclude must be a list of table names in double quotes" "e.g. exclude = [\"scratch\"]"
+        s+="${s:+ }${BASH_REMATCH[1]}"
+      done
+    elif [[ $key == port && $val =~ ^[0-9]+$ ]]; then
+      s=$val
+    else
+      die "dbs.toml line $n: unsupported value for '$key'" "use double-quoted strings (no # or backslash), or a string list for exclude"
+    fi
+    if ((idx < 0)); then
+      case $key in
+        project) PROJECT=$s ;; host) PGH=$s ;; port) PGP=$s ;;
+        *) die "dbs.toml line $n: unknown top-level key '$key'" "allowed before [[source]]: project, host, port" ;;
+      esac
+    else
+      case $key in
+        name) S_NAME[idx]=$s ;; engine) S_ENGINE[idx]=$s ;; path) S_PATH[idx]=$s ;;
+        schema) S_SCHEMA[idx]=$s ;; exclude) S_EXCLUDE[idx]=$s ;;
+        *) die "dbs.toml line $n: unknown source key '$key'" "allowed in [[source]]: name, engine, path, schema, exclude" ;;
+      esac
+    fi
+  done < dbs.toml
+
+  [[ $PROJECT =~ ^[a-z][a-z0-9_]*$ ]] || die "dbs.toml: project must be a lowercase slug [a-z][a-z0-9_]*" "set project = \"<name>\" (the Postgres database and role name)"
+  [[ $PGH =~ ^[A-Za-z0-9.-]+$ ]] || die "dbs.toml: host has unsupported characters" "use a plain host name or IP"
+  ((idx >= 0)) || die "dbs.toml: no [[source]] table" "add a [[source]] with name, engine and path"
+  local i j
+  for i in "${!S_NAME[@]}"; do
+    [[ ${S_NAME[i]} =~ ^[A-Za-z0-9_-]+$ ]] || die "dbs.toml: source $((i + 1)) needs a name (letters, digits, - _)" "set name = \"...\""
+    [[ ${S_ENGINE[i]} == duckdb || ${S_ENGINE[i]} == sqlite ]] || die "dbs.toml: source ${S_NAME[i]}: engine must be \"duckdb\" or \"sqlite\"" "fix engine"
+    [[ -n ${S_PATH[i]} && ${S_PATH[i]} != *\'* ]] || die "dbs.toml: source ${S_NAME[i]}: path is missing or contains a quote" "set path = \"data/<file>\""
+    if [[ -z ${S_SCHEMA[i]} ]]; then
+      ((i == 0)) || die "dbs.toml: source ${S_NAME[i]} needs its own schema (only the first source defaults to public)" "set schema = \"<name>\""
+      S_SCHEMA[i]=public
+    fi
+    [[ ${S_SCHEMA[i]} =~ ^[a-z_][a-z0-9_]*$ ]] || die "dbs.toml: source ${S_NAME[i]}: schema must match [a-z_][a-z0-9_]*" "fix schema"
+    for ((j = 0; j < i; j++)); do
+      [[ ${S_NAME[j]} != "${S_NAME[i]}" ]] || die "dbs.toml: duplicate source name ${S_NAME[i]}" "names must be unique"
+      [[ ${S_SCHEMA[j]} != "${S_SCHEMA[i]}" ]] || die "dbs.toml: sources ${S_NAME[j]} and ${S_NAME[i]} share schema ${S_SCHEMA[i]}" "give each source its own schema"
+    done
+  done
+}
+
+# ── options ───────────────────────────────────────────────────────────────────
+DRY=0 VIA=0 DEEP=0 LOCAL=0 CSV=0 SRCSEL= POS=()
+parse_opts() {
+  while (($#)); do
+    case $1 in
+      --dry-run) DRY=1 ;; --via-ssh) VIA=1 ;; --deep) DEEP=1 ;; --local) LOCAL=1 ;; --csv) CSV=1 ;;
+      --source) [[ -n ${2:-} ]] || die "--source needs a name" "dbs $CMD --source <name>"; SRCSEL=$2; shift ;;
+      -h | --help) usage; exit 0 ;;
+      -*) die "unknown option $1 for dbs $CMD" "dbs --help" ;;
+      *) POS+=("$1") ;;
+    esac
+    shift
+  done
+}
+allow_opts() {  # allow_opts FLAG...   every other flag set is an error
+  local f
+  for f in DRY VIA DEEP LOCAL CSV; do
+    [[ ${!f} == 0 || " $* " == *" $f "* ]] || die "option not valid for dbs $CMD" "dbs --help"
+  done
+  [[ -z $SRCSEL || " $* " == *" SRC "* ]] || die "--source is not valid for dbs $CMD" "dbs --help"
+}
+
+SEL=()
+select_sources() {  # fills SEL with source indexes
+  local i
+  if [[ -n $SRCSEL ]]; then
+    for i in "${!S_NAME[@]}"; do [[ ${S_NAME[i]} == "$SRCSEL" ]] && SEL=("$i"); done
+    ((${#SEL[@]})) || die "no source named $SRCSEL in dbs.toml" "sources: ${S_NAME[*]}"
+  else
+    SEL=("${!S_NAME[@]}")
+  fi
+}
+
+# ── duckdb CLI, source files, Postgres route ──────────────────────────────────
+need_cli() {
+  command -v "$DUCKDB" >/dev/null 2>&1 || die "duckdb CLI not found ($DUCKDB)" "install it (Arch: pacman -S duckdb; tracked in the algomarchy package list) or set DBS_DUCKDB"
+}
+
+check_source_file() {  # check_source_file IDX   exists, matches its engine, CLI not older than the writer
+  local i=$1 f=${S_PATH[$1]} head magic writer cli
+  [[ -f $f ]] || die "source ${S_NAME[i]}: $f not found" "run dbs from the project root, or fix path in dbs.toml"
+  head=$(LC_ALL=C dd if="$f" bs=1 count=15 2>/dev/null | tr -d '\0') || true
+  if [[ $head == 'SQLite format 3' ]]; then
+    [[ ${S_ENGINE[i]} == sqlite ]] || die "source ${S_NAME[i]}: $f is a SQLite file but engine is duckdb" "set engine = \"sqlite\""
+    return 0
+  fi
+  [[ ${S_ENGINE[i]} == duckdb ]] || die "source ${S_NAME[i]}: $f is not a SQLite file but engine is sqlite" "set engine = \"duckdb\" or fix path"
+  magic=$(LC_ALL=C dd if="$f" bs=1 skip=8 count=4 2>/dev/null | tr -d '\0') || true
+  [[ $magic == DUCK ]] || die "source ${S_NAME[i]}: $f is not a DuckDB file" "fix path and engine in dbs.toml"
+  writer=$(LC_ALL=C dd if="$f" bs=1 skip=52 count=32 2>/dev/null | tr -d '\0') || true
+  [[ $writer =~ ^v([0-9]+\.[0-9]+\.[0-9]+) ]] || die "source ${S_NAME[i]}: cannot read the DuckDB version that wrote $f" "check the file is intact"
+  writer=${BASH_REMATCH[1]}
+  cli=$("$DUCKDB" --version | awk '{print $1; exit}')
+  cli=${cli#v}
+  [[ $(printf '%s\n%s\n' "$writer" "$cli" | sort -V | tail -1) == "$cli" ]] \
+    || die "duckdb CLI $cli is older than the DuckDB $writer that wrote ${S_PATH[i]}" "upgrade the duckdb CLI to $writer or newer (omarchy update / pacman -Syu duckdb), then re-run"
+}
+
+PGHOST_USED= PGPORT_USED= NOPG=0
+tcp_open() { timeout 3 bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2" >/dev/null 2>&1; }
+
+pg_route() {  # sets PGHOST_USED/PGPORT_USED; opens the tunnel for --via-ssh
+  [[ -n ${PGPASSWORD:-} ]] || die "PGPASSWORD is not set" "run through fnox: fnox exec -- dbs $CMD   (fnox.toml must reference <project>--default--pg-password; see dbs bootstrap)"
+  if ((VIA)); then
+    local lp tries=0
+    command -v ssh >/dev/null 2>&1 || die "ssh not found" "install openssh"
+    while :; do
+      lp=$((20000 + RANDOM % 30000))
+      tcp_open 127.0.0.1 "$lp" || break
+      tries=$((tries + 1)); ((tries < 20)) || die "no free local port for the tunnel" "retry"
+    done
+    TUNNEL_SOCK=$WORK/ssh.sock
+    ssh -o BatchMode=yes -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -M -S "$TUNNEL_SOCK" -f -N \
+      -L "127.0.0.1:$lp:$PGH:$PGP" "$SSH_HOST" 2>"$WORK/ssh.err" \
+      || die "could not open the ssh tunnel through $SSH_HOST" "check 'ssh $SSH_HOST true' works without a prompt (set DBS_SSH_HOST for another gateway)"
+    PGHOST_USED=127.0.0.1 PGPORT_USED=$lp
+    tcp_open 127.0.0.1 "$lp" || die "ssh tunnel through $SSH_HOST opened but $PGH:$PGP is not reachable from there" "check the host and port in dbs.toml and that Postgres is up (homelab-server)"
+  else
+    tcp_open "$PGH" "$PGP" || die "Postgres $PGH:$PGP is not reachable from this machine" "if you are off the LAN, re-run with --via-ssh (tunnels through $SSH_HOST)"
+    PGHOST_USED=$PGH PGPORT_USED=$PGP
+  fi
+}
+
+# ── SQL generation ────────────────────────────────────────────────────────────
+Q="'"
+sq() { printf '%s' "${1//$Q/$Q$Q}"; }                       # for single-quoted SQL strings
+pgexec() { printf "CALL postgres_execute('pg', '%s');\n" "$(sq "$1")"; }
+qs() { printf '"%s"."%s"' "$1" "$2"; }                      # schema.table, identifiers pre-validated
+
+prelude() {  # prelude IDX pg|nopg [rw]
+  local i=$1 ro=', READ_ONLY'
+  [[ ${3:-} == rw ]] && ro=
+  [[ $2 == pg ]] && printf 'INSTALL postgres; LOAD postgres;\n'
+  [[ ${S_ENGINE[i]} == sqlite ]] && printf 'INSTALL sqlite; LOAD sqlite;\n'
+  if [[ ${S_ENGINE[i]} == sqlite ]]; then
+    printf "ATTACH '%s' AS src (TYPE sqlite, READ_ONLY);\n" "${S_PATH[i]}"
+  else
+    printf "ATTACH '%s' AS src (READ_ONLY);\n" "${S_PATH[i]}"
+  fi
+  if [[ $2 == pg ]]; then
+    printf "ATTACH 'dbname=%s host=%s port=%s user=%s' AS pg (TYPE postgres%s);\n" \
+      "$PROJECT" "$PGHOST_USED" "$PGPORT_USED" "$PROJECT" "$ro"
+  fi
+}
+
+duck() {  # duck SQLFILE   stdout -> $WORK/out, stderr -> $WORK/err
+  "$DUCKDB" -no-init -bail -noheader -list <"$1" >"$WORK/out" 2>"$WORK/err"
+}
+
+# Failure report: category and stage only, never the raw DuckDB text (it can
+# carry connection details or data values). The full text goes to a 0600 log.
+fail_run() {  # fail_run PHASE
+  local phase=$1 stage log hint= err
+  stage=$(grep '^STAGE|' "$WORK/out" 2>/dev/null | tail -1 | cut -d'|' -f2- || true)
+  log=${TMPDIR:-/tmp}/dbs-$PROJECT-error.log
+  { cat "$WORK/out"; cat "$WORK/err"; } >"$log" 2>/dev/null || true
+  chmod 600 "$log" 2>/dev/null || true
+  err=$(cat "$WORK/err")
+  echo "dbs: $phase failed${stage:+ at stage: $stage}" >&2
+  shopt -s nocasematch
+  if   [[ $err =~ password\ authentication\ failed|no\ password\ supplied|fe_sendauth ]]; then
+    hint="Postgres rejected the password for role $PROJECT. next: check the Proton item ${PROJECT}--default--pg-password matches the role (rotated? re-run the store-pg-password script) and run through fnox exec --"
+  elif [[ $err =~ database\ .*does\ not\ exist|role\ .*does\ not\ exist ]]; then
+    hint="the Postgres database or role $PROJECT does not exist. next: dbs bootstrap (homelab-server creates it with postgres.py create $PROJECT)"
+  elif [[ $err =~ Connection\ refused|could\ not\ connect|timeout\ expired|could\ not\ translate|No\ route\ to\ host|Network\ is\ unreachable|connection\ to\ server ]]; then
+    hint="Postgres could not be reached. next: re-run with --via-ssh, or check the LAN and that Postgres is up"
+  elif [[ $err =~ Could\ not\ set\ lock|Conflicting\ lock|database\ is\ locked ]]; then
+    hint="another process holds the source file open. next: wait for the ingest or app writer to finish, then re-run"
+  elif [[ $err =~ newer\ version|version\ number|storage\ version|Serialization\ Error ]]; then
+    hint="the duckdb CLI cannot read this file (written by a newer DuckDB). next: upgrade the duckdb CLI, then re-run"
+  elif [[ $err =~ Failed\ to\ download|extension.*(not\ found|HTTP) ]]; then
+    hint="the postgres/sqlite extension could not be installed. next: connect to the internet once per duckdb version (INSTALL postgres; INSTALL sqlite) and re-run"
+  elif [[ $err =~ depend|not\ a\ table|wrong\ object\ type ]]; then
+    hint="an object in the mirror schema (a view or other dependent) is in the way of replacing a table. next: move views and dependents to another schema, never into the mirror schema"
+  elif [[ $err =~ null\ value|not-null|could\ not\ create\ unique|duplicate\ key|primary\ key ]]; then
+    hint="a primary key could not be created in Postgres (null or duplicate key values in the source table named above). next: fix the source data or exclude the table in dbs.toml"
+  elif [[ $err =~ permission\ denied ]]; then
+    hint="the role lacks permission in the target schema. next: ask homelab-server to check ownership of the schema for role $PROJECT"
+  fi
+  shopt -u nocasematch
+  [[ -z $hint ]] || echo "  cause: $hint" >&2
+  if [[ $phase == mirror && $stage != commit && $stage != done ]]; then
+    echo "  the previous mirror is intact: the whole run is one Postgres transaction that was rolled back" >&2
+  elif [[ $phase == mirror ]]; then
+    echo "  next: run dbs status to see whether the commit landed" >&2
+  fi
+  echo "  log (raw DuckDB text; may contain data values; delete it when done): $log" >&2
+  exit 2
+}
+
+# Introspect one source and its mirror schema. Fills:
+#   TABLES   mirrored table names (source base tables minus exclude)
+#   PGT      table names currently in the mirror schema (including _mirror_*)
+#   PK[t]    comma-separated primary-key columns
+introspect() {  # introspect IDX
+  local i=$1 tag a b t ex
+  check_source_file "$i"
+  {
+    prelude "$i" "$( ((NOPG)) && echo nopg || echo pg )"
+    cat <<EOF
+SELECT 'T|' || table_name FROM duckdb_tables() WHERE database_name = 'src' AND schema_name = 'main' AND NOT starts_with(table_name, 'sqlite_') ORDER BY 1;
+SELECT 'K|' || table_name || '|' || array_to_string(constraint_column_names, ',') FROM duckdb_constraints() WHERE database_name = 'src' AND schema_name = 'main' AND constraint_type = 'PRIMARY KEY' ORDER BY 1;
+EOF
+    ((NOPG)) || echo "SELECT 'P|' || table_name FROM duckdb_tables() WHERE database_name = 'pg' AND schema_name = '${S_SCHEMA[i]}' ORDER BY 1;"
+  } >"$WORK/introspect.sql"
+  duck "$WORK/introspect.sql" || fail_run introspection
+  TABLES=() PGT=(); PK=()
+  local -a all=()
+  while IFS='|' read -r tag a b; do
+    case $tag in
+      T) all+=("$a") ;; K) PK[$a]=$b ;; P) PGT+=("$a") ;;
+    esac
+  done <"$WORK/out"
+  for t in "${all[@]}"; do
+    [[ $t =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "source ${S_NAME[i]}: a table name has characters dbs cannot quote safely (letters, digits, _ only)" "rename it in the source or exclude it in dbs.toml (exclude must name it)"
+    [[ " ${S_EXCLUDE[i]} " == *" $t "* ]] || TABLES+=("$t")
+  done
+  for t in "${TABLES[@]}"; do
+    [[ -z ${PK[$t]:-} || ${PK[$t]} =~ ^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$ ]] \
+      || die "source ${S_NAME[i]}: table $t has a primary-key column name dbs cannot quote safely" "rename the column or exclude the table in dbs.toml"
+  done
+}
+
+in_list() { local x=$1; shift; local y; for y in "$@"; do [[ $y == "$x" ]] && return 0; done; return 1; }
+
+count_stmts() {  # count_stmts TAG ALIAS SCHEMA TABLE...   -> 'C|TAG|table|n' rows
+  local tag=$1 al=$2 sc=$3 t; shift 3
+  for t in "$@"; do printf "SELECT 'C|%s|%s|' || count(*) FROM %s.%s;\n" "$tag" "$t" "$al" "$(qs "$sc" "$t")"; done
+}
+
+declare -A SRC_N PG_N PK
+read_counts() {  # fills SRC_N and PG_N from $WORK/out
+  local tag w t n
+  SRC_N=() PG_N=()
+  while IFS='|' read -r tag w t n; do
+    [[ $tag == C ]] || continue
+    if [[ $w == src ]]; then SRC_N[$t]=$n; else PG_N[$t]=$n; fi
+  done <"$WORK/out"
+}
+
+human() { numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "$1 B"; }
+age_text() {  # seconds
+  local s=$1
+  if ((s < 90)); then echo "${s}s"; elif ((s < 5400)); then echo "$((s / 60))m"
+  elif ((s < 129600)); then echo "$((s / 3600))h"; else echo "$((s / 86400))d"; fi
+}
+src_mtime() {  # newest mtime of the file and its -wal / .wal
+  local f=${S_PATH[$1]} m=0 x t
+  for x in "$f" "$f-wal" "$f.wal"; do
+    [[ -e $x ]] || continue
+    t=$(stat -c %Y "$x"); ((t > m)) && m=$t
+  done
+  echo "$m"
+}
+
+pg_last_run_stmt() {  # emits L| and R| rows for the newest _mirror_runs row
+  local s=${S_SCHEMA[$1]}
+  cat <<EOF
+SELECT 'L|' || e || '|' || sec || '|' || src FROM postgres_query('pg', 'SELECT floor(extract(epoch FROM finished_at))::bigint AS e, round(seconds::numeric, 2) AS sec, source AS src FROM "$s"._mirror_runs ORDER BY finished_at DESC LIMIT 1');
+EOF
+}
+
+# ── commands ──────────────────────────────────────────────────────────────────
+cmd_mirror() {
+  allow_opts DRY VIA SRC
+  select_sources; need_cli
+  # A dry run writes nothing, so without PGPASSWORD it checks the source side only.
+  if ((DRY)) && [[ -z ${PGPASSWORD:-} ]]; then NOPG=1; else pg_route; fi
+  local i t pk start rc total_rows
+  for i in "${SEL[@]}"; do
+    introspect "$i"
+    local s=${S_SCHEMA[i]} dropped=()
+    for t in "${PGT[@]}"; do
+      [[ $t == _mirror_* ]] && continue
+      in_list "$t" "${TABLES[@]}" || dropped+=("$t")
+    done
+    # dropped-table names come from Postgres: validate before they enter SQL
+    for t in "${dropped[@]}"; do
+      [[ $t =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "mirror schema $s has a table whose name dbs cannot quote safely" "ask homelab-server to drop it or clean the schema"
+    done
+    echo "mirror ${S_NAME[i]}: ${S_ENGINE[i]} ${S_PATH[i]} -> $PGH:$PGP/$PROJECT schema $s"
+    if ((DRY)); then
+      { prelude "$i" "$( ((NOPG)) && echo nopg || echo pg )"; count_stmts src src main "${TABLES[@]}"; } >"$WORK/dry.sql"
+      duck "$WORK/dry.sql" || fail_run "dry-run"
+      read_counts
+      total_rows=0
+      for t in "${TABLES[@]}"; do
+        printf '  would mirror  %-28s %s rows%s\n' "$t" "${SRC_N[$t]:-?}" "${PK[$t]:+  (primary key: ${PK[$t]})}"
+        total_rows=$((total_rows + ${SRC_N[$t]:-0}))
+      done
+      for t in "${dropped[@]}"; do printf '  would drop    %s\n' "$t"; done
+      ((NOPG)) && echo "  Postgres check skipped: PGPASSWORD is not set, so tables the mirror would drop are not listed (run through fnox exec -- for the full dry run)"
+      echo "dry run: ${#TABLES[@]} tables, $total_rows rows; nothing written"
+      continue
+    fi
+    start=$(date +%s) start_ts=$(date +%s.%N)
+    {
+      prelude "$i" pg rw
+      echo "SELECT 'STAGE|begin';"
+      echo "BEGIN;"
+      [[ $s == public ]] || printf 'CREATE SCHEMA IF NOT EXISTS pg."%s";\n' "$s"
+      for t in "${TABLES[@]}"; do
+        echo "SELECT 'STAGE|table $t';"
+        printf 'CREATE OR REPLACE TABLE pg.%s AS SELECT * FROM src.%s;\n' "$(qs "$s" "$t")" "$(qs main "$t")"
+        if [[ -n ${PK[$t]:-} ]]; then
+          pk=$(printf '"%s", ' ${PK[$t]//,/ }); pk=${pk%, }
+          pgexec "ALTER TABLE $(qs "$s" "$t") ADD PRIMARY KEY ($pk)"
+        fi
+      done
+      for t in "${dropped[@]}"; do
+        echo "SELECT 'STAGE|drop $t';"
+        pgexec "DROP TABLE IF EXISTS $(qs "$s" "$t")"
+      done
+      echo "SELECT 'STAGE|record';"
+      pgexec "CREATE TABLE IF NOT EXISTS \"$s\"._mirror_runs (finished_at timestamptz, seconds double precision, source text, tables jsonb)"
+      local union="SELECT ''::text AS k, 0::bigint AS c WHERE false"
+      for t in "${TABLES[@]}"; do union+=" UNION ALL SELECT '$t', count(*) FROM $(qs "$s" "$t")"; done
+      pgexec "INSERT INTO \"$s\"._mirror_runs SELECT to_timestamp($start_ts), extract(epoch FROM clock_timestamp() - now())::double precision, '${S_ENGINE[i]}', COALESCE(jsonb_object_agg(k, c), '{}'::jsonb) FROM ($union) x"
+      pgexec "COMMENT ON SCHEMA \"$s\" IS 'one-way mirror of ${S_PATH[i]}; overwritten by dbs mirror'"
+      echo "SELECT 'STAGE|commit';"
+      echo "COMMIT;"
+      echo "SELECT 'STAGE|done';"
+      printf "SELECT 'R|' || k || '|' || c FROM postgres_query('pg', 'SELECT j.key AS k, j.value::text AS c FROM (SELECT tables FROM \"%s\"._mirror_runs ORDER BY finished_at DESC LIMIT 1) r, jsonb_each(r.tables) j ORDER BY 1');\n" "$s"
+    } >"$WORK/mirror.sql"
+    duck "$WORK/mirror.sql" || fail_run mirror
+    total_rows=0
+    local tag k n
+    while IFS='|' read -r tag k n; do
+      [[ $tag == R ]] || continue
+      printf '  mirrored  %-28s %s rows\n' "$k" "$n"; total_rows=$((total_rows + n))
+    done <"$WORK/out"
+    for t in "${dropped[@]}"; do printf '  dropped   %s\n' "$t"; done
+    echo "mirror ${S_NAME[i]}: ${#TABLES[@]} tables, $total_rows rows in $(($(date +%s) - start))s; committed"
+  done
+}
+
+cmd_status() {
+  allow_opts VIA SRC
+  select_sources; need_cli; pg_route
+  local i t stale_any=0
+  for i in "${SEL[@]}"; do
+    introspect "$i"
+    local s=${S_SCHEMA[i]} stale=() has_runs=0 mt now last=0 secs= eng= line tag a b c
+    in_list _mirror_runs "${PGT[@]}" && has_runs=1
+    {
+      prelude "$i" pg
+      count_stmts src src main "${TABLES[@]}"
+      local pgtabs=()
+      for t in "${TABLES[@]}"; do in_list "$t" "${PGT[@]}" && pgtabs+=("$t"); done
+      count_stmts pg pg "$s" "${pgtabs[@]}"
+      if ((has_runs)); then pg_last_run_stmt "$i"; fi
+    } >"$WORK/status.sql"
+    duck "$WORK/status.sql" || fail_run status
+    read_counts
+    while IFS='|' read -r tag a b c; do [[ $tag == L ]] && { last=$a secs=$b eng=$c; }; done <"$WORK/out"
+    mt=$(src_mtime "$i"); now=$(date +%s)
+    echo "source ${S_NAME[i]}: ${S_ENGINE[i]} ${S_PATH[i]}, $(human "$(stat -c %s "${S_PATH[i]}")"), modified $(age_text $((now - mt))) ago"
+    local match=0 diff=0 missing=0 extra=0
+    for t in "${TABLES[@]}"; do
+      if [[ -z ${PG_N[$t]:-} ]]; then missing=$((missing + 1))
+      elif [[ ${PG_N[$t]} == "${SRC_N[$t]}" ]]; then match=$((match + 1))
+      else diff=$((diff + 1)); stale+=("rows differ in $t (source ${SRC_N[$t]}, mirror ${PG_N[$t]})"); fi
+    done
+    ((missing)) && stale+=("$missing table(s) not in the mirror")
+    for t in "${PGT[@]}"; do [[ $t == _mirror_* ]] || in_list "$t" "${TABLES[@]}" || extra=$((extra + 1)); done
+    ((extra)) && stale+=("$extra table(s) in the mirror no longer in the source")
+    echo "  tables: ${#TABLES[@]} in source, $match with matching row counts"
+    if ((has_runs)); then
+      echo "  last mirror: $(age_text $((now - last))) ago, ${secs}s, from $eng"
+      ((mt > last)) && stale+=("source modified after the last mirror")
+    else
+      echo "  last mirror: never"; stale+=("never mirrored")
+    fi
+    if ((${#stale[@]})); then
+      echo "  state: stale"; printf '    - %s\n' "${stale[@]}"
+      echo "  next: fnox exec -- dbs mirror --source ${S_NAME[i]}"; stale_any=1
+    else
+      echo "  state: fresh"
+    fi
+  done
+  return "$stale_any"
+}
+
+cmd_verify() {
+  allow_opts VIA DEEP SRC
+  select_sources; need_cli; pg_route
+  local i t bad_any=0 tag a b c d
+  for i in "${SEL[@]}"; do
+    introspect "$i"
+    local s=${S_SCHEMA[i]} common=() bad=0
+    for t in "${TABLES[@]}"; do in_list "$t" "${PGT[@]}" && common+=("$t"); done
+    {
+      prelude "$i" pg
+      count_stmts src src main "${common[@]}"
+      count_stmts pg pg "$s" "${common[@]}"
+      if ((DEEP)); then
+        for t in "${common[@]}"; do
+          printf "SELECT 'D|%s|' || (SELECT count(*) FROM (SELECT * FROM src.%s EXCEPT ALL SELECT * FROM pg.%s)) || '|' || (SELECT count(*) FROM (SELECT * FROM pg.%s EXCEPT ALL SELECT * FROM src.%s));\n" \
+            "$t" "$(qs main "$t")" "$(qs "$s" "$t")" "$(qs "$s" "$t")" "$(qs main "$t")"
+        done
+      fi
+    } >"$WORK/verify.sql"
+    duck "$WORK/verify.sql" || fail_run verify
+    read_counts
+    declare -A DIFF=()
+    while IFS='|' read -r tag a b c; do [[ $tag == D ]] && DIFF[$a]="$b $c"; done <"$WORK/out"
+    echo "verify ${S_NAME[i]}: ${S_ENGINE[i]} ${S_PATH[i]} vs $PROJECT.$s"
+    for t in "${TABLES[@]}"; do
+      if ! in_list "$t" "${PGT[@]}"; then printf '  MISSING  %-28s not in the mirror\n' "$t"; bad=1; continue; fi
+      local line="src=${SRC_N[$t]} pg=${PG_N[$t]}" flag=ok
+      [[ ${SRC_N[$t]} == "${PG_N[$t]}" ]] || { flag=DIFF; bad=1; }
+      if ((DEEP)); then
+        read -r a b <<<"${DIFF[$t]}"
+        line+=" only-in-source=$a only-in-mirror=$b"
+        [[ $a == 0 && $b == 0 ]] || { flag=DIFF; bad=1; }
+      fi
+      printf '  %-8s %-28s %s\n' "$flag" "$t" "$line"
+    done
+    for t in "${PGT[@]}"; do
+      [[ $t == _mirror_* ]] || in_list "$t" "${TABLES[@]}" || { printf '  EXTRA    %-28s in the mirror, not in the source\n' "$t"; bad=1; }
+    done
+    if ((bad)); then
+      echo "verify ${S_NAME[i]}: differences found. next: fnox exec -- dbs mirror --source ${S_NAME[i]}"; bad_any=1
+    else
+      echo "verify ${S_NAME[i]}: identical"
+      if ((DEEP)); then echo "  (deep: 0 differing rows in both directions on every table)"; fi
+    fi
+  done
+  return "$bad_any"
+}
+
+cmd_sql() {
+  allow_opts VIA LOCAL CSV SRC
+  [[ ${#POS[@]} -eq 1 ]] || die 'dbs sql needs one query' 'dbs sql "select count(*) from <table>"'
+  local q=${POS[0]} first
+  first=$(printf '%s' "$q" | tr -s '[:space:]' ' ' | sed 's/^ *//' | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
+  case $first in
+    select | with | from | describe | show | summarize | explain) ;;
+    *) die "dbs sql runs read-only queries only (select, with, from, describe, show, summarize, explain)" "use the project's own tooling to change data" ;;
+  esac
+  select_sources
+  ((${#SEL[@]} == 1)) || die "several sources in dbs.toml" "pick one with --source <name> (${S_NAME[*]})"
+  need_cli
+  local i=${SEL[0]} flags=(-no-init -bail)
+  ((CSV)) && flags+=(-csv)
+  check_source_file "$i"
+  {
+    if ((LOCAL)); then
+      prelude "$i" nopg
+      echo "USE src.main;"
+    else
+      pg_route
+      prelude "$i" pg
+      printf 'USE pg."%s";\n' "${S_SCHEMA[i]}"
+    fi
+    echo "SET enable_external_access = false;"
+    printf '%s;\n' "${q%;}"
+  } >"$WORK/q.sql"
+  if ! "$DUCKDB" "${flags[@]}" <"$WORK/q.sql" 2>"$WORK/err"; then
+    # a query error is the caller's own text; infrastructure causes get a hint
+    cat "$WORK/err" >&2
+    : >"$WORK/out"
+    fail_run sql
+  fi
+}
+
+cmd_bootstrap() {
+  allow_opts
+  parse_config
+  local bad=0 i engines=" " row ok_
+  echo "bootstrap $PROJECT (dbs.toml: ${#S_NAME[@]} source(s), target $PGH:$PGP)"
+  for i in "${!S_NAME[@]}"; do
+    engines+="${S_ENGINE[i]} "
+    if [[ -f ${S_PATH[i]} ]]; then echo "  ok       source ${S_NAME[i]}: ${S_PATH[i]} found"
+    else echo "  missing  source ${S_NAME[i]}: ${S_PATH[i]} not found (path is relative to the project root)"; bad=1; fi
+  done
+  if command -v "$DUCKDB" >/dev/null 2>&1; then
+    echo "  ok       duckdb CLI $("$DUCKDB" --version | awk '{print $1}')"
+    local ext="INSTALL postgres; LOAD postgres;"
+    [[ $engines == *" sqlite "* ]] && ext+=" INSTALL sqlite; LOAD sqlite;"
+    if printf '%s\n' "$ext" | "$DUCKDB" -no-init -bail >/dev/null 2>"$WORK/err"; then
+      echo "  ok       extensions load"
+    else
+      echo "  missing  postgres/sqlite extensions did not load. next: connect to the internet once and re-run (DuckDB downloads them per CLI version)"; bad=1
+    fi
+    for i in "${!S_NAME[@]}"; do
+      [[ -f ${S_PATH[i]} && ${S_ENGINE[i]} == duckdb ]] || continue
+      (check_source_file "$i") 2>"$WORK/ver.err" \
+        && echo "  ok       duckdb CLI is not older than the writer of ${S_PATH[i]}" \
+        || { echo "  missing  $(head -1 "$WORK/ver.err" | sed 's/^dbs: //'). $(sed -n 's/^  next: /next: /p' "$WORK/ver.err" | head -1)"; bad=1; }
+    done
+  else
+    echo "  missing  duckdb CLI. next: install it (Arch: pacman -S duckdb; tracked in the algomarchy package list)"; bad=1
+  fi
+  if tcp_open "$PGH" "$PGP"; then echo "  ok       $PGH:$PGP reachable directly"
+  else echo "  note     $PGH:$PGP not reachable directly; mirror, status, verify and sql need --via-ssh from here"; fi
+  if row=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$SSH_HOST" "$PG_TOOL list" 2>/dev/null); then
+    ok_=$(awk -v p="$PROJECT" '$1 == p {print $2, $NF; exit}' <<<"$row")
+    if [[ $ok_ == "yes yes" ]]; then echo "  ok       Postgres database and role $PROJECT exist (checked over ssh $SSH_HOST)"
+    else
+      echo "  missing  Postgres database/role $PROJECT. next: ask homelab-server to run on $SSH_HOST:  $PG_TOOL create $PROJECT"
+      bad=1
+    fi
+  else
+    echo "  missing  could not list Postgres databases over 'ssh $SSH_HOST'. next: check ssh $SSH_HOST works without a prompt (DBS_SSH_HOST), or ask homelab-server whether $PROJECT exists"; bad=1
+  fi
+  if [[ -f fnox.toml ]] && grep -q 'PGPASSWORD' fnox.toml && grep -q "${PROJECT}--default--pg-password" fnox.toml; then
+    echo "  ok       fnox.toml references PGPASSWORD -> ${PROJECT}--default--pg-password (Proton item referenced; verify with: fnox exec -- dbs status)"
+  else
+    echo "  missing  fnox.toml reference. next: FIRST store the Proton item (below), THEN add to fnox.toml (a reference to a missing item breaks every fnox command in the project):  [secrets.PGPASSWORD]  provider = \"proton\"  value = \"${PROJECT}--default--pg-password\"  (and the proton provider, vault fnox; see the utils skill, Secrets)"; bad=1
+    echo "  info     the Proton item ${PROJECT}--default--pg-password is an operator step: have Pi prepare the reviewed script from"
+    echo "           $SKILL_DIR/scripts/store-pg-password.sh   (Algorant runs it; no agent sees the password)"
+  fi
+  ((bad == 0)) || { echo "bootstrap: not ready; fix the items marked missing"; return 2; }
+  echo "bootstrap: ready"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+CMD=${1:-}
+case $CMD in
+  '' | -h | --help | help) usage; exit 0 ;;
+  bootstrap | mirror | status | verify | sql) shift ;;
+  *) die "unknown command: $CMD" "dbs --help" ;;
+esac
+parse_opts "$@"
+[[ $CMD == bootstrap ]] || parse_config
+rc=0
+case $CMD in
+  bootstrap) cmd_bootstrap || rc=$? ;;
+  mirror) cmd_mirror || rc=$? ;;
+  status) cmd_status || rc=$? ;;
+  verify) cmd_verify || rc=$? ;;
+  sql) cmd_sql || rc=$? ;;
+esac
+# A failed run exits earlier and keeps its log (the next failure overwrites it);
+# only a successful mirror removes it.
+if [[ $CMD == mirror && $rc == 0 && ${DRY:-0} != 1 ]]; then rm -f "${TMPDIR:-/tmp}/dbs-$PROJECT-error.log" 2>/dev/null || true; fi
+exit "$rc"

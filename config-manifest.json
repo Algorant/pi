@@ -1,0 +1,20 @@
+{
+  "version": 4,
+  "description": "Tracked expectations for the one-time Pi bootstrap: the operational settings (package manager; the stock core tools plus built-in codemode via defaultTools; codemode mode and budget; always-trust project default) and the required Pi-managed packages under agent/npm. Everything else in this repository is owned by Git; installed tools are owned by mise. Machine-local settings, credentials, sessions, and caches stay untracked.",
+  "settings": {
+    "npmCommand": [
+      "bun"
+    ],
+    "defaultProjectTrust": "always",
+    "defaultTools": [
+      "+codemode"
+    ],
+    "codemode": {
+      "mode": "on",
+      "inlineBudget": 6500
+    }
+  },
+  "packages": [
+    "npm:@ff-labs/fff-bun"
+  ]
+}

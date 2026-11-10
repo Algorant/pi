@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# child-exit <command> [args...]
+# Runs one hc child (a Pi helper, Worker, manus or Ceph, or a plain background job) in the
+# foreground and exits with its status. When the child ends without having sent any inbox
+# message since it started, its owner (hc parent, else the starter= label) gets one inbox
+# result naming it, its exit and its screen tail. The durable inbox log decides "reported";
+# when that can't be decided the notice is sent anyway. No watcher, no registry.
+#   hc run --bg --rm --no-notify --name build -- ~/.pi/agent/scripts/child-exit cargo build
+set -u
+since=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+how=""
+# hc kill hangs up the whole terminal: note it, let the child end, then report.
+trap 'how=" (hangup)"' HUP
+trap 'how=" (terminated)"' TERM
+trap : INT
+"$@"
+status=$?
+trap '' HUP TERM
+bun "$(dirname "$(readlink -f "$0")")/inbox" exited "$since" "exit ${status}${how}" >&2
+exit "$status"

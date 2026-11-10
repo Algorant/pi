@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# hc for a scratch test core only. Usage: HC_TEST_ROOT=/tmp/x hc-test <hc args...>
+# Sets HC_SESSION, XDG_RUNTIME_DIR, XDG_STATE_HOME, XDG_CONFIG_HOME and HOME inside
+# HC_TEST_ROOT on every call, so no hc command (including `server stop`) can reach
+# Algorant's real core even when a harness's own env file failed to load.
+set -euo pipefail
+root=${HC_TEST_ROOT:-}
+case "$root" in
+  /tmp/?*) ;;
+  *) echo "hc-test: refusing: HC_TEST_ROOT must be a directory under /tmp (got '${root}')" >&2; exit 2 ;;
+esac
+[ -d "$root" ] || { echo "hc-test: refusing: $root does not exist" >&2; exit 2; }
+root=$(cd "$root" && pwd -P)
+case "$root" in /tmp/?*) ;; *) echo "hc-test: refusing: $root resolves outside /tmp" >&2; exit 2 ;; esac
+mkdir -p "$root/run" "$root/state" "$root/config" "$root/home"
+chmod 700 "$root/run"
+export HC_SESSION="test-$(basename "$root")" XDG_RUNTIME_DIR="$root/run" XDG_STATE_HOME="$root/state" XDG_CONFIG_HOME="$root/config" HOME="$root/home"
+exec hc "$@"
