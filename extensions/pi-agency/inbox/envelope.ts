@@ -39,6 +39,11 @@ export type Envelope = {
   body: string;
   /** `<project>:<task-N>`: the sender's hc `task=` label (a manus's track), its request's linked Task. */
   task?: string;
+  /**
+   * The sender marks it a correction to work in flight: a Pi that is working steers it into the running
+   * turn. Absent (the default) a request or result is held until that turn ends (see steersWhileWorking).
+   */
+  interrupt?: boolean;
   /** Typed Pi control request; ordinary message text never dispatches commands. */
   control?: { type: "pi-reload"; core: string; terminal: string; revision: string } | ReloadAck | ModelControl;
 };
@@ -173,6 +178,15 @@ export function messages(events: LogEvent[]): Map<string, MessageView> {
 /** Open = a request or blocked message that was sent and is not closed (by a reply, a close event, or not reopened since). */
 export const isOpen = (view: MessageView) =>
   (view.kind === "request" || view.kind === "blocked") && !view.failed && !view.closed;
+
+/**
+ * Delivered into a running turn only when it cannot wait: a `blocked` message, an answer to a question
+ * this Pi asked (`reply_to`), or a sender's explicit correction (`interrupt`). Every other request or
+ * result is new work: a working Pi holds it until the turn ends, and it then starts the next turn, so
+ * arriving work never displaces the work in hand (the dropped-request fix).
+ */
+export const steersWhileWorking = (env: Pick<Envelope, "kind" | "reply_to" | "interrupt">) =>
+  env.kind === "blocked" || !!env.reply_to || env.interrupt === true;
 
 /**
  * Where a message is now, as this machine knows it: `failed: <reason>`, `delivered <age> ago`, or

@@ -3,7 +3,9 @@
  * inbox — read and close agent-inbox history from this machine's local log
  * (~/.local/state/pi-agency/inbox/log.jsonl; see pi-agency/inbox/envelope.ts).
  *
- *   inbox [open]            requests and blocked messages nobody has answered or closed
+ *   inbox [open]            requests and blocked messages nobody has answered or closed (a request sent
+ *                           to a Pi that is working is held by that Pi for the turn end, then starts the
+ *                           next turn; only blocked, replies and `interrupt` envelopes steer)
  *   inbox recent [N]        the last N messages (default 20), newest first
  *   inbox thread <id>       the whole conversation an id belongs to, with bodies, closes and
  *                           reopens, each message's delivery (queued, delivered, failed) and
@@ -44,6 +46,7 @@ if (command === "drop") {
   try { env = JSON.parse(await Bun.stdin.text()); } catch (error) { fail(`drop needs one envelope as JSON on stdin (${error})`); }
   if (env?.v !== 1 || !ID_PATTERN.test(env.id) || !KINDS.includes(env.kind) || typeof env.to?.terminal !== "string" || typeof env.to.core !== "string"
     || typeof env.from?.terminal !== "string" || typeof env.from.core !== "string") fail("drop needs a version-1 envelope from and to native HC terminals");
+  if (env.interrupt !== undefined && typeof env.interrupt !== "boolean") fail("drop: interrupt, when present, must be a boolean (true steers it into the recipient's running turn)");
   let to;
   try { to = await hcAddress(env.to.terminal); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
   if (to.core !== env.to.core) fail(`addressed to core ${env.to.core}, but this machine's hc core is ${to.core}`);

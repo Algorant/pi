@@ -2,12 +2,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, headlineOf, inboxDir, inboxKey, localMachine, newId, type Envelope } from "./envelope.ts";
+import { appendEvent, headlineOf, inboxDir, inboxKey, localMachine, newId, steersWhileWorking, type Envelope } from "./envelope.ts";
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-hc/core.ts";
 import { hcAddress } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
 
-export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; control?: Envelope["control"] };
+export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"] };
 
 /** Shared atomic local drop; callers record the same send event after success. */
 export function dropLocalEnvelope(env: Envelope): string {
@@ -90,10 +90,12 @@ export const statusText = (status: TargetStatus) => status.state === "none" ? "r
   : `${status.state}${status.kind || status.msg ? ` (${[status.kind, status.msg].filter(Boolean).join(": ")})` : ""}`;
 
 /** What the recipient's status means for a message just queued for it. */
-export function deliveryHint(status: TargetStatus): string {
+export function deliveryHint(status: TargetStatus, message?: Pick<Envelope, "kind" | "reply_to" | "interrupt">): string {
   switch (status.state) {
     case "idle": case "done": return "it delivers now and starts a turn";
-    case "working": return "it is steered into the current turn, after any long tool call, dialog or compaction ends";
+    case "working": return message && steersWhileWorking(message)
+      ? "it is steered into the current turn, after any long tool call, dialog or compaction ends"
+      : "it is held until that turn ends and then starts the next turn";
     case "blocked": return "it waits until that is answered";
     case "none": return "no Pi status is reported there; it waits until a Pi runs";
     case "gone": return "the terminal is gone; nothing will deliver it";
@@ -117,6 +119,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     to: { machine, terminal: params.terminal, core: "", label: "" },
     headline: headlineOf(params.body), body: params.body,
     ...(params.control ? { control: params.control } : {}),
+    ...(params.interrupt ? { interrupt: true } : {}),
     ...(task ? { task } : {}),
   };
   let file: string;

@@ -6,7 +6,7 @@ import { NSTAR_INBOX } from "../nstar-note.ts";
 import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, sendAgentMessage, statusText, targetStatus, type SendParams } from "./send.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
-import { addressText, ageText, appendEvent, closeMessage, checkHeadline, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
+import { addressText, ageText, appendEvent, closeMessage, checkHeadline, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, steersWhileWorking, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
 import { hcMachines, type HcMachine } from "../../pi-hc/core.ts";
 import { hcAddress, peerName, peerText } from "../../../scripts/whois.ts";
 
@@ -88,6 +88,10 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       if (!ctx || inboxGate.held) return; // reloaded or compacting meanwhile: the files wait
     }
     for (const { path, env } of pending) {
+      // New work waits its turn: while this Pi is working, a message that is not a blocked message, an
+      // answer to a question it asked, or a flagged correction stays in its inbox folder. The scan after
+      // the turn ends (agent_settled) delivers it as a follow-up that starts the next turn.
+      if (!steersWhileWorking(env) && !ctx.isIdle()) continue;
       try {
         unlinkSync(path);
       } catch (error) {
@@ -184,7 +188,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   pi.registerTool({
     name: "agent_send",
     label: "Agent Send",
-    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is rejected unsent. Kinds: request, result, blocked. A reply_to message id closes that request; so do a dispatch naming it (from:) and its linked Task (sender's task= label, or task-N in it) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen).",
+    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. A recipient that is working holds a request or result until that turn ends, then starts the next turn with it; only a blocked message, a reply (reply_to) or interrupt: true is steered into the running turn. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is rejected unsent. Kinds: request, result, blocked. A reply_to message id closes that request; so do a dispatch naming it (from:) and its linked Task (sender's task= label, or task-N in it) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen).",
     promptSnippet: "Message another Pi by native HC terminal/name using its durable inbox.",
     parameters: {
       type: "object",
@@ -194,6 +198,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         kind: { type: "string", enum: [...KINDS], description: "request, result, or blocked." },
         body: { type: "string", minLength: 1, description: `Message text: line 1 is the answer, a one-line headline of at most ${HEADLINE_MAX} characters; details below. A longer first line is rejected and nothing is sent.` },
         reply_to: { type: "string", pattern: ID_PATTERN.source, description: "Id of the agent message this answers, e.g. m4f1a2c9." },
+        interrupt: { type: "boolean", description: "Set true only for a correction to work the recipient is doing now: it is then steered into that running turn. Default false: a request or result is held until the recipient's turn ends and then starts the next turn, so it never displaces work in hand. Blocked messages and replies (reply_to) always steer." },
       },
       required: ["terminal", "kind", "body"],
     },
@@ -204,7 +209,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       const to = peerName(env.to, localMachine());
       // Delivery itself is asynchronous; the recipient's status now says when it lands (task-555).
       const target = await targetStatus(env.to, env.from.core!);
-      const now = target ? ` ${to} is ${statusText(target)} now: ${deliveryHint(target)}.` : "";
+      const now = target ? ` ${to} is ${statusText(target)} now: ${deliveryHint(target, env)}.` : "";
       return {
         content: [{ type: "text" as const, text: `Queued ${env.kind} ${env.id}${env.reply_to ? ` (reply to ${env.reply_to})` : ""} for ${to} (${addressText(env.to)}); it is delivered into that Pi conversation when it is running.${now} inbox thread ${env.id} shows queued, delivered or failed.` }],
         details: { envelope: env, file, ...(target ? { target } : {}) },
