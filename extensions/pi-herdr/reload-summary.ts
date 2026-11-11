@@ -32,6 +32,7 @@ export const isSuccess = (outcome: ReloadAck["outcome"]) => outcome === "verifie
 const short = (value: string | null) => value?.slice(0, 8) ?? "unknown";
 const ackWhy = (ack: Ack) => ({
   "not-verified": `not verified (observed ${short(ack.loaded)})`,
+  "not-applied": "not reached: still deferred when its bound expired; rerun explicitly",
   "not-foreground": "not reloaded: Pi is a background job of its shell and would stop on tty input; restart it",
 })[ack.outcome as string] ?? "not reloaded (repository HEAD changed)";
 
@@ -41,7 +42,7 @@ const statusOf = (row: Row, acks: Map<string, Ack>): { status: Status; why?: str
   if (row.state === "skipped") return { status: "skipped", why: row.why };
   if (row.state === "failed") return { status: "failed", why: row.why };
   const ack = row.request ? acks.get(row.request) : undefined;
-  if (!ack) return { status: "pending", why: row.busy ? "busy" : undefined };
+  if (!ack) return { status: "pending", why: row.busy ? "busy: applies at its own idle boundary" : "awaiting its acknowledgement" };
   return isSuccess(ack.outcome) ? { status: "done" } : { status: "failed", why: ackWhy(ack) };
 };
 
@@ -62,10 +63,11 @@ export function summarySweep(sweep: Sweep, acks: Map<string, Ack>): { compact: A
   const failed = rows.filter((r) => r.status === "failed");
   const skipped = rows.filter((r) => r.status === "skipped");
   const compact: Array<{ text: string; tone?: "error" | "warning" }> = [{ text: counted.length || own.length ? `Reloaded ${done}/${counted.length} to ${short(sweep.expected)}` : `Nothing to reload (${short(sweep.expected)})` }];
-  if (pending.length) compact.push({ text: `pending: ${list(pending)}`, tone: "warning" });
   if (failed.length) compact.push({ text: `FAILED: ${list(failed, ": ")}`, tone: "error" });
-  const skips = [...skipped.map((r) => `${r.row.label} (${r.why})`), ...sweep.down.map((m) => `${m.name} (${m.why})`)];
-  if (skips.length) compact.push({ text: `skipped: ${skips.join(", ")}` });
+  // Every Pi this sweep did not reach is named with its reason, never folded into the count: a busy target still
+  // holds the delivered request and applies it at its own idle boundary; a skipped or offline one is said so.
+  const unreached = [...pending.map((r) => `${r.row.label} (${r.why ?? "awaiting acknowledgement"})`), ...skipped.map((r) => `${r.row.label} (${r.why})`), ...sweep.down.map((m) => `${m.name} (${m.why}: no Pi reachable there)`)];
+  if (unreached.length) compact.push({ text: `not reached: ${unreached.join(", ")}`, tone: pending.length ? "warning" : undefined });
   const byMachine = new Map<string, typeof rows>();
   for (const r of own) byMachine.set(`${r.row.machine}\u0000${r.row.revision}`, [...byMachine.get(`${r.row.machine}\u0000${r.row.revision}`) ?? [], r]);
   for (const group of byMachine.values()) compact.push({ text: `${group[0]!.row.machine} on its own checkout (${short(group[0]!.row.revision)}) ${group.filter((r) => r.status === "done").length}/${group.length}` });
@@ -83,7 +85,7 @@ export function summarySweep(sweep: Sweep, acks: Map<string, Ack>): { compact: A
   if (sweep.ranFrom !== undefined) detail.push(`This sweep ran from the caller's own loaded resources (${short(sweep.ranFrom)}): a caller behind HEAD reloads itself first.`);
   detail.push(
     "Verified = repository HEAD observed at the target's session_start, not byte attestation or command acceptance.",
-    "No terminal keys, polling or timers: a pending target updates this card when its acknowledgement arrives.",
+    "No terminal keys, polling or timers: a not-reached target updates this card when its acknowledgement arrives, and applies the request at its own idle boundary.",
     "an open dialog on a target closes when it reloads",
   );
   return { compact, rows: lines, detail };

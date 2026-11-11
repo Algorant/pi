@@ -91,7 +91,9 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       // New work waits its turn: while this Pi is working, a message that is not a blocked message, an
       // answer to a question it asked, or a flagged correction stays in its inbox folder. The scan after
       // the turn ends (agent_settled) delivers it as a follow-up that starts the next turn.
-      if (!steersWhileWorking(env) && !ctx.isIdle()) continue;
+      // A typed control is different: its receiver consumes it without a model turn, so it is delivered
+      // while the Pi is working too. The target records it as pending and applies it at its own idle boundary.
+      if (!steersWhileWorking(env) && !env.control && !ctx.isIdle()) continue;
       try {
         unlinkSync(path);
       } catch (error) {

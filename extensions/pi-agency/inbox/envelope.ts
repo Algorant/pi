@@ -54,8 +54,8 @@ export type Envelope = {
   control?: { type: "pi-reload"; core: string; terminal: string; revision: string } | ReloadAck | ModelControl;
 };
 
-/** A target's acknowledgement of a typed reload request: recorded and consumed silently by the caller when it succeeded. */
-export type ReloadAck = { type: "pi-reload-ack"; request: string; outcome: "verified" | "current" | "not-verified" | "not-reloaded" | "not-foreground"; previous: string | null; loaded: string | null; expected: string; dirty: boolean };
+/** A target's acknowledgement of a typed reload request: recorded and consumed silently by the caller when it succeeded. `not-applied` = it stayed recorded but never reached an idle boundary before its bound. */
+export type ReloadAck = { type: "pi-reload-ack"; request: string; outcome: "verified" | "current" | "not-verified" | "not-reloaded" | "not-applied" | "not-foreground"; previous: string | null; loaded: string | null; expected: string; dirty: boolean };
 
 /** Typed model cutover request: canonical `provider/id` as in model-roles.json, a thinking level, and Fast on/off. */
 export type ModelControl = { type: "pi-model"; model: string; thinking: string; fast: boolean };

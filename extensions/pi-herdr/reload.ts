@@ -19,17 +19,22 @@ const ACK = "pi-reload-ack";
 const SWEEP = "pi-reload-sweep";
 const SWEEP_DONE = "pi-reload-sweep-done";
 const NOTIFIED = "pi-reload-notified";
+const PENDING = "pi-reload-pending";
 const FAILURE = "pi-reload-failure";
 const MODEL_REQUEST = "pi-model-request";
 const MODEL_OUTCOME = "pi-model-outcome";
 type Owner = { core: string; terminal: string; label: string };
 type Request = { id: string; previous: string | null; expected: string; owner: Owner };
+/** A recorded request plus the session entry's time, which bounds how long it may stay unapplied. */
+type Recorded = Request & { at: string };
 type SweepRequest = { id: string; previous: string | null; expected: string };
 type ModelRequest = { id: string; owner: Owner; control: ModelControl };
 type Summary = { lines: string[]; detail: string[]; sweep?: Sweep };
 const short = (value: string | null) => value?.slice(0, 8) ?? "unknown";
 /** Private /pi-reload argument: Pi sends it to itself at the idle boundary. Argument completion never suggests it, so the command list stays one entry. */
 const APPLY_ARG = "--internal-apply";
+/** A recorded request that still cannot apply after this long is answered with a visible outcome instead of staying pending. */
+const DEFER_BOUND_MS = 10 * 60_000;
 const reason = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** This process's group and its tty's foreground group, from /proc/self/stat (fields after the command name: state ppid pgrp session tty_nr tpgid). */
 const ttyGroups = () => {
@@ -44,7 +49,10 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
   let localChanges = false;
   let own: Owner | undefined;
   let supported = false;
-  let scheduled: "idle dispatch" | "agent_settled" | undefined;
+  // Request ids the private apply command was already sent for at this idle boundary; the next agent_settled clears it so a lost dispatch is retried, never stranded.
+  let dispatched = "";
+  // Deferral reasons already recorded per request id, so a waiting request shows once, not on every idle event.
+  const deferrals = new Map<string, string>();
   const summarize = (lines: string[], detail: string[] = [], sweep?: Sweep) => pi.appendEntry<Summary>(SUMMARY, { lines, detail, ...(sweep ? { sweep } : {}) });
   // Acknowledgements recorded on this caller, rebuilt from its session entries; the sweep card reads them live.
   const acks = new Map<string, Ack>();
@@ -54,8 +62,11 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
   const readAcks = (ctx: ExtensionContext) => {
     acks.clear();
     notified.clear();
+    deferrals.clear();
     for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === NOTIFIED) notified.add(e.data.sweep);
     for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === ACK) acks.set(e.data.request, e.data);
+    // A pending state already recorded for a request is not recorded again after a resume.
+    for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === PENDING) deferrals.set(e.data.id, e.data.why);
   };
   // Entries are append-only: a late acknowledgement is a new hidden entry, and the card's component reads `acks` at render time, so the same card shows it on the repaint that appending triggers.
   const recordAck = (ack: Ack) => { pi.appendEntry(ACK, ack); acks.set(ack.request, ack); };
@@ -86,10 +97,12 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     // Only armed after model and thinking are set, so model_select/session_start broadcasts never finish a request.
     if (applying?.fast) void finishModel(applying.ctx, applying.request, true);
   });
-  const pending = <T = Request>(ctx: ExtensionContext, request = REQUEST, outcome = OUTCOME): T[] => {
+  const pending = <T = Recorded>(ctx: ExtensionContext, request = REQUEST, outcome = OUTCOME): T[] => {
     const branch = ctx.sessionManager.getBranch();
     const done = new Set(branch.filter((e) => e.type === "custom" && e.customType === outcome).map((e: any) => e.data?.id));
-    return branch.filter((e) => e.type === "custom" && e.customType === request).map((e: any) => e.data as T & { id: string }).filter((r) => !done.has(r.id));
+    return branch.filter((e) => e.type === "custom" && e.customType === request)
+      .map((e: any) => ({ ...e.data, at: e.data?.at ?? e.timestamp }) as T & { id: string })
+      .filter((r) => !done.has(r.id));
   };
   const route = async (owner: Owner): Promise<string> => {
     if (owner.core === own?.core) return owner.terminal;
@@ -100,7 +113,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
   const acknowledge = async (ctx: ExtensionContext, request: Request, outcome: ReloadAck["outcome"]) => {
     // At most one attempt per request; no background retry or duplicate acknowledgement.
     const label = own!.label.slice(0, 80);
-    const result = { verified: `reloaded, verified ${short(loaded)}`, current: `already current (${short(loaded)})`, "not-verified": `reload NOT verified (observed ${short(loaded)}, expected ${short(request.expected)})`, "not-reloaded": "not reloaded: repository HEAD changed; rerun explicitly", "not-foreground": "not reloaded: this Pi is a background job of its shell and would stop on tty input; restart it" }[outcome];
+    const result = { verified: `reloaded, verified ${short(loaded)}`, current: `already current (${short(loaded)})`, "not-verified": `reload NOT verified (observed ${short(loaded)}, expected ${short(request.expected)})`, "not-reloaded": "not reloaded: repository HEAD changed; rerun explicitly", "not-applied": `not reloaded: still no idle boundary ${Math.round(DEFER_BOUND_MS / 60_000)} minutes after the request; rerun explicitly`, "not-foreground": "not reloaded: this Pi is a background job of its shell and would stop on tty input; restart it" }[outcome];
     pi.appendEntry(OUTCOME, { id: request.id, result, loaded, expected: request.expected });
     const control: ReloadAck = { type: "pi-reload-ack", request: request.id, outcome, previous: request.previous, loaded, expected: request.expected, dirty: localChanges };
     // A request an older caller recorded for its own reload-last is acknowledged in place (this runtime's /pi-reload no longer writes one); everything else is one typed result, which the caller consumes silently on success.
@@ -150,11 +163,44 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
       } catch (error) { await finishModel(ctx, request, reason(error)); }
     })();
   };
-  const schedule = (ctx: ExtensionContext, from: "idle dispatch" | "agent_settled") => {
-    if (!own || !supported || scheduled || !ctx.isIdle() || ctx.hasPendingMessages() || !pending(ctx).length) return;
-    scheduled = from;
-    // Immediate command dispatch if idle. From agent_settled, Pi runs this after all settled handlers.
-    pi.sendUserMessage(`/pi-reload ${APPLY_ARG}`, { expandPromptTemplates: true });
+  /** Record, once per reason, that a recorded request is waiting: the session shows a pending state instead of nothing. */
+  const defer = (requests: Recorded[], why: string) => {
+    const fresh = requests.filter((request) => deferrals.get(request.id) !== why);
+    if (!fresh.length) return;
+    for (const request of fresh) {
+      deferrals.set(request.id, why);
+      pi.appendEntry(PENDING, { id: request.id, why, expected: request.expected, at: new Date().toISOString() });
+    }
+    summarize(
+      fresh.map((request) => `Reload request ${request.id} for ${own!.label} pending: ${why}.`),
+      [
+        "The typed request stays recorded and applies at this Pi's next idle boundary; no model turn and no composer input.",
+        `If it still cannot apply ${Math.round(DEFER_BOUND_MS / 60_000)} minutes after it was sent, it is answered with a visible outcome instead of staying pending.`,
+      ],
+    );
+  };
+  /**
+   * Drive recorded requests to an outcome from the events a Pi already emits; no timer, poll or watcher.
+   * A request that cannot apply now is recorded as pending with its reason, and the next idle boundary retries it.
+   * Only the private apply command can reload (ctx.reload() needs a command context), so anything that can apply hands over to it.
+   */
+  const applyNow = async (ctx: ExtensionContext) => {
+    if (!own || !supported) return;
+    const requests = pending(ctx);
+    if (!requests.length) { dispatched = ""; return; }
+    const overdue = requests.filter((request) => Date.now() - Date.parse(request.at) >= DEFER_BOUND_MS);
+    const waiting = requests.filter((request) => !overdue.includes(request));
+    // A request that has waited past its bound is answered here, even while the Pi is busy: it never stays silent.
+    for (const request of overdue) await acknowledge(ctx, request, "not-applied");
+    if (!ctx.isIdle()) { defer(waiting, "deferred: this Pi is working; applies at its next idle boundary"); return; }
+    if (ctx.hasPendingMessages()) { defer(waiting, "deferred: waiting for queued messages to finish; applies at its next idle boundary"); return; }
+    if (!waiting.length) { dispatched = ""; return; }
+    // One dispatch per idle boundary for the same requests; a dispatch that never ran is retried by the next boundary.
+    const ids = waiting.map((request) => request.id).join(",");
+    if (dispatched === ids) return;
+    dispatched = ids;
+    try { pi.sendUserMessage(`/pi-reload ${APPLY_ARG}`, { expandPromptTemplates: true }); }
+    catch (error) { dispatched = ""; defer(waiting, `deferred: dispatching the apply command failed: ${reason(error)}`); }
   };
 
   pi.registerEntryRenderer<Summary>(SUMMARY, (entry, options, theme) => ({
@@ -187,7 +233,8 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
   });
 
   pi.on("session_start", async (event, ctx) => {
-    scheduled = undefined;
+    dispatched = "";
+    deferrals.clear();
     applying = undefined;
     const endpoint = await hcEndpoint(process.env.HC_TERMINAL_ID!);
     own = { core: endpoint.core, terminal: endpoint.terminal, label: terminalWho(endpoint.record).label };
@@ -208,6 +255,10 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
         await acknowledge(ctx, request, loaded === request.expected ? "verified" : "not-verified");
       }
     }
+    // A request recorded in an earlier session stays recorded, but is not applied from inside session_start
+    // (ctx.reload() there would re-enter the session being started): it applies at this Pi's next idle boundary.
+    const carried = pending(ctx);
+    if (carried.length) defer(carried, "deferred: recorded in an earlier session; applies at this Pi's next idle boundary");
     // The caller reloaded itself first: this NEW runtime, not the one that was asked, starts the sweep, once.
     const branch = ctx.sessionManager.getBranch() as any[];
     const done = new Set(branch.filter((e) => e.type === "custom" && e.customType === SWEEP_DONE).map((e) => e.data.id));
@@ -221,32 +272,48 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     await hcJson(["label", process.env.HC_TERMINAL_ID!, "pi.resources=", "pi.reload=", "pi.model-control=", "pi.pgid=", "pi.session="]);
     own = undefined;
   });
-  pi.on("agent_settled", (_event, ctx) => { applyModel(ctx); schedule(ctx, "agent_settled"); });
+  pi.on("agent_settled", (_event, ctx) => {
+    dispatched = ""; // a fresh idle boundary: retry anything a lost or bailed dispatch left recorded
+    applyModel(ctx);
+    void applyNow(ctx);
+  });
 
-  /** Apply this Pi's pending typed inbox reload requests at its next idle boundary (the private /pi-reload mode). */
+  /** Reload this Pi for its recorded typed inbox requests (the private /pi-reload mode). */
   const applyPending = async (ctx: ExtensionContext) => {
-    if (!supported || ctx.mode !== "tui" || !ctx.isIdle() || ctx.hasPendingMessages()) { scheduled = undefined; return; }
-    const accepted: Request[] = [];
-    const seen = new Set<string>();
-  // Requests recorded while this runs (a second queued inbox reload, delivered during an acknowledgement) are answered in the same pass.
-    for (let requests = pending(ctx); requests.length; requests = pending(ctx).filter((r) => !seen.has(r.id))) {
-    const source = await resourceRevision(ROOT);
-    localChanges = source.resourcesDirty;
-    // A background job of its shell stops (SIGTTIN) on the tty replies a reload provokes (task-632): answer instead.
-    const groups = ttyGroups();
-    for (const request of requests) {
-      seen.add(request.id);
-      if (groups.pgid !== groups.foreground) await acknowledge(ctx, request, "not-foreground");
-      // Already at HEAD: current, including a stale request for a revision HEAD has since moved past.
-      else if (loaded === source.targetRevision) await acknowledge(ctx, request, "current");
-      else if (source.targetRevision !== request.expected) await acknowledge(ctx, request, "not-reloaded");
-      else accepted.push(request);
+    dispatched = "";
+    if (!supported || ctx.mode !== "tui") return;
+    try {
+      // Not applicable now: record why. The next idle boundary retries; never re-dispatch from inside the dispatch.
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        const requests = pending(ctx);
+        if (requests.length) defer(requests, ctx.isIdle() ? "deferred: waiting for queued messages to finish; applies at its next idle boundary" : "deferred: this Pi is working; applies at its next idle boundary");
+        return;
+      }
+      const accepted: Request[] = [];
+      const seen = new Set<string>();
+      // Requests recorded while this runs (a second queued inbox reload, delivered during an acknowledgement) are answered in the same pass.
+      for (let requests = pending(ctx); requests.length; requests = pending(ctx).filter((r) => !seen.has(r.id))) {
+        const source = await resourceRevision(ROOT);
+        localChanges = source.resourcesDirty;
+        // A background job of its shell stops (SIGTTIN) on the tty replies a reload provokes (task-632): answer instead.
+        const groups = ttyGroups();
+        for (const request of requests) {
+          seen.add(request.id);
+          if (groups.pgid !== groups.foreground) await acknowledge(ctx, request, "not-foreground");
+          // Already at HEAD: current, including a stale request for a revision HEAD has since moved past.
+          else if (loaded === source.targetRevision) await acknowledge(ctx, request, "current");
+          else if (source.targetRevision !== request.expected) await acknowledge(ctx, request, "not-reloaded");
+          else accepted.push(request);
+        }
+      }
+      if (!accepted.length) return;
+      summarize([`Reloading ${own!.label} for ${accepted.map((request) => request.id).join(", ")}.`], [...(localChanges ? ["local changes present (informational; repository HEAD is not byte attestation)"] : []), "Typed inbox request consumed: no model turn for control dispatch. A success is acknowledged silently; only a failure starts a turn on the caller."]);
+      await ctx.reload();
+    } catch (error) {
+      // Never silent: name what stopped the apply. The request stays recorded and the next idle boundary retries it, bounded by DEFER_BOUND_MS.
+      const ids = pending(ctx).map((request) => request.id);
+      summarize([`Reload deferred${ids.length ? ` for ${ids.join(", ")}` : ""}: ${reason(error)}.`], ["The recorded request retries at the next idle boundary; it is answered with an outcome if it still cannot apply."]);
     }
-  }
-    if (!seen.size) { scheduled = undefined; return; }
-    if (!accepted.length || !ctx.isIdle() || ctx.hasPendingMessages()) { scheduled = undefined; return; }
-    summarize([`Reloading ${own!.label} (${scheduled ?? "private apply mode"}).`], [...(localChanges ? ["local changes present (informational; repository HEAD is not byte attestation)"] : []), "Typed inbox request consumed: no model turn for control dispatch. A success is acknowledged silently; only a failure starts a turn on the caller."]);
-    await ctx.reload();
     return;
   };
 
@@ -299,7 +366,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
               control: { type: "pi-reload", core: peer.core, terminal: peer.terminal, revision: peer.targetRevision },
             });
             sent.add(env.id);
-            Object.assign(row, { state: "requested", request: env.id, busy: peer.status === "working", note: [`requested ${env.id}${peer.status === "working" ? "; target defers until settled" : ""}`, flags].filter(Boolean).join("; ") });
+            Object.assign(row, { state: "requested", request: env.id, busy: peer.status === "working", note: [`request ${env.id} delivered${peer.status === "working" ? "; deferred: it is working and applies at its own idle boundary" : "; applies at its own idle boundary"}`, flags].filter(Boolean).join("; ") });
           } catch (error) { Object.assign(row, { state: "failed", why: `request failed: ${reason(error)}`, note: "" }); }
         }
         sweep.rows.push(row);
@@ -365,9 +432,9 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     }
     if (!ctx.sessionManager.getBranch().some((e: any) => e.type === "custom" && e.customType === REQUEST && e.data?.id === env.id)) {
       pi.appendEntry<Request>(REQUEST, { id: env.id, expected: control.revision, previous: loaded, owner: { core: env.from.core, terminal: env.from.terminal, label: env.from.label } });
-      summarize([`Reload request for ${own.label} recorded${ctx.isIdle() ? " (idle dispatch)" : "; deferred until agent_settled"}.`], ["Control consumed by the existing inbox: no model turn and no composer input."]);
+      summarize([`Reload request ${env.id} for ${own.label} recorded.`], ["Control consumed by the existing inbox: no model turn and no composer input. It applies at this Pi's next idle boundary."]);
     }
-    schedule(ctx, "idle dispatch");
+    await applyNow(ctx);
     return null;
   };
 }

@@ -294,7 +294,21 @@ error, through a load-time resolver so reloaded rows keep their cards.
 
 `/pi-reload` sends typed control requests through the EXISTING inbox, never
 through another Pi's composer or `hc keys`. Its consume result records delivery
-without starting a target model turn. Idle receivers dispatch `/pi-reload` with
+without starting a target model turn. A typed control is consumed by its
+receiver, never shown to the model, so it is delivered even while the target is
+working: the target records it as a `pi-reload-pending` entry plus one card
+naming the request and why it waits (`this Pi is working`, `waiting for queued
+messages`). Every idle boundary retries the recorded request
+(`agent_settled`, and the private apply mode itself), so a request that cannot
+apply now is never dropped: it applies at the Pi's next idle boundary. A
+dispatch that never ran is retried by the next boundary; there is no latch that
+can strand a request. A request still unapplied 10 minutes after it was recorded
+is answered with `not-applied` instead of staying pending, so it always leaves a
+visible outcome. A request recorded in an earlier session is recorded as
+deferred at `session_start` and applies at the next idle boundary (never a
+reload from inside `session_start`). A self-addressed request travels the same
+path as a peer's, with the same pending state and outcome.
+Idle receivers dispatch `/pi-reload` with
 the private argument `--internal-apply`; busy receivers persist the request and
 dispatch from `agent_settled` with
 `pi.sendUserMessage(..., {expandPromptTemplates:true})`. The argument is not in
@@ -318,8 +332,12 @@ watcher or shell/keying fallback. Busy callers/pending messages are refused;
 current repository HEADs are skipped. Tracked modifications and untracked
 files are informational "local changes present", never a reload gate. A durable
 compact/expanded summary card (`reload-summary.ts`) counts `Reloaded 12/13 to
-<rev>` and lists pending (busy), FAILED and skipped (bootstrap-required,
-unreadable, offline) targets. A connected machine whose `~/.pi` HEAD differs from
+<rev>` and names every Pi the sweep did not reach with its reason, in one
+`not reached:` list: `busy: applies at its own idle boundary` (the request was
+delivered and the target applies it itself), `bootstrap` / `unreadable` /`offline`
+skips, and the failed ones. A busy target is never folded into a count and never
+counted as done; it is requested, and its acknowledgement updates the same card
+when it arrives. A connected machine whose `~/.pi` HEAD differs from
 the caller's is classified from history only (behind, ahead, diverged, or unknown):
 one read-only `git rev-list`, run on that machine through `hc exec` only when just it
 knows the caller's commit. Only a **strictly behind** machine is then fast-forwarded,
@@ -356,7 +374,8 @@ it in a hidden `pi-reload-ack` session entry and consumes a success (`verified`,
 not it matches a sweep on this caller. A target answers every request recorded
 while the private apply mode runs (a second queued request on an idle Pi), and a
 request whose revision HEAD has since moved past is `current` when the target
-already runs HEAD. A failure (`not-verified`, `not-reloaded`, `not-foreground`,
+already runs HEAD. A failure (`not-verified`, `not-reloaded`, `not-applied`,
+`not-foreground`,
 a request that could not be sent) is recorded in the card; when every request of
 the NEWEST sweep is answered and any failed, ONE ordinary `pi-reload-failure` message
 repeats the card's own compact line (`Reloaded 5/6 to <rev>; FAILED: <Pi>: <why>`, so the model need not see the card; rendered as one red line, the per-Pi rows when expanded) (once per sweep, `pi-reload-notified`
@@ -367,7 +386,8 @@ card reads the recorded acknowledgements when it renders, so a late (busy)
 target updates the SAME card (appending the hidden ack entry repaints the TUI;
 observed, with no explicit repaint call). A
 pending target stays pending until its acknowledgement arrives (no polling or
-timers). Accepted input alone is never proof of reload. The caller's own reload
+timers); the card names it under `not reached` with `busy: applies at its own
+idle boundary` meanwhile. Accepted input alone is never proof of reload. The caller's own reload
 is never an acknowledgement sent to itself.
 `pi.reload=1` advertises an actually loaded receiver, not readiness. First
 installation: EACH old-loaded participating Pi needs an ordinary built-in
