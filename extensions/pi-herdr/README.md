@@ -1,4 +1,4 @@
-# pi-hc
+# pi-herdr
 
 Native herdr-core integration for Pi. Enabled by `HC_TERMINAL_ID`; it does not
 create an app layout, report status, or emulate Herdr panes. Pi already emits
@@ -14,7 +14,7 @@ custom extension for herdr and herdr-core (hc)
 
 ## M1: durable inbox
 
-`pi-hc` registers the pi-agency inbox: one tool, receiver and journal
+`pi-herdr` registers the pi-agency inbox: one tool, receiver and journal
 implementation. `agent_send` takes one `terminal` recipient:
 
 - `terminal: "herdra"` — a native HC name or live address in the local core.
@@ -120,7 +120,7 @@ Every outcome (final, question or error) goes through `sendAgentMessage`, the
 one durable inbox: the parent's Pi receives a labelled `result` agent message
 (`pi.sendMessage`, never its composer or `hc send`), so an unsent draft there is
 left alone. Final reports and questions are written in full to a private
-`/tmp/pi-hc-report-*/report.md`; the message carries only the labelled headline
+`/tmp/pi-herdr-report-*/report.md`; the message carries only the labelled headline
 (`Final report (<role>): …` / `Question (<role>): …`), that report path and the
 kept session path. An error carries its cause in the headline,
 `Error (<role>): <cause>`, plus the session (or a note that startup wrote none). The parent must be a Pi (its inbox receiver). The receipt is
@@ -460,7 +460,7 @@ Files left by the retired legacy Worker runtime are not read.
   inbox of whichever owner control currently holds the invocation, and the
   invocation closes unless natively kept. The owner derives the delivery state
   (question/ready/delivered/failed/paused/...) from its control record, the
-  handoff and the native terminal. The pi-hc child `report` path is off for
+  handoff and the native terminal. The pi-herdr child `report` path is off for
   Workers. A vanished owner cannot receive the notice; the handoff remains.
 - `worker_feedback`/`worker_answer`/`worker_resume` open a successor delivery and
   start a NEW invocation with the SAME `--session-id`, checkout and captured
@@ -535,7 +535,13 @@ profiles, native Workers and Scriptify work-tab splits are enabled under HC, the
 current path. A Pi outside HC registers nothing native. The legacy Herdr
 integration (pi-herdr, pane-backed Subagents/Workers, Herdra widget, naming and
 lead hooks, SSH pane routing) was removed in task-551 and lives only in Git
-history. Shared model selection remains registered by
+history.
+
+The name `pi-herdr` was reused on 2026-11-10 for this extension, which was called
+`pi-hc` until then: `hc` is herdr-core, and naming the extension after the CLI it
+drives was the confusing half. Commits, Tandem records and plan documents from
+before that date that say `pi-herdr` mean the retired pane integration above, and
+anything that says `pi-hc` means this extension. Shared model selection remains registered by
 pi-agency. Helpers keep HC's default parent lifetime; Workers use `--outlive-parent`
 (see `plan/hc-parent-lifetime.md`). Tandem and Worktrunk remain the policy, Task
 and checkout authorities.

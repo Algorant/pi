@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "n
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { localAgencySettings, localSettingsPath } from "../local-settings.ts";
-import { hcEndpoint, isHc } from "../../pi-hc/core.ts";
+import { hcEndpoint, isHc } from "../../pi-herdr/core.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "../subagents/profile.ts";
 import { newId as uniqueId, stateDir } from "../state.ts";
 

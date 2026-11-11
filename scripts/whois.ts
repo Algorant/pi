@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { hcEndpoint, hcFind, hcJson, hcText } from "../extensions/pi-hc/core.ts";
+import { hcEndpoint, hcFind, hcJson, hcText } from "../extensions/pi-herdr/core.ts";
 import { messages, readEvents } from "../extensions/pi-agency/inbox/envelope.ts";
 import { stateDir, tandemShow } from "../extensions/pi-agency/state.ts";
 import { handoffRecordDirectory } from "../extensions/pi-agency/workers/handoff-record.ts";

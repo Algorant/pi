@@ -7,7 +7,7 @@ import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, sendAgentMessage, statusText, targetStatus, type SendParams } from "./send.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
 import { addressText, ageText, appendEvent, closeMessage, checkHeadline, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, steersWhileWorking, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
-import { hcMachines, type HcMachine } from "../../pi-hc/core.ts";
+import { hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
 import { hcAddress, peerName, peerText } from "../../../scripts/whois.ts";
 
 /**

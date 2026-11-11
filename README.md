@@ -20,7 +20,7 @@ It's a showroom, not an installer.
 ## Extensions
 
 - **[pi-agency](extensions/pi-agency/README.md)** — all things related to agents, subagents, etc
-- **[pi-hc](extensions/pi-hc/README.md)** — custom extension for herdr and herdr-core (hc)
+- **[pi-herdr](extensions/pi-herdr/README.md)** — custom extension for herdr and herdr-core (hc)
 - **[pi-fff](extensions/pi-fff/README.md)** — custom extension for [fff](https://github.com/dmtrKovalenko/fff)
 - **[pi-memory](extensions/pi-memory/README.md)** — my simple memory system, which goes to my obsidian vault
 - **[pi-providers](extensions/pi-providers/README.md)** — all things related to various providers and my settings for them
@@ -36,7 +36,7 @@ It's a showroom, not an installer.
 - **[ask-me](skills/ask-me/SKILL.md)** — companion skill to pi-ask-me
 - **[audit](skills/audit/SKILL.md)** — WIP, what I reference when I want to review something or give it another pass
 - **[browsing](skills/browsing/SKILL.md)** — the browser an agent uses, obscura by default, browse on request
-- **[herdr](skills/herdr/SKILL.md)** — companion skill to pi-hc
+- **[herdr](skills/herdr/SKILL.md)** — companion skill to pi-herdr
 - **[memory](skills/memory/SKILL.md)** — companion skill to pi-memory
 - **[projectify](skills/projectify/SKILL.md)** — skill to bootstrap a new project
 - **[scriptify](skills/scriptify/SKILL.md)** — skill that turns requests into custom bespoke scripts, good for elevated permissions/sudo requests etc

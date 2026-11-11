@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { hcJson, isHc } from "../../pi-hc/core";
+import { hcJson, isHc } from "../../pi-herdr/core";
 import type { BoardOption } from "./questions";
 
 export type Board = {

@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { getKeybindings } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONTEXT_PREFIX_EVENT, type ContextPrefix } from "../lib/context-prefix.ts";
-import { hcEndpoint } from "../pi-hc/core.ts";
+import { hcEndpoint } from "../pi-herdr/core.ts";
 import { hcAddress, peerName, terminalWho } from "../../scripts/whois.ts";
 import { inboxKey, openMessages, readEvents, type Envelope } from "./inbox/envelope.ts";
 import { requireContract } from "./workers/contract.ts";

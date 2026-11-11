@@ -9,7 +9,7 @@ export const WORKER_CONTEXT_FLAG = "worker-context";
 export const WORKER_CONTEXT_MODE_ENTRY = "pi-worker-context-mode";
 
 /**
- * getFlag is extension-local and pi-hc registers this flag, so other extensions
+ * getFlag is extension-local and pi-herdr registers this flag, so other extensions
  * (pi-agency, pi-ui) read this process's actual CLI mode instead.
  */
 export function workerContextRequested(): boolean {

@@ -34,8 +34,8 @@ export function registerHcReport(pi: ExtensionAPI) {
     plainFinal = undefined;
     const file = ctx.sessionManager.getSessionFile();
     const record = file && existsSync(file) ? file : `No child transcript written before startup; session ${ctx.sessionManager.getSessionId()}. This parent notice is the error record.`;
-    pi.appendEntry("pi-hc-job-error", { error: message, session: file });
-    console.error(`[pi-hc] ${message}`);
+    pi.appendEntry("pi-herdr-job-error", { error: message, session: file });
+    console.error(`[pi-herdr] ${message}`);
     if (ctx.hasUI) ctx.ui.notify(message, "error");
     try {
       // Do not retry an ambiguous native send. Queue the ERROR outcome through
@@ -46,8 +46,8 @@ export function registerHcReport(pi: ExtensionAPI) {
       // A vanished parent cannot receive anything. Native exit notes and the
       // existing session remain the record; do not leave an orphan process.
       const reason = error instanceof Error ? error.message : String(error);
-      pi.appendEntry("pi-hc-job-error-notice", { error: reason });
-      console.error(`[pi-hc] Parent error notice unavailable: ${reason}`);
+      pi.appendEntry("pi-herdr-job-error-notice", { error: reason });
+      console.error(`[pi-herdr] Parent error notice unavailable: ${reason}`);
     }
     ended = true;
   }
@@ -63,7 +63,7 @@ export function registerHcReport(pi: ExtensionAPI) {
     if (!session) throw new Error("Native child reports require a durable session.");
     // Every outcome is a private artifact; the parent gets a short labelled
     // agent message through the durable inbox (pi.sendMessage), never its composer.
-    const file = join(await mkdtemp(join(tmpdir(), "pi-hc-report-")), "report.md");
+    const file = join(await mkdtemp(join(tmpdir(), "pi-herdr-report-")), "report.md");
     await writeFile(file, text, { mode: 0o600 });
     // A report call was checked in execute; only an automatic plain final answer can still be longer.
     const first = text.split("\n")[0].trim();
@@ -116,7 +116,7 @@ export function registerHcReport(pi: ExtensionAPI) {
     plainFinal = undefined;
     try {
       const result = await deliver({ text }, ctx);
-      pi.appendEntry("pi-hc-auto-report", result.details);
+      pi.appendEntry("pi-herdr-auto-report", result.details);
       if (ctx.hasUI) ctx.ui.notify(`Outcome queued for ${parent}${result.details.kept ? " · kept" : " · closing"}`, "info");
     } catch (error) { await fail(ctx, error instanceof Error ? error.message : String(error)); }
   });

@@ -27,7 +27,7 @@ A Ceph’s discrete work starts with a Task by default (global AGENTS.md, *Work*
 | **Gate**: a decision on the global *Only Algorant decides* list (`AGENTS.md`); owners decide the rest and report it | Origin sends ONE request (ask, context, options, recommendation, link) → Herdra presents → one `result` back with `reply_to` | Herdra presents; the origin keeps the record | `agent_send request` + `~/Projects/herdra/bin/herdra-open add --on algorant` | Herdra's `result` with `reply_to` to the origin | Answer in the Task; request and open item closed |
 | **Check**: recurring supervision | A script, not an agent: `~/Projects/herdra/bin/herdra-check` on hc status; wakes Herdra only on a flag | Herdra | Timer | Flag list | The flag's event clears it |
 
-A new project follows the `projectify` skill, which ends with `ceph_start`. The start tools are `dendra_start`, `manus_start`, `ceph_start` (pi-hc) and `scriptify`; none selects, focuses, waits or polls. A report path in the table is an example: each repository's rules decide where checked-in artifacts live (in `.pi`, under `plan/`).
+A new project follows the `projectify` skill, which ends with `ceph_start`. The start tools are `dendra_start`, `manus_start`, `ceph_start` (pi-herdr) and `scriptify`; none selects, focuses, waits or polls. A report path in the table is an example: each repository's rules decide where checked-in artifacts live (in `.pi`, under `plan/`).
 
 Use helpers routinely for bounded contract/control-flow tracing, implementation comparison, change-impact and relevant-test discovery, uncertainty investigation, and documentation/API verification. A helper reads, runs read-only commands and queries (bash: git, Python/uv, DuckDB/SQLite, Snowflake helpers) and reports evidence; it is read-only by role and never owns a Task. When that evidence must be a Sideshow post, the helper's owner publishes it from the returned report: a read-only helper gains no publishing tool (task-660). Use a Reviewer when Algorant asks for one; owner verification is the default.
 
@@ -39,7 +39,7 @@ Every bound job has a northstar the `notes` tool and the nstar hooks keep. Nativ
 - **At each compaction** nstar injects one block: the Task (title, scope, constraints), those captures, and this terminal's open inbox items.
 - **Task-free jobs** keep their ignored `.pi/notes/<label>.md` note, which feeds the same block.
 - There is no automatic `next` placeholder: one near-compaction nudge per window asks for the next step.
-- Idle compaction (pi-hc) only compacts at 60% when idle; nstar is the only post-compaction injector.
+- Idle compaction (pi-herdr) only compacts at 60% when idle; nstar is the only post-compaction injector.
 
 ## Native HC
 
@@ -63,7 +63,7 @@ A Worker or manus whose proof needs its own hc core uses `~/.pi/agent/scripts/hc
 
 The launch stays on the starter's core but adopts into its existing app space: `manus_start` discovers the unique current app membership matching the native `herdr.space` label and caller terminal (and `herdr.tab` when present), then checks the app space's machine alias against the caller core ID using that app host's native `hc machine ls`. Discovery checks the local app and connected peers; missing app binaries are candidate misses, while missing/ambiguous membership or unresolved identity fails before side effects. The child gets the unqualified native space ID and uses the resolved app host for tab rename and its own-tab close. HC launch, worktree and inbox return route remain local to the caller. It runs with `--rm --no-parent` under `child-exit` (an end without any report reaches its `starter=`), label/slug name, optional `task=` and `starter=`; Worktrunk creates isolated checkouts under normal hook approval. The tool renames the adopted tab once or reports pending. A failure preserves any created checkout and names it; do not retry blindly. The inbox report, not idle/done, proves the outcome.
 
-When Task-backed, the manus claims its Task and reports blockers and results to its starter (never past it) as a short report: headline, what's decided, what's needed, a link; detail stays in the artifact. Worker handoffs stay with the manus that started the Worker. It merges its track once Algorant has approved the work and it is verified, tells its starter in one line, then closes its own tab with `tab.close --id <own-tab> --confirmed true`. After merging shared Pi resources the merging owner reloads as the [pi-hc README](../../extensions/pi-hc/README.md) describes. If the work still needs Algorant's look, it delivers its branch and its starter merges after his yes. A manus never starts another manus, opens another project's tabs, or adds a parallel runtime/identity registry.
+When Task-backed, the manus claims its Task and reports blockers and results to its starter (never past it) as a short report: headline, what's decided, what's needed, a link; detail stays in the artifact. Worker handoffs stay with the manus that started the Worker. It merges its track once Algorant has approved the work and it is verified, tells its starter in one line, then closes its own tab with `tab.close --id <own-tab> --confirmed true`. After merging shared Pi resources the merging owner reloads as the [pi-herdr README](../../extensions/pi-herdr/README.md) describes. If the work still needs Algorant's look, it delivers its branch and its starter merges after his yes. A manus never starts another manus, opens another project's tabs, or adds a parallel runtime/identity registry.
 
 ### Start a project's Ceph
 
@@ -103,7 +103,7 @@ Default `worktree:true` uses Worktrunk's approved creation lifecycle. Explicit `
 
 **Direction-check** after a plan or first ready report: a sound approach with a localized defect gets one correction. A wrong operation boundary, missing central mechanism, unsafe assumption, or evidence contradicting claims requires `worker_discard`, a rewritten contract, and a fresh attempt. After two failed correction cycles on the same criterion, discard is the default; continuation needs a named remaining problem, established from actual feedback and evidence, not the aggregate Task rework count.
 
-`worker_feedback` routes in-flight direction and `worker_pause` interrupts; there is no separate message, rework, integrate or cancel tool. Full contract: [pi-hc](../../extensions/pi-hc/README.md#native-workers-m3).
+`worker_feedback` routes in-flight direction and `worker_pause` interrupts; there is no separate message, rework, integrate or cancel tool. Full contract: [pi-herdr](../../extensions/pi-herdr/README.md#native-workers-m3).
 
 ### One child lifecycle
 
@@ -112,7 +112,7 @@ Child lifetime (`--rm`, explicit keep) is the global AGENTS.md rule (*Work*); om
 - An ordinary final answer is forwarded to the parent once, automatically; `report({text})` sends it explicitly. Plain text is always final. It arrives as a labelled agent message in the parent's durable inbox (headline, private report path, session path), never in the composer.
 - A question uses `report({text, question:true})` and also ends the job. Answer a kept child through `agent_send`; otherwise start follow-up work from its saved session and artifacts.
 - Errors go to the parent's durable inbox, then the child closes unless kept. Only a final report establishes success, not idle, done or exit 0. On unconfirmed delivery, inspect the exact child and parent before retrying; never blindly resend.
-- Every report and question is written in full to a private `/tmp/pi-hc-report-*/report.md`; read it before acting on the headline. Session files are kept.
+- Every report and question is written in full to a private `/tmp/pi-herdr-report-*/report.md`; read it before acting on the headline. Session files are kept.
 - Children report through the inbox (never wait, sleep or poll). Read actual outcomes, runtime status and the `hc read` last resort as global AGENTS.md, *Extension workflows*, "Verify delegated work" says; never use focus-changing peeks for coordination. Task claimed/delivered state comes from Tandem, not runtime status.
 
 A manus is a full interactive Pi in its own app tab, not a scoped helper invocation: it uses the top-level launch above, reports through `agent_send`, and closes its own tab. User-run scripts use the `scriptify` tool (see the `scriptify` skill). New or reopened projects follow the `projectify` skill.

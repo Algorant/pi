@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendEvent, headlineOf, inboxDir, inboxKey, localMachine, newId, steersWhileWorking, type Envelope } from "./envelope.ts";
-import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-hc/core.ts";
+import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
 import { hcAddress } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
 

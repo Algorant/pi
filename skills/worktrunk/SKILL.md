@@ -23,7 +23,7 @@ skill when a task involves a Worktrunk-managed repository or the `wt` CLI. Keep 
 
 ## Host boundary
 
-Under `HC_TERMINAL_ID`, an owned-worktree manus starts with `manus_start {worktree: true}`, which runs `wt switch --create <label slug> --no-cd` under the normal hook approval. A Task-backed or Task-free Worker uses `dendra_start {kind: worker}`, with exactly taskId OR brief, which owns `wt switch --create --base @ --no-cd` and Worktrunk's approved creation lifecycle before starting its native HC child. Worktrees default on; explicit `worktree:false` skips creation, refuses another active worktree-less Worker on that captured checkout, and retains shared checkout/branch on finish/discard (no merge/removal). Native Worker guidance lives in `agency` and [pi-hc](../../extensions/pi-hc/README.md#native-workers-m3).
+Under `HC_TERMINAL_ID`, an owned-worktree manus starts with `manus_start {worktree: true}`, which runs `wt switch --create <label slug> --no-cd` under the normal hook approval. A Task-backed or Task-free Worker uses `dendra_start {kind: worker}`, with exactly taskId OR brief, which owns `wt switch --create --base @ --no-cd` and Worktrunk's approved creation lifecycle before starting its native HC child. Worktrees default on; explicit `worktree:false` skips creation, refuses another active worktree-less Worker on that captured checkout, and retains shared checkout/branch on finish/discard (no merge/removal). Native Worker guidance lives in `agency` and [pi-herdr](../../extensions/pi-herdr/README.md#native-workers-m3).
 
 ## Inspect first
 

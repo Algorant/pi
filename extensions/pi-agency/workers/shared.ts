@@ -16,7 +16,7 @@ import type {
 } from "./handoff-record.ts";
 
 /**
- * Task, Worktrunk, Git and report authority for native HC Workers (pi-hc).
+ * Task, Worktrunk, Git and report authority for native HC Workers (pi-herdr).
  * Nothing here knows a terminal identity.
  */
 

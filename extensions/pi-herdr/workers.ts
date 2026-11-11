@@ -533,14 +533,14 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
             await sendAgentMessage(ctx, { terminal: worker.record.owner.terminal, kind: "result", body: noticeBody(worker, review) });
           } catch (error) {
             // The handoff file is the authority; the owner (or a recovering owner) reads it.
-            pi.appendEntry("pi-hc-worker-notice-error", { deliveryId: worker.record.deliveryId, invocationId: settled.invocationId, error: diagnosticText(error) });
-            console.error(`[pi-hc] Worker owner notice failed: ${diagnosticText(error)}`);
+            pi.appendEntry("pi-herdr-worker-notice-error", { deliveryId: worker.record.deliveryId, invocationId: settled.invocationId, error: diagnosticText(error) });
+            console.error(`[pi-herdr] Worker owner notice failed: ${diagnosticText(error)}`);
           }
         }
         if (ctx.hasUI) ctx.ui.notify(`Worker ${state} handoff recorded for ${workerName(worker.record)}`, state === "failed" ? "error" : "info");
       }
     } catch (error) {
-      console.error(`[pi-hc] Worker handoff failed: ${diagnosticText(error)}`);
+      console.error(`[pi-herdr] Worker handoff failed: ${diagnosticText(error)}`);
       if (ctx.hasUI) ctx.ui.notify(`Worker handoff failed: ${diagnosticText(error)}`, "error");
     }
     await closeUnlessKept(ctx);

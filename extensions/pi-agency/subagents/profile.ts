@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-/** `pi --agency-profile <name>` selects one of these definitions for a native HC helper (pi-hc/profile.ts). */
+/** `pi --agency-profile <name>` selects one of these definitions for a native HC helper (pi-herdr/profile.ts). */
 export const AGENCY_PROFILE_FLAG = "agency-profile";
 /** getFlag is extension-local; shared policies inspect this process's actual CLI mode. */
 export function hcProfileRequested(): boolean {

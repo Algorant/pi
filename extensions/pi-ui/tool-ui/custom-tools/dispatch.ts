@@ -6,7 +6,7 @@ import { durationLabel, fieldLine, joinTitleParts, section, statusIcon, toolName
 import type { BoxedToolRendererState, BoxedToolRenderInput, ToolRenderContext, ToolUiBoxModel, ToolUiTone } from "../core/types";
 import { labelFrom } from "../../../../scripts/whois.ts";
 
-/** The pi-hc dispatch tools (pi-hc/dispatch.ts): dendra_start, manus_start, ceph_start. */
+/** The pi-herdr dispatch tools (pi-herdr/dispatch.ts): dendra_start, manus_start, ceph_start. */
 export type DispatchTool = "dendra_start" | "manus_start" | "ceph_start";
 type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
 type Details = Record<string, any>;

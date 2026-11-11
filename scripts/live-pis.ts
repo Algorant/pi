@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { appendEvent, headlineOf, localMachine, modelControlError, newId, type Envelope, type ModelControl } from "../extensions/pi-agency/inbox/envelope.ts";
 import { dropHcEnvelope } from "../extensions/pi-agency/inbox/send.ts";
-import { coreId, hcJson, hcMachines, isHc, piBackground } from "../extensions/pi-hc/core.ts";
+import { coreId, hcJson, hcMachines, isHc, piBackground } from "../extensions/pi-herdr/core.ts";
 import { hcAddress, terminalWho } from "./whois.ts";
 
 /** Read-only native discovery shared by /pi-reload and Herdra's model cutover. */
