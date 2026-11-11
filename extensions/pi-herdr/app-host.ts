@@ -1,11 +1,12 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { command, diagnosticText } from "../pi-agency/workers/shared.ts";
 import { coreId, hcJson, hcMachines } from "./core.ts";
 
-export type AppHost = { machine?: string; core: string; machines: Awaited<ReturnType<typeof hcMachines>> };
+/** `home` is set only when the local app is a Windows app reached through WSL interop (its own home, not this HOME). */
+export type AppHost = { machine?: string; core: string; machines: Awaited<ReturnType<typeof hcMachines>>; home?: string };
 export type AppSpace = { app: any; host: AppHost; space: any; tab: any };
 
 export async function appCommand(host: AppHost, args: string[]): Promise<string> {
@@ -14,7 +15,36 @@ export async function appCommand(host: AppHost, args: string[]): Promise<string>
     : command("herdr-app", args, undefined, 15_000);
 }
 
+function localAppBinary(): string | undefined {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    if (dir && existsSync(join(dir, "herdr-app"))) return realpathSync(join(dir, "herdr-app"));
+  }
+  return undefined;
+}
+
+/**
+ * Under WSL, `herdr-app` may be the Windows app: it is hosted by the Windows
+ * core (which lists this WSL core as one of its machines) and keeps its home
+ * on Windows. Describe it by that core's own facts, never by this core's.
+ */
+async function windowsAppHost(): Promise<AppHost> {
+  const lines = (await command("cmd.exe", ["/c", "echo %HERDR_APP_HOME%& echo %USERPROFILE%& where hc.exe"], "/mnt/c", 15_000))
+    .split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const [appHome, profile, hcExe] = lines;
+  if (!profile || !hcExe?.toLowerCase().endsWith("hc.exe")) throw new Error(`Could not find the Windows app's hc.exe and home from WSL (cmd.exe gave: ${lines.join(" | ")}).`);
+  const wsl = async (path: string) => (await command("wslpath", ["-u", path], undefined, 15_000)).trim();
+  const hc = await wsl(hcExe);
+  const home = await wsl(appHome && appHome !== "%HERDR_APP_HOME%" ? appHome : `${profile}\\.config\\herdr-app`);
+  const [server, listed] = await Promise.all([
+    command(hc, ["server", "status", "--json"], "/mnt/c", 15_000).then(JSON.parse),
+    command(hc, ["machine", "ls", "--json"], "/mnt/c", 15_000).then(JSON.parse),
+  ]);
+  if (typeof server.core?.id !== "string" || !Array.isArray(listed.machines)) throw new Error("The Windows app's hc returned no core id or machines; cannot identify its app host.");
+  return { core: server.core.id, machines: listed.machines, home };
+}
+
 export async function localAppHost(): Promise<AppHost> {
+  if (localAppBinary()?.toLowerCase().endsWith(".exe")) return windowsAppHost();
   const [server, machines] = await Promise.all([hcJson(["server", "status"]), hcMachines()]);
   if (typeof server.core?.id !== "string") throw new Error("hc server status returned no local core id; cannot identify an app host.");
   return { core: server.core.id, machines };
@@ -34,16 +64,16 @@ function isAppClosed(error: unknown): boolean {
 }
 
 async function appListings(): Promise<{ listings: Array<{ app: any; host: AppHost }>; closed: string[] }> {
-  const local = await localAppHost();
+  // Other machines are reached through this core, so iterate this core's own machine list.
+  const [local, reachable] = await Promise.all([localAppHost(), hcMachines()]);
   const listings: Array<{ app: any; host: AppHost }> = [];
   const errors: string[] = [];
   const closed: string[] = [];
-  const localHasApp = (process.env.PATH ?? "").split(":").some((dir) => dir && existsSync(join(dir, "herdr-app")));
-  if (localHasApp) {
+  if (localAppBinary()) {
     try { listings.push({ app: parseAppListing(await appCommand(local, ["ls"])), host: local }); }
     catch (error) { errors.push(`local herdr-app ls: ${diagnosticText(error)}`); }
   }
-  for (const machine of local.machines.filter((entry) => entry.state === "connected")) {
+  for (const machine of reachable.filter((entry) => entry.state === "connected")) {
     try {
       const [raw, remoteMetadata] = await Promise.all([
         command("hc", ["exec", "--on", machine.name, "--", "herdr-app", "ls"], undefined, 15_000),
@@ -126,7 +156,7 @@ export async function appView(host: AppHost): Promise<any> {
     path = join(home, "view.json");
     raw = await command("hc", ["file", "read", "--on", host.machine, path], undefined, 15_000);
   } else {
-    path = join(process.env.HERDR_APP_HOME || join(homedir(), ".config", "herdr-app"), "view.json");
+    path = join(host.home ?? (process.env.HERDR_APP_HOME || join(homedir(), ".config", "herdr-app")), "view.json");
     raw = await readFile(path, "utf8");
   }
   try {
