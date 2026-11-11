@@ -29,6 +29,38 @@ Decide whether the result is exploration or revision:
 
 Do not use a targeted add merely to represent a new step. A concrete post id is required for revisions and replies.
 
+## Writing for Algorant
+
+- **Decide first, evidence after.** A post that needs a decision opens with a callout, then the detail below it:
+
+  > [!DECIDE] one sentence naming the choice
+  >
+  > - **A — title.** What it costs and what it buys.
+  > - **B — title.** What it costs and what it buys.
+  >
+  > Recommendation: A, because …
+
+  Two or three options, the recommendation marked. Never split one decision's options across posts.
+- **Prose meant for him carries no code identifiers, paths or flags.** Those belong in the detail sections, a quotation, or a `code` surface; the prose says what happens, not what is called.
+- **A flow, lifecycle or architecture is a diagram**, not a paragraph of arrows.
+- **No `#` heading inside a body.** The post title is the title; start at `##`, one concept per post.
+- `> [!NOTE]` and `> [!WARNING]` callouts are supported by the Herdr window.
+
+## Which artifact fits which job
+
+| job | surface | why |
+| --- | --- | --- |
+| a decision for him | the Decide box above, one short surface per option | he compares without paging |
+| a comparison | a `markdown` table | dense and scannable |
+| a flow, lifecycle or architecture | `mermaid`, rendered by Pele | the `studio` skill owns the how |
+| a UI or visual change | before/after `image` surfaces in his theme | the Herdr window strips ANSI, so a `terminal` surface loses the colour that is the point |
+| a README or doc | `markdown` exactly as its audience sees it | review the reader's view, not the source |
+| command output | `terminal` | keeps ANSI where colour carries meaning |
+| research | `markdown` findings first, sources last | the answer before the evidence |
+| a run history | `trace` | ordered steps read as a timeline |
+
+One session per topic (see above). The `studio` skill owns colours, fonts and tool choice for visuals; this table only picks the surface.
+
 ## Authored surfaces
 
 A post has one or more of these nine surface kinds. Each field belongs to specific kinds; sending a field to another kind is rejected (for example, `mermaid` accepts only its source, not `title`; surface `title` exists only on `terminal`, `code`, and `trace`):
