@@ -26,6 +26,7 @@ It's a showroom, not an installer.
 - **[pi-providers](extensions/pi-providers/README.md)** — all things related to various providers and my settings for them
 - **[pi-sideshow](extensions/pi-sideshow/README.md)** — dedicated extension for [sideshow](https://github.com/modem-dev/sideshow)
 - **[pi-tandem](extensions/pi-tandem/README.md)** — dedicated extension for [tandem](https://github.com/Algorant/tandem)
+- **[pi-todos](extensions/pi-todos/README.md)** — a small todo list for the current session
 - **[pi-ask-me](extensions/pi-ask-me/README.md)** — my custom 'decisions' style dialog pop-up for pi
 - **[pi-ui](extensions/pi-ui/README.md)** — my various custom ui tweaks. custom header, footer, toolcall renders, etc
 - **[pi-web-tools](extensions/pi-web-tools/README.md)** — web search, browser use, and other web based tools extension. powered by things like [ketch](https://github.com/Algorant/ketch), [obscura](https://github.com/h4ckf0r0day/obscura), and [xurl](https://github.com/xdevplatform/xurl)
