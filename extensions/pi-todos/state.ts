@@ -1,4 +1,6 @@
-export type TodoStatus = "not-started" | "in-progress" | "completed";
+export const TODO_STATUSES = ["not-started", "in-progress", "waiting", "completed"] as const;
+
+export type TodoStatus = typeof TODO_STATUSES[number];
 
 export type TodoItem = {
   id: number;

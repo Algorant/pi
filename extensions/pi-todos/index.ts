@@ -10,24 +10,19 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
 import { registerWidgetSection, requestWidgetLayoutRender, unregisterWidgetSection } from "../pi-ui/widget-layout";
+import { createManageTodoListRenderer } from "../pi-ui/tool-ui/custom-tools/todos";
 import { Type } from "typebox";
 import {
   applyTodoEntry,
+  TODO_STATUSES,
   type ManageTodoListInput,
   type TodoDetails,
   type TodoItem,
-  type TodoStatus,
 } from "./state";
+import { todoHeaderLine, todoItemLines } from "./view";
 
 const WIDGET_ID = "pi-todos";
-
-const STATUS_ICONS: Record<TodoStatus, string> = {
-  completed: "✓",
-  "in-progress": "◉",
-  "not-started": "○",
-};
 
 function stringEnum(values: readonly string[], options?: Record<string, unknown>) {
   return Type.Union(values.map((value) => Type.Literal(value)) as any, options);
@@ -37,8 +32,8 @@ const TodoItemSchema = Type.Object({
   id: Type.Number({ description: "Unique identifier for the todo. Use sequential numbers starting from 1." }),
   title: Type.String({ description: "Concise action-oriented todo label. Displayed in UI." }),
   description: Type.String({ description: "Detailed context, requirements, implementation notes, or acceptance criteria." }),
-  status: stringEnum(["not-started", "in-progress", "completed"] as const, {
-    description: "not-started: Not begun | in-progress: Currently working | completed: Fully finished",
+  status: stringEnum(TODO_STATUSES, {
+    description: "not-started: Not begun | in-progress: Currently working (more than one item may be in progress) | waiting: Blocked on someone or something else | completed: Fully finished",
   }),
 });
 
@@ -84,7 +79,7 @@ class TodoState {
       ids.add(todo.id);
       if (!todo.title?.trim()) errors.push(`Item ${todo.id}: title is required`);
       if (!todo.description?.trim()) errors.push(`Item ${todo.id}: description is required`);
-      if (!["not-started", "in-progress", "completed"].includes(todo.status)) {
+      if (!TODO_STATUSES.includes(todo.status)) {
         errors.push(`Item ${todo.id}: invalid status ${todo.status}`);
       }
     }
@@ -103,24 +98,7 @@ class TodoState {
 function renderTodoWidgetLines(state: TodoState, theme: any, width: number): string[] {
   const todos = state.read();
   if (todos.length === 0) return [];
-
-  const stats = state.stats();
-  const lines = [
-    theme.fg("accent", " Todo List ") + theme.fg("muted", `— ${stats.completed}/${stats.total} completed`),
-  ];
-
-  for (const todo of todos) {
-    const icon = STATUS_ICONS[todo.status] ?? "○";
-    const id = theme.fg("accent", `${todo.id}.`);
-    const title = todo.status === "completed"
-      ? theme.fg("dim", theme.strikethrough(todo.title))
-      : todo.status === "in-progress"
-        ? theme.fg("warning", todo.title)
-        : todo.title;
-    lines.push(`  ${icon} ${id} ${title}`);
-  }
-
-  return lines.map((line) => truncateToWidth(line, width));
+  return [todoHeaderLine(todos, theme, width), ...todoItemLines(todos, theme, { width })];
 }
 
 function persistClearedState(ctx: ExtensionContext): void {
@@ -155,6 +133,7 @@ function createTool(state: TodoState, onUpdate: (ctx: ExtensionContext) => void)
     label: "Todo List",
     description: TOOL_DESCRIPTION,
     parameters: ManageTodoListParams,
+    ...createManageTodoListRenderer(),
 
     async execute(
       _toolCallId: string,

@@ -94,7 +94,11 @@ function renderLayout(placement: WidgetPlacement, width: number, theme: Theme): 
 		if (lines.length > 0) lines.push(" ");
 		lines.push(...sectionLines);
 	}
-	return lines;
+	if (lines.length === 0) return lines;
+	// One blank line at the editor-facing edge, for every section registered
+	// through this layout: below the widget area above the editor, above the
+	// widget area below it.
+	return placement === "aboveEditor" ? [...lines, " "] : [" ", ...lines];
 }
 
 function focusedComponentOf(tui: TUI): Component | null {

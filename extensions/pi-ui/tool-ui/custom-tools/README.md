@@ -35,6 +35,7 @@ pi.registerTool({
 - `inbox-overlay.ts` — the `/inbox` overlay drawn for the `pi-agency` inbox: Open / Recent / Thread tabs over the transcript, arrow keys, Enter opens a thread, `c` closes a message with a note, Esc leaves. pi-agency supplies the data and the close action.
 - `ask-me.ts` — boxed `ask_me` call/result card used by `pi-ask-me` without changing the popup dialog UI.
 - `tandem.ts` — boxed Tandem workspace/task/accord/log/rule/decision/Papercut/search cards used by `pi-tandem` tools.
+- `todos.ts` — `manage_todo_list` card used by `pi-todos`: one line when collapsed (`✓ todos · wrote 5 · 2 in progress · 1 next · 1 waiting · 1 done`), the shared glyph list when expanded, and a failed write in an error section.
 - `web-tools.ts` — boxed ketch cards used by `pi-web-tools` tools.
 
 When adding a new helper, keep the collapsed view compact, use dot-separated metadata, and reserve expanded mode for diagnostics/previews that would be noisy by default.

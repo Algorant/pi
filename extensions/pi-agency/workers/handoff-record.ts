@@ -29,7 +29,7 @@ export type WorkerReportChecklistItem = {
   id: number;
   title: string;
   description: string;
-  status: "not-started" | "in-progress" | "completed";
+  status: "not-started" | "in-progress" | "waiting" | "completed";
 };
 export type WorkerReportSource = { checkoutPath: string; branch: string; head: string; statusPorcelain: string };
 /** The Task's runnable validations as the runtime ran them for a ready report, against `head`. */
@@ -163,7 +163,7 @@ function reportChecklist(value: unknown): WorkerReportChecklistItem[] {
     const todo = item as Record<string, unknown>;
     exactKeys(todo, ["id", "title", "description", "status"], `checklist[${index}]`);
     if (typeof todo.id !== "number" || !Number.isSafeInteger(todo.id) || todo.id < 1) throw new Error(`Invalid Worker report checklist[${index}] id.`);
-    if (todo.status !== "not-started" && todo.status !== "in-progress" && todo.status !== "completed") throw new Error(`Invalid Worker report checklist[${index}] status.`);
+    if (todo.status !== "not-started" && todo.status !== "in-progress" && todo.status !== "waiting" && todo.status !== "completed") throw new Error(`Invalid Worker report checklist[${index}] status.`);
     return { id: todo.id, title: reportString(todo.title, `checklist[${index}] title`), description: reportString(todo.description, `checklist[${index}] description`), status: todo.status };
   });
 }
