@@ -124,8 +124,8 @@ export const PROVIDER_COMPANY: Readonly<Record<string, string>> = Object.freeze(
   openai: "openai",
   "openai-codex": "openai",
 });
-const AGGREGATOR_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot"]);
-const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai" });
+const AGGREGATOR_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot", "opencode-go"]);
+const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek" });
 
 /** The company behind a `provider/id` model. Throws when it is not explicitly mapped. */
 export function modelCompany(model: string, where: string): string {
