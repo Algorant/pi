@@ -46,7 +46,6 @@ pi-agency does not measure usage. These are the places that do, each owned elsew
 | Cost and tokens of the current conversation | Pi itself: the footer's ↑in ↓out $cost | Pi totals each response's reported usage for the session | None |
 | Request sizes and timing | `/request-metrics` — `pi-providers/request-metrics.ts` | Writes `pi-request-metrics` entries (payload and image bytes, latency) into the session file; the command only shows or hides them | None |
 | Every past conversation | Session archive: `~/scripts/agent-sync push` (Algomarchy) copies each machine's Pi sessions to `homelab-server:/srv/data/BIGNAS/agentic/sessions/<host>/`; `agent-sync status` lists the last sync | Append-only copy, run by hand | None; `history` (pi-agency) searches it for user messages only |
-| Moving old sessions out of the live folder | `agent/scripts/pi-session-archive.ts` | Manual, per machine; preview by default | None |
 | A one-off usage audit (skills, tools) | No kept tool. The task-621/622 audits used throwaway readers over the session archive; the method is in `plan/recurring-pi-system-audit-draft.md` | Run again by hand when an audit is asked for | None |
 
 The old pi-agency `/metrics` (token and cost accounting by role and model) was removed in task-634; it is recoverable from git (`bd347af6`, `f47e479f`, `b909a38f`).

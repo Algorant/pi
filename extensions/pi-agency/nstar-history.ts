@@ -7,7 +7,7 @@ import { createNstarHistoryRenderer } from "../pi-ui/tool-ui/custom-tools/nstar-
 
 const execFile = promisify(execFileCallback);
 const MESSAGE_QUERY = 'reduce inputs as $entry ([]; if length >= 5 then . else . + [($entry | select(.type == "message" and .message.role == "user") | (.message.content | if type == "string" then . else map(select(.type == "text") | .text) | join("") end) | select(contains($phrase)) | .[0:1200])] end) | map(select(type == "string")) | .[]';
-const LOCAL_ROOTS = '"$HOME/.pi/agent/sessions" "$HOME/.pi/sessions" "$HOME/.pi/sessions_archive" "${PI_CODING_AGENT_SESSION_DIR:-}"';
+const LOCAL_ROOTS = '"$HOME/.pi/agent/sessions" "$HOME/.pi/sessions" "${PI_CODING_AGENT_SESSION_DIR:-}"';
 const ARCHBOX_LOCAL_NAME = "homelab-server";
 const REMOTE_ROOT = "/srv/data/BIGNAS/agentic/sessions";
 const MAX_OUTPUT = 65_536;
