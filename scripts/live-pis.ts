@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { appendEvent, headlineOf, localMachine, modelControlError, newId, type Envelope, type ModelControl } from "../extensions/pi-agency/inbox/envelope.ts";
+import { appendEvent, localMachine, modelControlError, newId, type Envelope, type ModelControl } from "../extensions/pi-agency/inbox/envelope.ts";
 import { dropHcEnvelope } from "../extensions/pi-agency/inbox/send.ts";
 import { coreId, hcJson, hcMachines, isHc, piBackground } from "../extensions/pi-herdr/core.ts";
 import { hcAddress, terminalWho } from "./whois.ts";
@@ -257,7 +257,7 @@ export async function requestModel(target: string, request: Pick<ModelControl, "
     v: 1, id: newId(), at: new Date().toISOString(), kind: "request", reply_to: null,
     from: { machine: localMachine(), ...await hcAddress(process.env.HC_TERMINAL_ID!) },
     to: { machine: localMachine(), terminal: target, core: "", label: "" },
-    headline: headlineOf(body), body, control,
+    body, control,
   };
   try { await dropHcEnvelope(env, target); } catch (error) { throw new Error(`Model request not sent to ${target}: ${error instanceof Error ? error.message : error}`); }
   appendEvent({ op: "send", env });

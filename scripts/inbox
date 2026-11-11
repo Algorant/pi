@@ -24,8 +24,8 @@ import { hcJson, hcText, isHc } from "../extensions/pi-herdr/core.ts";
 import { hcAddress, peerText } from "./whois.ts";
 import { dropHcEnvelope, dropLocalEnvelope, statusText, targetStatus, type TargetStatus } from "../extensions/pi-agency/inbox/send.ts";
 import {
-  ageText, appendEvent, closeMessage, deliveryState, headlineOf, ID_PATTERN, KINDS, localActor, localMachine, messages, newId, openMessages,
-  readEvents, reopenMessage, thread,
+  ageText, appendEvent, closeMessage, deliveryState, ID_PATTERN, KINDS, localActor, localMachine, messages, messageView, newId,
+  openMessages, readEvents, reopenMessage, thread,
   type Envelope, type MessageView,
 } from "../extensions/pi-agency/inbox/envelope.ts";
 
@@ -68,7 +68,7 @@ function row(view: MessageView): string {
 // Pi session for a plain script. No transcript watcher or second transport.
 async function sendResult(recipient: string, body: string): Promise<never> {
   const env: Envelope = { v: 1, id: newId(), at: new Date().toISOString(), kind: "result", reply_to: null,
-    from: { machine: local, ...await hcAddress(process.env.HC_TERMINAL_ID!) }, to: { machine: local, terminal: recipient, core: "", label: "" }, headline: headlineOf(body), body };
+    from: { machine: local, ...await hcAddress(process.env.HC_TERMINAL_ID!) }, to: { machine: local, terminal: recipient, core: "", label: "" }, body };
   try { await dropHcEnvelope(env, recipient); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
   appendEvent({ op: "send", env });
   console.log(env.id);
@@ -88,7 +88,10 @@ if (command === "exited") {
   if (!isHc() || !since || !exit) fail("exited needs the child's start time and its exit");
   const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
   const core = (await hcJson(["server", "status"])).core?.id;
-  const reported = readEvents().some((event) => event.op === "send" && event.env.from.terminal === self.address
+  // A send whose drop failed is a send event plus a fail event: it did not reach its owner.
+  const events = readEvents();
+  const failed = new Set(events.flatMap((event) => (event.op === "fail" ? [event.id] : [])));
+  const reported = events.some((event) => event.op === "send" && !failed.has(event.env.id) && event.env.from.terminal === self.address
     && event.env.from.core === core && event.env.at >= since);
   if (reported) process.exit(0);
   const owner = self.parent ?? self.labels?.starter;
@@ -103,22 +106,25 @@ if (command === "exited") {
     + `It ran in ${self.cwd} on ${local}; a --rm terminal is gone now. Last screen lines:\n${tail}`);
 }
 
-const events = readEvents();
+// The journal is read only by the commands that need it: `open` answers from the open index.
 if (command === "open") {
-  const open = openMessages(events);
+  const open = openMessages();
   if (json) console.log(JSON.stringify(open, null, 2));
   else if (open.length === 0) console.log("No unanswered requests.");
   else open.forEach((view) => console.log(row(view)));
 } else if (command === "recent") {
   const count = Number(rest[0] ?? 20);
   if (!Number.isInteger(count) || count <= 0) fail(`recent takes a positive count, got ${rest[0]}`);
-  const recent = [...messages(events).values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, count);
+  const recent = [...messages(readEvents()).values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, count);
   if (json) console.log(JSON.stringify(recent, null, 2));
   else recent.forEach((view) => console.log(row(view)));
 } else if (command === "thread") {
   const id = rest[0] ?? fail("thread needs a message id");
-  const views = thread(events, id);
-  if (views.length === 0) fail(`no message ${id} in the local log`);
+  // The journal holds a conversation this machine took part in; a message that arrived from another
+  // machine leaves only its delivery here, and is shown from the open index while it is still open.
+  const views = thread(readEvents(), id);
+  const single = views.length === 0 ? openMessages().filter((view) => view.id === id) : views;
+  if (single.length === 0) fail(`no message ${id} in the local log (a message received from another machine lives here only while it is open; otherwise read its session transcript)`);
   let ownCore: string;
   try { ownCore = (await hcJson(["server", "status"])).core.id; } catch (error) { fail(`hc server status: ${error instanceof Error ? error.message : error}`); }
   // Each recipient's status is read once, now, from its own core.
@@ -128,9 +134,9 @@ if (command === "open") {
     if (!statuses.has(key)) statuses.set(key, targetStatus(view.to, ownCore));
     return statuses.get(key)!;
   };
-  const detail = await Promise.all(views.map(async (view) => ({ delivery: deliveryState(view, ownCore), target: await status(view) })));
-  if (json) console.log(JSON.stringify(views.map((view, i) => ({ ...view, ...detail[i] })), null, 2));
-  else views.forEach((view, i) => {
+  const detail = await Promise.all(single.map(async (view) => ({ delivery: deliveryState(view, ownCore), target: await status(view) })));
+  if (json) console.log(JSON.stringify(single.map((view, i) => ({ ...view, ...detail[i] })), null, 2));
+  else single.forEach((view, i) => {
     console.log(row(view));
     for (const line of view.body.split("\n")) console.log(`    ${line}`);
     const { delivery, target } = detail[i]!;
@@ -141,13 +147,13 @@ if (command === "open") {
   const [id, ...note] = rest;
   if (!id || !ID_PATTERN.test(id)) fail("close needs a message id like m4f1a2c9");
   if (note.join(" ").trim() === "") fail("close needs a note saying why");
-  if (!messages(events).has(id)) fail(`no message ${id} in the local log`);
+  if (!messageView(id)) fail(`no message ${id} in the local log`);
   closeMessage(id, note.join(" "), await localActor());
   console.log(`Closed ${id}.`);
 } else if (command === "reopen") {
   const [id, ...note] = rest;
   if (!id || !ID_PATTERN.test(id)) fail("reopen needs a message id like m4f1a2c9");
-  const view = messages(events).get(id) ?? fail(`no message ${id} in the local log`);
+  const view = messageView(id) ?? fail(`no message ${id} in the local log`);
   if (view.kind !== "request" && view.kind !== "blocked") fail(`${id} is a ${view.kind}; only requests and blocked messages open and close`);
   if (view.failed) fail(`${id} was never delivered (${view.failed}); send it again instead`);
   if (!view.closed) fail(`${id} is already open`);

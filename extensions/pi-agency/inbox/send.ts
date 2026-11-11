@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, headlineOf, inboxDir, inboxKey, localMachine, newId, steersWhileWorking, type Envelope } from "./envelope.ts";
+import { appendEvent, inboxDir, inboxKey, localMachine, newId, steersWhileWorking, type Envelope } from "./envelope.ts";
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
 import { hcAddress } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
@@ -117,7 +117,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     v: 1, id: newId(), at: new Date().toISOString(), kind: params.kind, reply_to: params.reply_to ?? null,
     from: { machine, ...own, session: context.sessionManager.getSessionId(), ...(typeof percent === "number" ? { context: Math.round(percent) } : {}) },
     to: { machine, terminal: params.terminal, core: "", label: "" },
-    headline: headlineOf(params.body), body: params.body,
+    body: params.body,
     ...(params.control ? { control: params.control } : {}),
     ...(params.interrupt ? { interrupt: true } : {}),
     ...(task ? { task } : {}),
@@ -126,8 +126,11 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
   try {
     file = await dropHcEnvelope(env, params.terminal);
   } catch (error) {
+    // The send event is the only place this body is stored, so a failed drop still records it, with
+    // the failure beside it: `inbox recent`/`thread` then show what was not delivered and why.
     const reason = error instanceof Error ? error.message : String(error);
-    appendEvent({ op: "fail", env, at: new Date().toISOString(), error: reason });
+    appendEvent({ op: "send", env });
+    appendEvent({ op: "fail", id: env.id, at: new Date().toISOString(), note: reason });
     throw new Error(`Delivery not confirmed to terminal ${params.terminal}; inspect ${env.id} before retrying (${env.id}): ${reason}`);
   }
   appendEvent({ op: "send", env });

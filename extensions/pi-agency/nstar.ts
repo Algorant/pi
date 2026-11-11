@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CONTEXT_PREFIX_EVENT, type ContextPrefix } from "../lib/context-prefix.ts";
 import { hcEndpoint } from "../pi-herdr/core.ts";
 import { hcAddress, peerName, terminalWho } from "../../scripts/whois.ts";
-import { inboxKey, openMessages, readEvents, type Envelope } from "./inbox/envelope.ts";
+import { headlineOf, inboxKey, openMessages, type Envelope } from "./inbox/envelope.ts";
 import { requireContract } from "./workers/contract.ts";
 import { nativeProjectIdentity } from "./workers/shared.ts";
 import { NSTAR_INBOX, NSTAR_WORKER, nstarAppend, nstarCapture, nstarLocation, nstarNote, type NstarBinding, type NstarCaptures, type NstarNote, type NstarSession } from "./nstar-note.ts";
@@ -65,7 +65,7 @@ export function registerNstar(pi: ExtensionAPI): void {
   function openItems(): string {
     if (!endpoint) return "";
     const key = inboxKey(endpoint);
-    const open = openMessages(readEvents()).filter((m) => inboxKey(m.to) === key || inboxKey(m.from) === key);
+    const open = openMessages().filter((m) => inboxKey(m.to) === key || inboxKey(m.from) === key);
     if (!open.length) return "";
     return ["Open inbox items for this terminal: keep each until a reply_to, a close, or its linked Task closes it.",
       ...open.map((m) => `- ${m.id} ${m.kind} ${m.from.label || m.from.terminal} → ${m.to.label || m.to.terminal}: ${m.headline} (${inboxKey(m.to) === key ? "owed by you" : "awaiting a reply"})`)].join("\n");
@@ -124,7 +124,7 @@ export function registerNstar(pi: ExtensionAPI): void {
       const from = peerName(env.from, env.to.machine);
       // A starter relay may carry Algorant's words: verbatim. Any other message is a one-line hand-off.
       if (source?.terminal === env.from.terminal && source?.core === env.from.core) await capture(ctx, "approval", `relayed by ${from}`, env.body, env.id, env.at);
-      else await capture(ctx, "handoff", `${from} (agent hand-off; not Algorant)`, `${env.headline} (inbox thread ${env.id})`, env.id, env.at);
+      else await capture(ctx, "handoff", `${from} (agent hand-off; not Algorant)`, `${headlineOf(env.body)} (inbox thread ${env.id})`, env.id, env.at);
     }).catch((error) => warn(ctx, error));
   });
   pi.on("tool_result", async (event, ctx) => {
@@ -132,7 +132,7 @@ export function registerNstar(pi: ExtensionAPI): void {
     const attribution = `${author} (agent hand-off; not Algorant)`;
     if (event.toolName === "agent_send") {
       const env = (event.details as { envelope?: Envelope } | undefined)?.envelope;
-      if (env) await capture(ctx, "handoff", attribution, `${env.headline} (inbox thread ${env.id})`, env.id, env.at);
+      if (env) await capture(ctx, "handoff", attribution, `${headlineOf(env.body)} (inbox thread ${env.id})`, env.id, env.at);
     } else if (event.toolName === "worker_report") {
       const input = event.input as { status: string; summary: string };
       await capture(ctx, "handoff", attribution, `worker_report ${input.status}: ${firstLine(input.summary)} (worker_handoff ${self})`, "");

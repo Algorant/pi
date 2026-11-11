@@ -6,7 +6,7 @@ import { NSTAR_INBOX } from "../nstar-note.ts";
 import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, sendAgentMessage, statusText, targetStatus, type SendParams } from "./send.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
-import { addressText, ageText, appendEvent, closeMessage, checkHeadline, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, steersWhileWorking, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
+import { addressText, ageText, checkHeadline, closeMessage, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, recordDelivery, steersWhileWorking, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
 import { hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
 import { hcAddress, peerName, peerText } from "../../../scripts/whois.ts";
 
@@ -101,7 +101,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       const session = ctx.sessionManager.getSessionId();
       const transformed = transform ? await transform(env, ctx) : undefined;
       if (transformed === null) {
-        appendEvent({ op: "deliver", env, at: new Date().toISOString(), session });
+        recordDelivery(env, session);
         continue;
       }
       const delivered = transformed ?? env;
@@ -117,7 +117,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         display: true,
         details: delivered,
       }, idle ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "steer" });
-      appendEvent({ op: "deliver", env: delivered, at: new Date().toISOString(), session: ctx.sessionManager.getSessionId() });
+      recordDelivery(delivered, ctx.sessionManager.getSessionId());
     }
   }
 
@@ -172,7 +172,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         headline: view.headline, body: view.body, replyTo: view.reply_to, replies: view.replies, closed: view.closed, failed: view.failed,
       });
       const source = {
-        open: () => openMessages(readEvents()).map(row),
+        open: () => openMessages().map(row),
         recent: () => [...messages(readEvents()).values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 100).map(row),
         thread: (id: string) => thread(readEvents(), id).map(row),
         close: (id: string, note: string) => closeMessage(id, note, { machine: local, ...endpoint }),

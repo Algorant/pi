@@ -1,24 +1,30 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, truncateSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { localAgencySettings, localSettingsPath } from "../local-settings.ts";
 import { hcEndpoint, isHc } from "../../pi-herdr/core.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "../subagents/profile.ts";
-import { newId as uniqueId, stateDir } from "../state.ts";
+import { newId as uniqueId, stateDir, writeAtomic } from "../state.ts";
 
 /**
- * Agent-inbox envelope and local log, shared by the pi-agency inbox and the
+ * Agent-inbox envelope, journal and open index, shared by the pi-agency inbox and the
  * `inbox` CLI. No Pi imports, so the CLI can load it.
  *
- * The log (`log.jsonl`) is local, untracked, semi-ephemeral state: each machine
- * appends what it sees (send, deliver, close). Session transcripts stay the
- * permanent record, because each delivered message carries the full envelope.
+ * The log (`log.jsonl`) is local, untracked, semi-ephemeral state with one JSON event per
+ * line: each machine appends what it sees. A body is stored once per machine — in the
+ * `send` of a message this machine sent, or in the `deliver` of one it received from
+ * another machine; every other event is a reference. Session transcripts stay the
+ * permanent record, because each delivered message carries its full envelope.
+ *
+ * `open.json` beside it is the open index the append path rewrites: an optimisation over
+ * the journal, never the truth (a stale stamp, a missing file or unreadable JSON rebuilds it).
  */
 export const KINDS = ["request", "result", "blocked"] as const;
 export type Kind = (typeof KINDS)[number];
 
 export const INBOX_ROOT = stateDir("pi-agency", "inbox");
 export const LOG_PATH = join(INBOX_ROOT, "log.jsonl");
+export const OPEN_PATH = join(INBOX_ROOT, "open.json");
 
 export type Endpoint = { terminal: string; core: string };
 export type Address = { machine: string; label: string } & Endpoint;
@@ -35,7 +41,7 @@ export type Envelope = {
   /** `context` is the sender's context-window usage in percent when it sent, if Pi reported one. */
   from: Address & { session?: string; context?: number };
   to: Address;
-  headline: string;
+  /** The whole message; its first line is the headline readers derive (`headlineOf`), never stored twice. */
   body: string;
   /** `<project>:<task-N>`: the sender's hc `task=` label (a manus's track), its request's linked Task. */
   task?: string;
@@ -65,12 +71,17 @@ export function modelControlError(control: ModelControl): string | undefined {
 /** Who wrote a close or reopen: this machine and, in an hc terminal, that terminal. */
 export type Actor = { machine: string; terminal?: string; core?: string };
 
+/**
+ * One journal line. Only a `send` carries the body of a message this machine sent, and only a
+ * `deliver` of a message received from another machine carries it here (the only local copy);
+ * every other event refers to the message by id.
+ */
 export type LogEvent =
   | { op: "send"; env: Envelope }
-  | { op: "deliver"; env: Envelope; at: string; session: string }
+  | { op: "deliver"; id: string; at: string; session?: string; env?: Envelope }
   | { op: "close"; id: string; at: string; by: Actor; note: string }
   | { op: "reopen"; id: string; at: string; by: Actor; note: string }
-  | { op: "fail"; env: Envelope; at: string; error: string };
+  | { op: "fail"; id: string; at: string; note: string };
 
 export const inboxDir = (key: string) => join(INBOX_ROOT, encodeURIComponent(key));
 
@@ -110,9 +121,62 @@ export function localMachine(): string {
   return machineName;
 }
 
+/**
+ * Append one event, then rewrite the open index from it. The journal is the truth: the index is
+ * only kept current, and anything that makes the incremental step unsafe (another writer, a stale
+ * or missing index, a reopen, whose envelope the index does not hold) rebuilds it from the journal.
+ */
 export function appendEvent(event: LogEvent): void {
   mkdirSync(INBOX_ROOT, { recursive: true });
-  appendFileSync(LOG_PATH, `${JSON.stringify(event)}\n`);
+  repairJournalTail();
+  const before = journalStat();
+  const index = readOpenIndex();
+  const line = `${JSON.stringify(event)}\n`;
+  appendFileSync(LOG_PATH, line);
+  const after = journalStat();
+  if (index && index.stamp === stampOf(before) && after.size === before.size + Buffer.byteLength(line) && event.op !== "reopen") {
+    writeOpenIndex(applyOpenEvent(index.open, event), stampOf(after));
+    return;
+  }
+  rebuildOpenIndex();
+}
+
+/**
+ * Record one delivery as a reference: the body already sits in the message's `send` on the machine
+ * that sent it. A message whose send event is on another machine keeps its envelope here instead,
+ * because this is the only local copy of its text.
+ */
+export function recordDelivery(env: Envelope, session: string): void {
+  const event: Extract<LogEvent, { op: "deliver" }> = { op: "deliver", id: env.id, at: new Date().toISOString(), session };
+  if (env.from.core !== env.to.core) event.env = env;
+  appendEvent(event);
+}
+
+/**
+ * A writer killed mid-append leaves a partial last line: the next writer cuts it, so its own event
+ * stays a line and readers never have to skip more than one partial tail.
+ */
+function repairJournalTail(): void {
+  let fd: number;
+  try { fd = openSync(LOG_PATH, "r+"); } catch { return; }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return;
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - 65_536);
+      const chunk = Buffer.alloc(end - start);
+      readSync(fd, chunk, 0, chunk.length, start);
+      const newline = chunk.lastIndexOf(0x0a);
+      if (newline >= 0) {
+        if (start + newline + 1 !== size) truncateSync(fd, start + newline + 1);
+        return;
+      }
+      end = start;
+    }
+    truncateSync(fd, 0);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 let cache: { mtimeMs: number; size: number; events: LogEvent[] } | undefined;
@@ -134,9 +198,86 @@ export function readEvents(): LogEvent[] {
   return events;
 }
 
+/** The open index: `{ v, stamp, open }`. The stamp names the journal state it reflects. */
+type OpenIndex = { v: 1; stamp: string; open: MessageView[] };
+const journalStat = () => { try { return statSync(LOG_PATH); } catch { return { size: 0, mtimeMs: 0 }; } };
+/** Size and modification time identify a journal state: any append, truncation or replacement changes one. */
+const stampOf = (stat: { size: number; mtimeMs: number }) => `${stat.size}:${stat.mtimeMs}`;
+
+function readOpenIndex(): OpenIndex | undefined {
+  let index: any;
+  try { index = JSON.parse(readFileSync(OPEN_PATH, "utf8")); } catch { return undefined; }
+  if (index?.v !== 1 || typeof index.stamp !== "string" || !Array.isArray(index.open)) return undefined;
+  const entries: any[] = index.open;
+  if (!entries.every((view) => view && typeof view.id === "string" && typeof view.at === "string" && typeof view.body === "string" && typeof view.from?.terminal === "string" && typeof view.to?.terminal === "string")) return undefined;
+  return { v: 1, stamp: index.stamp, open: entries.map((view) => ({ ...view, headline: headlineOf(view.body) })) };
+}
+
+/** No headline is stored anywhere: it is body line 1, derived on every read. */
+function writeOpenIndex(open: MessageView[], stamp: string): void {
+  writeAtomic(OPEN_PATH, JSON.stringify({ v: 1, stamp, open: open.map(({ headline, ...view }) => view) }), 0o644);
+}
+
+/**
+ * Rebuild from the journal and stamp the state that was read. The stamp is taken before the read, so a
+ * concurrent append can only make it too old (the next reader rebuilds), never claim content it lacks.
+ */
+function rebuildOpenIndex(): MessageView[] {
+  const state = journalStat();
+  const open = openFromEvents(readEvents());
+  writeOpenIndex(open, stampOf(state));
+  return open;
+}
+
+/** The messages that are open now: from the open index, rebuilt from the journal when it is stale or unusable. */
+export function openMessages(): MessageView[] {
+  const index = readOpenIndex();
+  if (index && index.stamp === stampOf(journalStat())) return [...index.open].sort((a, b) => a.at.localeCompare(b.at));
+  return rebuildOpenIndex();
+}
+
+/** One message, whether or not it is still open: the open index first, else the journal. */
+export function messageView(id: string): MessageView | undefined {
+  return openMessages().find((view) => view.id === id) ?? messages(readEvents()).get(id);
+}
+
+/** The message view of one envelope: its headline is body line 1, derived here and never stored. */
+const viewOf = (env: Envelope): MessageView => ({ ...env, headline: headlineOf(env.body), replies: [], lifecycle: [] });
+
+/** One event applied to an open set, in journal order; the reply, close and fail rules are `isOpen`'s. */
+function applyOpenEvent(open: MessageView[], event: LogEvent): MessageView[] {
+  const byId = new Map(open.map((view) => [view.id, view]));
+  switch (event.op) {
+    case "send": {
+      // A reply answers its request, so the parent leaves the open set with it.
+      if (event.env.reply_to) byId.delete(event.env.reply_to);
+      const view = viewOf(event.env);
+      if (isOpen(view)) byId.set(view.id, view);
+      break;
+    }
+    case "deliver": {
+      const id = event.env?.id ?? event.id;
+      const view = byId.get(id) ?? (event.env ? viewOf(event.env) : undefined);
+      if (!view) break; // a message this journal never saw sent or received, e.g. a result from afar
+      view.delivered = event.at;
+      if (isOpen(view)) byId.set(id, view);
+      break;
+    }
+    case "close":
+    case "fail": byId.delete(event.id); break;
+    case "reopen": break; // never applied: appendEvent rebuilds for a reopen
+  }
+  return [...byId.values()];
+}
+
+/** The open messages of one journal read, by the same rules as the incremental update. */
+function openFromEvents(events: LogEvent[]): MessageView[] {
+  return [...messages(events).values()].filter(isOpen).sort((a, b) => a.at.localeCompare(b.at));
+}
+
 /** One close or reopen of a message, in log order; the note names the event. */
 export type Lifecycle = { event: "closed" | "reopened"; at: string; note: string };
-export type MessageView = Envelope & { delivered?: string; failed?: string; replies: string[]; closed?: { at: string; note: string }; lifecycle: Lifecycle[] };
+export type MessageView = Envelope & { headline: string; delivered?: string; failed?: string; replies: string[]; closed?: { at: string; note: string }; lifecycle: Lifecycle[] };
 
 /**
  * One view per message id: send and deliver events merged, with its replies and lifecycle. In log
@@ -146,10 +287,22 @@ export function messages(events: LogEvent[]): Map<string, MessageView> {
   const byId = new Map<string, MessageView>();
   for (const event of events) {
     if (event.op === "close" || event.op === "reopen") continue;
-    const view = byId.get(event.env.id) ?? { ...event.env, replies: [], lifecycle: [] };
-    if (event.op === "deliver") view.delivered = event.at;
-    if (event.op === "fail") view.failed = event.error;
-    byId.set(event.env.id, view);
+    if (event.op === "deliver") {
+      const id = event.env?.id ?? event.id;
+      const known = byId.get(id);
+      if (known) known.delivered = event.at;
+      // A message received from another machine keeps this machine's only copy of its text here.
+      else if (event.env) byId.set(id, { ...viewOf(event.env), delivered: event.at });
+      continue;
+    }
+    if (event.op === "fail") {
+      const failed = byId.get(event.id);
+      if (failed) failed.failed = event.note;
+      continue;
+    }
+    const known = byId.get(event.env.id);
+    // A resend of a known id keeps the first envelope; only its replies and lifecycle accumulate.
+    if (!known) byId.set(event.env.id, viewOf(event.env));
   }
   for (const view of byId.values()) {
     if (view.reply_to) byId.get(view.reply_to)?.replies.push(view.id);
@@ -162,10 +315,12 @@ export function messages(events: LogEvent[]): Map<string, MessageView> {
       target = byId.get(event.id);
       entry = { event: event.op === "close" ? "closed" : "reopened", at: event.at, note: event.note };
     } else {
+      if (event.op === "fail") continue;
       // A reply closes its request once, at the first event that shows it here (send or deliver).
-      if (!event.env.reply_to || seen.has(event.env.id)) continue;
-      seen.add(event.env.id);
-      target = byId.get(event.env.reply_to);
+      const reply = event.env?.reply_to;
+      if (!reply || seen.has(event.env!.id)) continue;
+      seen.add(event.env!.id);
+      target = byId.get(reply);
       entry = { event: "closed", at: event.env.at, note: `answered by ${event.env.id}` };
     }
     if (!target) continue;
@@ -238,7 +393,7 @@ export function linkedTask(view: Pick<Envelope, "task" | "body">): { project?: s
 export async function closeTaskRequests(task: { project?: string; id: string }, outcome: "completed" | "cancelled"): Promise<string | undefined> {
   const note = `${task.project ? `${task.project} ` : ""}${task.id} ${outcome}`;
   try {
-    const linked = openMessages(readEvents()).filter((view) => {
+    const linked = openMessages().filter((view) => {
       const link = linkedTask(view);
       return link && link.id === task.id && (!link.project || link.project === task.project);
     });
@@ -249,10 +404,6 @@ export async function closeTaskRequests(task: { project?: string; id: string }, 
   } catch (error) {
     return `Inbox requests linked to ${task.id} were not closed: ${error instanceof Error ? error.message : String(error)}`;
   }
-}
-
-export function openMessages(events: LogEvent[]): MessageView[] {
-  return [...messages(events).values()].filter(isOpen).sort((a, b) => a.at.localeCompare(b.at));
 }
 
 /** The whole conversation an id belongs to: its root and every reply below it, oldest first. */

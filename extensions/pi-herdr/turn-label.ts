@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { NSTAR_INBOX } from "../pi-agency/nstar-note.ts";
-import { ageText, openMessages, readEvents } from "../pi-agency/inbox/envelope.ts";
+import { ageText, openMessages } from "../pi-agency/inbox/envelope.ts";
 import { hcJson } from "./core.ts";
 
 const MAX_LABEL_LENGTH = 160;
@@ -32,7 +32,7 @@ function labelLine(reply: string): string {
  * read, no extra process beyond the label write that already happens; empty when nothing is owed.
  */
 export function owedLabel(terminal: string): string {
-  const owed = openMessages(readEvents()).filter((view) => !!view.delivered && view.to.terminal === terminal);
+  const owed = openMessages().filter((view) => !!view.delivered && view.to.terminal === terminal);
   if (owed.length === 0) return "";
   const shown = owed.slice(0, MAX_OWED).map((view) => `${view.id} ${ageText(view.at)}`);
   return `${shown.join(" ")}${owed.length > MAX_OWED ? ` +${owed.length - MAX_OWED}` : ""}`;

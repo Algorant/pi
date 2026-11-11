@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { Type } from "typebox";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { createWorkerToolRenderer } from "../pi-ui/tool-ui/custom-tools/workers.ts";
-import { closeTaskRequests } from "../pi-agency/inbox/envelope.ts";
+import { closeTaskRequests, headlineOf } from "../pi-agency/inbox/envelope.ts";
 import { NSTAR_WORKER } from "../pi-agency/nstar-note.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { taskFreeBrief, workerBrief, workerDirection } from "../pi-agency/workers/brief.ts";
@@ -1202,7 +1202,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
    * notice with the reason added; nothing is merged.
    */
   async function readyNotice(env: Envelope, ctx: ExtensionContext): Promise<Envelope | undefined> {
-    const match = env.kind === "result" && !workerMode ? READY_HEADLINE.exec(env.headline) : null;
+    const match = env.kind === "result" && !workerMode ? READY_HEADLINE.exec(headlineOf(env.body)) : null;
     if (!match) return undefined;
     const agent = match[1]!;
     let outcome: { reason: string } | { finished: Result; before: string; review: string; target: string; branch: string };
@@ -1251,7 +1251,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const after: string = outcome.finished.details.integrationOutcome.targetTip;
     const receipt = outcome.finished.details.integrationOutcome as HcWorkerOutcome;
     const headline = `Worker auto-finished: ${(receipt.label ?? agent).slice(0, 50)}${receipt.taskId ? ` [${receipt.taskId}]` : ""} (${agent}) at ${after.slice(0, 12)}`;
-    return { ...env, headline, body: [headline,
+    return { ...env, body: [headline,
       (outcome.finished.content[0] as { text: string }).text,
       `${receipt.integration.worktree === false ? "Accepted on shared checkout (no merge)" : "Merged"} into ${outcome.branch} in ${outcome.target}: ${receipt.mergeRange ?? `${outcome.before}..${after}`}.`,
       `Revert: ${receipt.revert ?? `git -C ${outcome.target} revert --no-edit ${outcome.before}..${after}`}`,
