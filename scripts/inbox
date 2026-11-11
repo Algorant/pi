@@ -20,7 +20,7 @@
  *                           for a terminal in this machine's hc core
  *   add --json for machine-readable output
  */
-import { hcJson, hcText, isHc } from "../extensions/pi-hc/core.ts";
+import { hcJson, hcText, isHc } from "../extensions/pi-herdr/core.ts";
 import { hcAddress, peerText } from "./whois.ts";
 import { dropHcEnvelope, dropLocalEnvelope, statusText, targetStatus, type TargetStatus } from "../extensions/pi-agency/inbox/send.ts";
 import {

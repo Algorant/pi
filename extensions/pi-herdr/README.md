@@ -541,7 +541,9 @@ The name `pi-herdr` was reused on 2026-11-10 for this extension, which was calle
 `pi-hc` until then: `hc` is herdr-core, and naming the extension after the CLI it
 drives was the confusing half. Commits, Tandem records and plan documents from
 before that date that say `pi-herdr` mean the retired pane integration above, and
-anything that says `pi-hc` means this extension. Shared model selection remains registered by
+anything that says `pi-hc` means this extension.
+
+Shared model selection remains registered by
 pi-agency. Helpers keep HC's default parent lifetime; Workers use `--outlive-parent`
 (see `plan/hc-parent-lifetime.md`). Tandem and Worktrunk remain the policy, Task
 and checkout authorities.
