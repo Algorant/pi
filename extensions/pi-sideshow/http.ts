@@ -271,6 +271,22 @@ export async function requestJson<T = Record<string, unknown>>(path: string, ini
 	return body as T;
 }
 
+/**
+ * Is this a real asset on the server we are publishing to? The viewer fetches an image surface
+ * from /a/<assetId>, so an unknown id (a shortened prefix, another server's asset) renders as
+ * "Image unavailable" while the post is accepted. One HEAD request per distinct id.
+ */
+export async function assetAvailable(assetId: string, signal?: AbortSignal): Promise<boolean> {
+	await ensureSideshowAvailable();
+	let response: Response;
+	try {
+		response = await fetch(`${baseUrl()}/a/${encodeURIComponent(assetId)}`, { method: "HEAD", headers: authHeaders(), signal });
+	} catch (error) {
+		throw new Error(redact(`sideshow server not reachable at ${baseUrl()} — start it with: sideshow serve (${redact(error)})`));
+	}
+	return response.ok;
+}
+
 export function sessionUrl(sessionId: string): string {
 	return `${baseUrl()}/session/${encodeURIComponent(sessionId)}`;
 }

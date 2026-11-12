@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import {
 	agentName,
+	assetAvailable,
 	baseUrl,
+	baseUrlDisplay,
 	clampLimit,
 	clampWait,
 	contentTypeFor,
@@ -197,6 +199,25 @@ async function readPostRef(postId: string, signal?: AbortSignal): Promise<{ sess
 	return { sessionId: requireString(post, "sessionId", "session id"), surfaceIds: asArray(post.surfaces).map((s) => stringValue(s.id) ?? "") };
 }
 
+/**
+ * Refuse an image or trace surface whose assetId is not an asset on this server before anything is
+ * written. A shortened id passes schema validation and only fails in the browser, as "Image
+ * unavailable", which is invisible to the agent publishing it.
+ */
+async function requireKnownAssets(surfaces: Array<Record<string, unknown>>, where: string, signal?: AbortSignal): Promise<void> {
+	const ids = new Set<string>();
+	for (const surface of surfaces) {
+		const kind = typeof surface?.kind === "string" ? surface.kind : "";
+		if (kind !== "image" && kind !== "trace") continue;
+		const assetId = typeof surface.assetId === "string" ? surface.assetId : "";
+		if (assetId) ids.add(assetId);
+	}
+	for (const assetId of ids) {
+		if (await assetAvailable(assetId, signal)) continue;
+		throw new Error(`Nothing sent: ${where} references assetId "${assetId}", which is not an asset on ${baseUrlDisplay()} (/a/${assetId} is not found). Use the full asset id printed by sideshow_upload_asset — a shortened prefix or another server's id renders as "Image unavailable".`);
+	}
+}
+
 function partialMermaidError(postId: string, imageId: string, cause: unknown): Error {
 	return new Error(`PARTIAL STATE: Sideshow post ${postId} now has the Pele image surface ${imageId}, but its mermaid source code surface was NOT added (${redact(cause)}). Add it with sideshow_add_surface (kind code, language "mermaid", title "Mermaid source", after "${imageId}") or remove the image surface.`);
 }
@@ -257,6 +278,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: AddSurfaceSchema,
 		async execute(_toolCallId, params: AddSurfaceInput, signal, _onUpdate, ctx) {
 			validateAddSurfaceInput(params);
+			await requireKnownAssets([params.surface as unknown as Record<string, unknown>], `adding a surface to post ${params.postId}`, signal);
 			let post: Record<string, unknown>;
 			let note = "";
 			if (params.surface.kind === "mermaid") {
@@ -293,6 +315,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: EditSurfaceSchema,
 		async execute(_toolCallId, params: EditSurfaceInput, signal, _onUpdate, ctx) {
 			validateEditSurfaceInput(params);
+			if (params.surface) await requireKnownAssets([params.surface as unknown as Record<string, unknown>], `editing surface ${String(params.target)} of post ${params.postId}`, signal);
 			let post: Record<string, unknown>;
 			let note = "";
 			const editPath = `/api/posts/${encodeURIComponent(params.postId)}/surfaces/${encodeURIComponent(String(params.target))}`;
@@ -336,6 +359,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 				surfaces = await expandMermaidSurfaces(surfaces, rendered, pngUploader(state, session, signal));
 				note = MERMAID_NOTE(rendered.size);
 			}
+			await requireKnownAssets(surfaces as unknown as Array<Record<string, unknown>>, `the post "${params.title}"`, signal);
 			const body = {
 				title: params.title,
 				surfaces,
@@ -374,6 +398,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 				surfaces = await expandMermaidSurfaces(surfaces, rendered, pngUploader(state, ref.sessionId, signal));
 				note = MERMAID_NOTE(rendered.size);
 			}
+			if (surfaces) await requireKnownAssets(surfaces as unknown as Array<Record<string, unknown>>, `post ${params.id}`, signal);
 			const body = { title: params.title, surfaces };
 			const surface = asRecord(await requestJson(`/api/posts/${encodeURIComponent(params.id)}`, { method: "PUT", body: JSON.stringify(body) }, signal));
 			const postId = requireString(surface, "id", "post id");
@@ -500,7 +525,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		name: "sideshow_upload_asset",
 		exposure: "codemode",
 		label: "Sideshow Upload",
-		description: "Upload a local asset to Sideshow and get an assetId/URL. Maximum size is 5 MiB.",
+		description: "Upload a local asset to Sideshow and get an assetId/URL. Maximum size is 5 MiB. Pass the assetId verbatim: only the full 64-character id resolves, and publish/edit refuse anything else.",
 		promptSnippet: "Upload an image or file asset for use in Sideshow surfaces.",
 		promptGuidelines: [
 			"Use sideshow_upload_asset before referencing local images or files in sideshow_publish_post.",
