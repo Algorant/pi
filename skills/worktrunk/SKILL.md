@@ -30,7 +30,7 @@ launcher, queue or cleanup script exists.
 
 | Step | Worktrunk command | Called by |
 | --- | --- | --- |
-| **create** | `wt -C <repo> switch --create <branch> --base @ --no-cd --format json` | `dendra_start {kind: worker}` for a Worker checkout, `manus_start` for a manus checkout, the Herdr app's worktree menu for a human-driven checkout |
+| **create** | `wt -C <repo> switch --create <branch> --base @ --no-cd --format json` | `dendra_start {kind: worker}` for a Worker checkout, `manus_start` for a manus checkout, or a human running `wt switch --create <branch>` directly |
 | **finish** | `wt -C <checkout> merge <target> --no-remove`, close the child, `wt -C <repo> remove <branch>` | the starter/owner: `worker_finish` for a Worker or a manus |
 | **discard** | `wt -C <repo> remove <branch> --force --force-delete` | the starter/owner: `worker_discard` for a Worker or a manus |
 
@@ -41,6 +41,12 @@ launcher, queue or cleanup script exists.
   `agent_send` to its starter and ends its turn. The starter then runs
   `worker_finish` (verified, approved work) or `worker_discard` (work not to be
   kept) on that exact child; both tools take a Worker or a manus record.
+- The Herdr app's own worktree menu is not part of this lifecycle: it creates
+  checkouts with raw `git worktree` and keeps their branches, so nothing here
+  manages what it leaves. `herdra-check` flags those leftovers and their
+  project's owner removes them with `wt remove --foreground <path>`. A human who
+  wants a checkout makes one with `wt switch --create <branch>` directly, which
+  Worktrunk merges and removes like any other.
 - Closing is `hc kill` then `hc rm` on the captured terminal. The Herdr tab is a
   presentation of that terminal and follows it; Pi never calls an app tab
   command.
