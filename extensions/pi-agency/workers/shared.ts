@@ -523,8 +523,8 @@ export async function requireCleanCheckout(checkoutPath: string, label: string):
 }
 
 export const DiscardParameters = Type.Object({
-  agent: Type.String({ minLength: 1, description: "Exact retained Worker whose attempt should be discarded." }),
-  note: Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Reason for discarding the Worker attempt." }),
+  agent: Type.String({ minLength: 1, description: "Exact retained Worker or manus whose attempt should be discarded." }),
+  note: Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Reason for discarding the attempt." }),
 }, { additionalProperties: false });
 
 export const PauseParameters = Type.Object({

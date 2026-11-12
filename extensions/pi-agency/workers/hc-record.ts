@@ -32,9 +32,13 @@ export type HcWorkerDirection = { request: string; ofDeliveryId: string; questio
 export type HcWorkerControlState = "pending" | "failed" | "paused" | "discarding" | "discarded";
 
 /** Owner-only control record. Captured workflow facts, never a mirror of live HC
- * status and never a copy of the Worker's handoff. */
+ * status and never a copy of the Worker's handoff. One record kind covers both a
+ * Worker and a manus: same shape and same completeness, without the Worker-only
+ * delivery cycle (direction, plan approval, rework stamps). */
 export type HcWorkerRecord = {
   version: 8;
+  /** "manus" for a manus's own record; absent on every Worker record (never migrated). */
+  kind?: "manus";
   deliveryId: string;
   recoveryOfDeliveryId?: string;
   taskId?: string;
@@ -61,14 +65,17 @@ export type HcWorkerRecord = {
   discardRemovalResult?: string;
   discardRemovalCompletedAt?: number;
   discardDiagnostic?: string;
-  /** The Worker invocation this record directs; stable across owner recovery. */
+  /** The Worker invocation this record directs; stable across owner recovery. A
+   * manus record carries one too (its identity), though no typed invocation uses it. */
   invocationId: string;
   owner: HcWorkerEndpoint;
   /** The owner's own observation of the terminal its launch returned. */
   child?: HcWorkerEndpoint;
-  /** Parent-chosen Pi session ID, reused by every invocation of this Worker. */
+  /** Parent-chosen Pi session ID, reused by every invocation of this Worker. A manus
+   * record carries the session ID its one Pi was launched with. */
   childSessionId: string;
-  /** Captured `provider/model:thinking` for every invocation of this Worker. */
+  /** Captured `provider/model:thinking` for every invocation of this Worker; a manus
+   * records MANUS_MODEL because it runs Pi's own default. */
   model: string;
   integration: HcWorkerIntegration;
   assignment?: WorkerAssignment;
@@ -168,23 +175,37 @@ function identity(value: HcWorkerRecord | HcWorkerOutcome): void {
 /** What the Worker produced lives only in its invocation files. */
 const PRODUCER_FIELDS = ["report", "question", "handoff", "childSessionPath"];
 
+/** True for a manus's own record; a Worker record never carries a kind. */
+export const isManusRecord = (record: Pick<HcWorkerRecord, "kind">): boolean => record.kind === "manus";
+
 export function validateHcWorkerRecord(value: unknown): HcWorkerRecord {
   if (!value || typeof value !== "object" || (value as HcWorkerRecord).version !== 8) throw new Error("Expected native Worker control record version8.");
   const record = value as HcWorkerRecord;
   identity(record);
   invocation(record.invocationId);
   if (PRODUCER_FIELDS.some((key) => key in record)) throw new Error(`Native Worker control ${record.deliveryId} cannot hold Worker-produced handoff data.`);
+  if (record.kind !== undefined && !isManusRecord(record)) throw new Error(`Native control ${record.deliveryId} has an unknown kind; only "manus" is written (a Worker record has none).`);
   if (record.child) endpoint(record.child, "child");
   if (record.label !== undefined) text(record.label, "label");
+  if (!["pending", "failed", "paused", "discarding", "discarded"].includes(record.state)) throw new Error("Invalid native Worker control state.");
+  if (!Number.isFinite(record.createdAt) || !Number.isFinite(record.updatedAt) || record.updatedAt < record.createdAt) throw new Error("Invalid native Worker timestamps.");
+  // Every record, either kind, is complete: a half-written one is refused at write time
+  // instead of being unreadable to every reader later.
   text(record.childSessionId, "session ID");
   text(record.model, "model");
-  if (!["pending", "failed", "paused", "discarding", "discarded"].includes(record.state)) throw new Error("Invalid native Worker control state.");
-  if (!Number.isFinite(record.createdAt) || !Number.isFinite(record.updatedAt) || record.updatedAt < record.createdAt || typeof record.planRequired !== "boolean") throw new Error("Invalid native Worker timestamps or plan policy.");
+  if (typeof record.planRequired !== "boolean") throw new Error("Invalid native plan policy.");
   if (record.taskId) {
     record.assignment = validateWorkerAssignment(record.assignment);
-    if (record.assignment.root.id !== record.taskId || record.brief !== undefined) throw new Error("Native Worker assignment differs from captured Task.");
+    if (record.assignment.root.id !== record.taskId || record.brief !== undefined) throw new Error("Native assignment differs from captured Task.");
   } else if (record.assignment !== undefined || typeof record.brief !== "string" || !record.brief.trim() || !record.label || typeof record.needsAlgorant !== "boolean") {
-    throw new Error("Task-free Worker requires a label, brief and needsAlgorant, not a fabricated Task assignment.");
+    throw new Error("Task-free work requires a label, brief and needsAlgorant, not a fabricated Task assignment.");
+  }
+  if (isManusRecord(record)) {
+    // A manus has no Worker delivery cycle: no direction, plan approval or rework receipts.
+    const workerOnly = ["direction", "planAcceptedAt", "accordReworkRequestedAt", "accordReworkRecordedAt"] as const;
+    const present = workerOnly.filter((key) => record[key] !== undefined);
+    if (present.length) throw new Error(`Manus record ${record.deliveryId} cannot hold Worker-only ${present.join(", ")}.`);
+    if (!record.label) throw new Error("A manus record requires its label.");
   }
   if (record.needsAlgorant !== undefined && typeof record.needsAlgorant !== "boolean") throw new Error("Invalid native Worker needsAlgorant.");
   if (record.handoffReadAt !== undefined) time(record.handoffReadAt, "handoff read time");
@@ -263,9 +284,50 @@ async function createOnce(path: string, value: unknown): Promise<boolean> {
 export async function readHcWorkerRecord(id: string): Promise<HcWorkerRecord> {
   return validateHcWorkerRecord(JSON.parse(await readFile(hcRecordPath(id), "utf8")));
 }
+/** A manus takes Pi's own default model (manus_start passes no --model), so its record
+ * states that instead of a captured model role. Nothing reads it as a model choice. */
+export const MANUS_MODEL = "pi-default";
+
 /** A new control record; its id is fresh, so an existing file is a protocol error. */
 export async function createHcWorkerRecord(record: HcWorkerRecord): Promise<void> {
-  if (!await createOnce(hcRecordPath(record.deliveryId), validateHcWorkerRecord(record))) throw new Error(`Native Worker control ${record.deliveryId} already exists.`);
+  let valid: HcWorkerRecord;
+  try { valid = validateHcWorkerRecord(record); }
+  catch (error) {
+    throw new Error(`Refusing to write incomplete native record ${record?.deliveryId ?? "(no delivery id)"}; nothing was written. ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!await createOnce(hcRecordPath(record.deliveryId), valid)) throw new Error(`Native Worker control ${record.deliveryId} already exists.`);
+}
+
+/** What manus_start knows at start: its label, contract, starter, session and captured checkout. */
+export type HcManusRecordParams = {
+  label: string;
+  taskId?: string;
+  brief?: string;
+  assignment?: WorkerAssignment;
+  needsAlgorant: boolean;
+  from?: string;
+  ownerSessionId: string;
+  owner: HcWorkerEndpoint;
+  childAgent: string;
+  childSessionId: string;
+  integration: HcWorkerIntegration;
+};
+
+/** A manus's own control record: written once at start, in the same store, by the
+ * same atomic exclusive create as a Worker's, and complete enough that every reader -
+ * including a Pi running the previous release - validates it instead of failing the list. */
+export async function createHcManusRecord(params: HcManusRecordParams): Promise<HcWorkerRecord> {
+  const now = Date.now();
+  const record: HcWorkerRecord = {
+    version: 8, kind: "manus", deliveryId: createHcDeliveryId(), invocationId: createHcInvocationId(),
+    childAgent: params.childAgent, label: params.label, needsAlgorant: params.needsAlgorant,
+    childSessionId: params.childSessionId, model: MANUS_MODEL, planRequired: false,
+    ...(params.taskId ? { taskId: params.taskId, assignment: params.assignment } : { brief: params.brief }),
+    ...(params.from ? { from: params.from } : {}),
+    ownerSessionId: params.ownerSessionId, owner: params.owner, createdAt: now, updatedAt: now, state: "pending", integration: params.integration,
+  };
+  await createHcWorkerRecord(record);
+  return record;
 }
 /** The owning Pi's read-modify-write of its own control record (its only writer);
  * the queue serializes that Pi's parallel tool calls. `change` returns the next
@@ -312,11 +374,23 @@ async function nativeIds(directory: string): Promise<string[]> {
   catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
   return names.filter(name => /^handoff-hc-.+\.json$/.test(name)).map(name => name.slice(0, -5));
 }
+
+/** One bad file must never take the store down: every reader of the list keeps working
+ * with the healthy records, and the skipped file is named (task-680: a record written by
+ * a newer release made every other session's Worker tools fail as a whole). */
+async function listNative<T>(directory: string, validate: (value: unknown) => T): Promise<T[]> {
+  const records: T[] = [];
+  for (const id of await nativeIds(directory)) {
+    try { records.push(validate(JSON.parse(await readFile(recordPath(directory, id), "utf8")))); }
+    catch (error) { console.error(`[pi-agency] skipping unreadable native Worker record ${id}.json: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  return records;
+}
 export async function listHcWorkerRecords(): Promise<HcWorkerRecord[]> {
-  // Actual protocol-owned control records in the handoff store. A bad native record
-  // fails clearly; files from the retired legacy Herdr Worker runtime are not read.
-  return Promise.all((await nativeIds(handoffRecordDirectory())).map(readHcWorkerRecord));
+  // Actual protocol-owned control records in the handoff store; an unreadable file is
+  // skipped by name, and files from the retired legacy Herdr Worker runtime are ignored.
+  return listNative(handoffRecordDirectory(), validateHcWorkerRecord);
 }
 export async function listHcWorkerOutcomes(): Promise<HcWorkerOutcome[]> {
-  return Promise.all((await nativeIds(integrationOutcomeDirectory())).map(readHcWorkerOutcome));
+  return listNative(integrationOutcomeDirectory(), validateHcWorkerOutcome);
 }

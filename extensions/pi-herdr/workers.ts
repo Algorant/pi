@@ -11,7 +11,7 @@ import { taskFreeBrief, workerBrief, workerDirection } from "../pi-agency/worker
 import { registerWorkerContext, workerContextCapability, WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
 import { checksPassed, formatChecks, formatWorkerReport, validateWorkerReport, type WorkerReport } from "../pi-agency/workers/handoff-record.ts";
 import {
-  acknowledgeHcWorkerStart, createHcDeliveryId, createHcInvocationId, createHcWorkerRecord, hcRecordPath, listHcWorkerOutcomes,
+  acknowledgeHcWorkerStart, createHcDeliveryId, createHcInvocationId, createHcWorkerRecord, hcRecordPath, isManusRecord, listHcWorkerOutcomes,
   listHcWorkerRecords, publishHcWorkerHandoff, readHcWorkerHandoff, readHcWorkerRecord, readHcWorkerStart, updateHcWorkerRecord,
   withHcWorkerLifecycle, writeHcWorkerOutcome, type HcWorkerDirection, type HcWorkerHandoff, type HcWorkerOutcome, type HcWorkerRecord,
   type HcWorkerStart,
@@ -55,8 +55,8 @@ const RecoverParameters = Type.Object({
   agent: Type.String({ minLength: 1, description: "Stable native Worker name or unambiguous label." }),
 }, { additionalProperties: false });
 const FinishParameters = Type.Object({
-  agent: Type.String({ minLength: 1, description: "Exact native Worker whose verified ready delivery should be finished." }),
-  crashSummary: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Only when no Worker invocation is running and it ended without a ready report: your own verified summary of the surviving checkout, which replaces that report." })),
+  agent: Type.String({ minLength: 1, description: "Exact native Worker or manus whose verified delivery should be finished." }),
+  crashSummary: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Only when no Worker invocation is running and it ended without a ready report: your own verified summary of the surviving checkout, which replaces that report. A manus never takes this." })),
 }, { additionalProperties: false });
 
 type Owner = { core: string; terminal: string; sessionId: string };
@@ -97,6 +97,10 @@ function leaves(records: HcWorkerRecord[]): HcWorkerRecord[] {
 }
 
 function ownedBy(record: HcWorkerRecord, owner: Owner): boolean {
+  // A manus belongs to the starter terminal that ran manus_start, not to one Pi session:
+  // its starter is a long-lived Pi that may resume a new session, and the manus must stay
+  // finishable after that. A Worker stays session-bound.
+  if (isManusRecord(record)) return record.owner.core === owner.core && record.owner.terminal === owner.terminal;
   return record.owner.core === owner.core && record.owner.terminal === owner.terminal && record.ownerSessionId === owner.sessionId;
 }
 
@@ -176,6 +180,19 @@ async function liveInvocation(worker: WorkerView, inspect = false): Promise<any 
 
 const runtimeState = (terminal: any | undefined): string => terminal ? terminal.status?.state ?? "live" : "closed";
 
+/** A manus has no `pi.worker.invocation` label: its record names the terminal it started in. */
+async function liveManus(record: HcWorkerRecord): Promise<any | undefined> {
+  const found = record.child?.terminal ? await hcFind(record.child.terminal) : await hcFind(record.childAgent);
+  if (!found || found.state !== "live") return undefined;
+  if (found.name !== record.childAgent) throw new Error(`Terminal ${found.address} is named ${found.name}, not manus ${record.childAgent}; refusing to act on another terminal.`);
+  return found;
+}
+
+/** The live child of either kind: a Worker by its invocation label, a manus by its recorded terminal. */
+async function liveChild(worker: WorkerView): Promise<any | undefined> {
+  return isManusRecord(worker.record) ? liveManus(worker.record) : liveInvocation(worker);
+}
+
 /** Delivery state plus what was actually handed back, e.g. "plan · delivered". */
 function handoffState(worker: WorkerView): string {
   const state = deliveryState(worker);
@@ -197,7 +214,7 @@ async function stopInvocation(terminal: any): Promise<void> {
   try { await hcText(["kill", terminal.address]); }
   catch (error) { if ((error as { kind?: string }).kind !== "not_found") throw error; }
   const after = await hcFind(terminal.address);
-  if (after?.state === "live") throw new Error(`Worker terminal ${terminal.address} is still live after kill.`);
+  if (after?.state === "live") throw new Error(`Child terminal ${terminal.address} is still live after kill.`);
   if (after) await hcText(["rm", terminal.address]);
 }
 
@@ -253,6 +270,20 @@ async function deliverReport(taskId: string, cwd: string, report: Pick<WorkerRep
   await command("tandem", ["accord", "deliver", taskId, "--summary", report.summary,
     ...report.evidence.flatMap(({ criterion, observation }) => ["--evidence", `${criterion}: ${observation}`]),
     ...report.files.flatMap((file) => ["--file-changed", file]), "--json"], cwd);
+}
+
+/** A manus hands back through the inbox, not a typed report: the accepted outcome of
+ * its finish is the Worktrunk integration plus the files it changed. */
+async function manusAcceptance(record: HcWorkerRecord, outcome: HcWorkerOutcome): Promise<Pick<WorkerReport, "summary" | "evidence" | "files">> {
+  const route = `${record.integration.source.branch} → ${record.integration.target.branch}`;
+  const tip = outcome.sourceTip ?? outcome.targetTip ?? "";
+  const files = (await command("git", ["diff", "--name-only", `${workerBase(record)}..${tip}`], record.integration.target.checkoutPath))
+    .split("\n").map((line) => line.trim()).filter(Boolean);
+  return {
+    summary: `Manus ${workerName(record)} finished by its starter: ${route} integrated at ${tip.slice(0, 12)}.`,
+    evidence: [{ criterion: "Worktree lifecycle", observation: `${route} merged through Worktrunk at ${tip}; the captured terminal and checkout were closed and removed.` }],
+    files,
+  };
 }
 
 /** A ready notice carries the report and a bounded diff, so the owner can finish without reading either again. */
@@ -355,7 +386,9 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   async function ownedWorker(agent: string, ctx: ExtensionContext): Promise<{ owner: Owner; worker: WorkerView }> {
     const owner = await currentOwner(ctx);
     const record = await currentRecord(agent, owner.core);
-    if (!ownedBy(record, owner)) throw new Error(`Worker ${agent} belongs to owner ${record.owner.terminal} session ${record.ownerSessionId}. Use worker_recover to adopt it explicitly.`);
+    if (!ownedBy(record, owner)) throw new Error(isManusRecord(record)
+      ? `Manus ${agent} belongs to its starter terminal ${record.owner.terminal} (core ${record.owner.core}); only that starter finishes or discards it. Nothing changed.`
+      : `Worker ${agent} belongs to owner ${record.owner.terminal} session ${record.ownerSessionId}. Use worker_recover to adopt it explicitly.`);
     return { owner, worker: await view(record) };
   }
 
@@ -552,6 +585,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (!params.message.trim()) throw new Error("Worker continuation requires a non-empty answer or feedback message.");
     const { owner, worker } = await ownedWorker(params.agent, ctx);
     const previous = worker.record;
+    if (isManusRecord(previous)) throw new Error(`Manus ${params.agent} has no Worker continuation; its starter finishes or discards its delivery with worker_finish/worker_discard. No input was sent.`);
     if (["discarding", "discarded"].includes(previous.state)) throw new Error(`Worker ${params.agent} is ${previous.state}; continuation is refused.`);
     const { integration } = previous;
     const { question, report } = worker.handoff ?? {};
@@ -659,6 +693,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (current.length !== 1) throw new Error(`Native Worker ${params.agent} has ${current.length} current deliveries for ${params.taskId}; recovery made no changes.`);
     const previous = current[0]!;
     if (ownedBy(previous, owner)) return { record: previous, adopted: false };
+    if (isManusRecord(previous)) throw new Error(`Manus ${params.agent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}); only that starter finishes or discards it. Recovery made no changes.`);
     if (["discarding", "discarded"].includes(previous.state)) throw new Error(`Worker ${params.agent} is ${previous.state}; recovery made no changes.`);
     await validateCapturedCheckout(previous.integration.source, previous.integration.repoKey, "Worker source");
     await validateCapturedCheckout(previous.integration.target, previous.integration.repoKey, "Captured Worker target");
@@ -701,9 +736,12 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const outcomes = await listHcWorkerOutcomes();
     const active = leaves(await listHcWorkerRecords()).filter((record) => record.integration.repoKey === project.repoKey &&
       record.state !== "discarded" && !outcomes.some((outcome) => outcome.childAgent === record.childAgent && outcome.integration.repoKey === project.repoKey && outcome.removalCompletedAt));
-    if (task && active.some((record) => record.taskId === task.id)) throw new Error(`Task ${task.id} already has a native Worker; continue, finish or discard it first.`);
+    if (task && active.some((record) => record.taskId === task.id)) {
+      const holder = active.find((record) => record.taskId === task.id)!;
+      throw new Error(`Task ${task.id} already has a native ${isManusRecord(holder) ? "manus" : "Worker"} (${workerName(holder)}); continue, finish or discard it first.`);
+    }
     const shared = !worktree && active.find((record) => !hasWorktree(record) && record.integration.source.checkoutPath === project.repoRoot);
-    if (shared) throw new Error(`Checkout ${project.repoRoot} already has active worktree-less Worker ${workerName(shared)}. Use a worktree or finish that attempt; nothing started.`);
+    if (shared) throw new Error(`Checkout ${project.repoRoot} already has an active worktree-less ${isManusRecord(shared) ? "manus" : "Worker"} (${workerName(shared)}). Use a worktree or finish that attempt; nothing started.`);
     const targetBranch = await checkoutBranch(project.repoRoot, "Integration target");
     // The label (default: the Task title) names it; its slug is its durable hc name and its branch (-2 when taken).
     const baseHead = await nativeHead(project.repoRoot, "Integration target");
@@ -794,6 +832,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       async execute(_id: string, params: { agent: string }, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
         const { worker } = await ownedWorker(params.agent, ctx);
         const { record, handoff: published } = worker;
+        if (isManusRecord(record)) throw new Error(`Manus ${params.agent} reports through the inbox, not a typed handoff; finish or discard it with worker_finish/worker_discard.`);
         const live = await liveInvocation(worker, true);
         const state = deliveryState(worker);
         const diagnostic = diagnosticOf(worker);
@@ -895,8 +934,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       async execute(_id: string, params: { agent: string }) {
         const record = await currentRecord(params.agent, await coreId());
         const worker = await view(record);
-        const live = await liveInvocation(worker, true);
-        const details = { host: "hc", agent: params.agent, taskId: record.taskId, deliveryId: record.deliveryId, invocationId: record.invocationId,
+        const live = await liveChild(worker);
+        const details = { host: "hc", agent: params.agent, kind: record.kind ?? "worker", taskId: record.taskId, deliveryId: record.deliveryId, invocationId: record.invocationId,
           carryingInvocationId: live?.labels?.[INVOCATION_LABEL], terminal: live?.address ?? worker.started?.child.terminal ?? record.child?.terminal, state: runtimeState(live),
           ...(record.direction ? { directionDelivered: Boolean(worker.started) } : {}),
           kept: live?.keep ?? false, handoffState: handoffState(worker), diagnostic: diagnosticOf(worker), owner: record.owner, ownerSessionId: record.ownerSessionId,
@@ -914,6 +953,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         return withHcWorkerLifecycle(params.agent, async () => {
           const { worker } = await ownedWorker(params.agent, ctx);
           const { record } = worker;
+          if (isManusRecord(record)) throw new Error(`Manus ${params.agent} has no Worker pause; its starter waits for its delivery and then finishes or discards it. Nothing changed.`);
           const state = deliveryState(worker);
           if (!["pending", "failed"].includes(state)) throw new Error(`Worker ${params.agent} delivery is ${state}; nothing is running to pause.`);
           const note = params.note.trim();
@@ -942,7 +982,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     },
     {
       name: "worker_finish", label: "Finish Worker",
-      description: "Finish verified ready work once: reuse checks only at identical HEAD (rerun otherwise); integrate through Worktrunk --no-remove; accept any linked Task; close captured child and remove only its captured worktree. Task-free never writes Tandem. worktree:false retains shared checkout/branch without merging/removing. Receipt retains git range/revert and retries only unfinished steps. needsAlgorant:true requires Algorant acceptance via owner first.",
+      description: "Finish verified delivered work once for either child with a captured Worktrunk checkout: a Worker (its typed ready report is the gate) or a manus (its inbox delivery is the gate; its starter runs this). Reuses passing checks only at identical HEAD (reruns otherwise; a Task-backed manus runs the Task's runnable validations at its HEAD, and a failure blocks the merge); integrates through Worktrunk --no-remove; accepts any linked Task (a Task-free manus writes no Tandem); closes the captured child and removes only its captured checkout. worktree:false retains shared checkout/branch without merging/removing. Receipt retains git range/revert and retries only unfinished steps. needsAlgorant:true requires Algorant acceptance via owner first.",
       promptSnippet: "After verifying the current ready handoff, finish it once; the receipt handles later failures.",
       parameters: FinishParameters,
       ...createWorkerToolRenderer("finish"),
@@ -952,7 +992,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     },
     {
       name: "worker_discard", label: "Discard Worker",
-      description: "Discard an unintegrated owned Worker attempt with resumable receipt: close captured child, release any linked Task, remove only captured worktree/branch. Task-free never writes Tandem; worktree:false preserves shared checkout/branch and changes. Integrated work is refused.",
+      description: "Discard an unintegrated owned attempt (Worker or manus) with resumable receipt: close captured child, release any linked Task this attempt holds, remove only captured worktree/branch. Task-free never writes Tandem; worktree:false preserves shared checkout/branch and changes. Integrated work is refused.",
       promptSnippet: "Discard only a disposable Worker attempt; the receipt retries only unfinished steps.",
       parameters: DiscardParameters,
       ...createWorkerToolRenderer("discard"),
@@ -965,9 +1005,14 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   async function finishWorker(params: { agent: string; crashSummary?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) {
     const { owner, worker } = await ownedWorker(params.agent, ctx);
     const { record } = worker;
+    // A manus record has no typed handoff, assignment or invocation label: finish and discard
+    // act on its captured checkout and terminal, and skip the Worker-only gates.
+    const manus = isManusRecord(record);
+    const kindName = manus ? "manus" : "Worker";
     const crashSummary = params.crashSummary?.trim();
     if (params.crashSummary !== undefined && !crashSummary) throw new Error("crashSummary must not be blank.");
-    if (["discarding", "discarded"].includes(record.state)) throw new Error(`Worker ${params.agent} is being discarded; finish is refused.`);
+    if (manus && crashSummary) throw new Error(`Manus ${params.agent} delivers through the inbox, not a typed report; crashSummary applies only to a Worker invocation without a ready report. Finish made no changes.`);
+    if (["discarding", "discarded"].includes(record.state)) throw new Error(`${kindName} ${params.agent} is being discarded; finish is refused.`);
     const chainIds = new Set((await workerChain(params.agent, owner.core)).map((entry) => entry.deliveryId));
     const outcomes = (await listHcWorkerOutcomes()).filter((outcome) => outcome.childAgent === params.agent && chainIds.has(outcome.deliveryId));
     if (outcomes.length > 1) throw new Error(`Multiple integration receipts exist for Worker ${params.agent}; finish refuses an ambiguous state.`);
@@ -977,24 +1022,33 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const { integration } = record;
     const target = integration.target.checkoutPath;
     await validateCapturedCheckout(integration.target, integration.repoKey, "Integration target");
-    const live = await liveInvocation(worker);
-    if (live && runtimeState(live) === "working") throw new Error(`Worker ${params.agent} is working; wait for its handoff before finish.`);
+    const live = await liveChild(worker);
+    if (live && runtimeState(live) === "working") throw new Error(`${kindName} ${params.agent} is working; wait for its ${manus ? "delivery" : "handoff"} before finish.`);
     if (crashSummary && live) throw new Error(`Worker ${params.agent} has a live invocation (${live.address}); crashSummary applies only when none is running.`);
     // The current invocation's own immutable report, whichever owner control references it.
     const report = worker.handoff?.report;
     if (crashSummary && report?.status === "ready") throw new Error(`Worker ${params.agent} has a ready report; finish it without crashSummary.`);
     if (!outcome?.acceptedAt) {
-      if (!crashSummary && (report?.status !== "ready" || report.deliveryId !== record.invocationId || report.taskId !== record.taskId)) {
-        if (record.direction && !report) throw new Error(`Worker ${params.agent} delivery ${record.deliveryId} carries ${worker.started ? "a" : "an undelivered"} direction and no ready report of its own; worker_handoff shows it with the prior handoff. Finish made no changes.`);
-        throw new Error(`Worker ${params.agent} has no current typed ready report; verify and finish a ready handoff (or pass crashSummary when it ended without one).`);
+      if (manus) {
+        // Its inbox delivery is the handoff: no typed report, no invocation id, no Worker scope/assignee gate.
+        if (record.taskId) {
+          const task = await tandemShow(record.taskId, target);
+          requireActiveTask(task, record.taskId, "manus finish");
+          await requireNoOpenWorkerSubtasks(task, target, outcome ? "complete" : "merge");
+        }
+      } else {
+        if (!crashSummary && (report?.status !== "ready" || report.deliveryId !== record.invocationId || report.taskId !== record.taskId)) {
+          if (record.direction && !report) throw new Error(`Worker ${params.agent} delivery ${record.deliveryId} carries ${worker.started ? "a" : "an undelivered"} direction and no ready report of its own; worker_handoff shows it with the prior handoff. Finish made no changes.`);
+          throw new Error(`Worker ${params.agent} has no current typed ready report; verify and finish a ready handoff (or pass crashSummary when it ended without one).`);
+        }
+        if (record.taskId) {
+          const task = await tandemShow(record.taskId, target);
+          requireActiveTask(task, record.taskId, "Worker finish");
+          await requireNoOpenWorkerSubtasks(task, target, outcome ? "complete" : "merge");
+          if (!crashSummary && !reportScopeMatchesCurrent(report!, await captureWorkerAssignment(task, target))) throw new Error(`Worker ${params.agent} ready report is stale for the current Task scope; finish made no changes.`);
+          if (task.assignee !== params.agent) throw new Error(`Tandem ownership mismatch for ${record.taskId}: expected ${params.agent}, found ${task.assignee ?? "none"}. Finish made no changes.`);
+        } else if (!crashSummary && report?.brief !== record.brief) throw new Error("Task-free report differs from the captured brief; finish made no changes.");
       }
-      if (record.taskId) {
-        const task = await tandemShow(record.taskId, target);
-        requireActiveTask(task, record.taskId, "Worker finish");
-        await requireNoOpenWorkerSubtasks(task, target, outcome ? "complete" : "merge");
-        if (!crashSummary && !reportScopeMatchesCurrent(report!, await captureWorkerAssignment(task, target))) throw new Error(`Worker ${params.agent} ready report is stale for the current Task scope; finish made no changes.`);
-        if (task.assignee !== params.agent) throw new Error(`Tandem ownership mismatch for ${record.taskId}: expected ${params.agent}, found ${task.assignee ?? "none"}. Finish made no changes.`);
-      } else if (!crashSummary && report?.brief !== record.brief) throw new Error("Task-free report differs from the captured brief; finish made no changes.");
     }
     const write = async (next: HcWorkerOutcome) => { await writeHcWorkerOutcome(next); outcome = next; };
     let inboxNote: string | undefined;
@@ -1047,6 +1101,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         throw new Error(`Worktrunk merged ${integration.source.branch} into ${integration.target.branch}, but finish could not save its receipt. Do not retry the merge. ${diagnosticText(error)}`);
       }
     }
+    // A manus has no typed report: its accepted outcome is the integration plus the files it changed.
+    const manusAccepted = manus ? await manusAcceptance(record, outcome!) : undefined;
     const step = async (failure: string, run: () => Promise<void>) => {
       try { await run(); }
       catch (error) {
@@ -1054,18 +1110,22 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         throw new Error(`${failure} Do not retry the merge; retry worker_finish to resume only unfinished steps. ${diagnosticText(error)}`);
       }
     };
-    if (!record.taskId && !outcome!.acceptedAt) await write({ ...outcome!, acceptedAt: Date.now(), finalSummary: crashSummary ?? report!.summary, finalEvidence: report?.evidence.map(({ criterion, observation }) => `${criterion}: ${observation}`), finalFilesChanged: report?.files });
+    if (!record.taskId && !outcome!.acceptedAt) {
+      if (manus && manusAccepted) await write({ ...outcome!, acceptedAt: Date.now(), finalSummary: manusAccepted.summary,
+        finalEvidence: manusAccepted.evidence.map(({ criterion, observation }) => `${criterion}: ${observation}`), finalFilesChanged: manusAccepted.files });
+      else await write({ ...outcome!, acceptedAt: Date.now(), finalSummary: crashSummary ?? report!.summary, finalEvidence: report?.evidence.map(({ criterion, observation }) => `${criterion}: ${observation}`), finalFilesChanged: report?.files });
+    }
     const taskId = record.taskId;
-    if (taskId) await step(`Worker ${taskId} integrated, but the accepted Tandem outcome is incomplete.`, async () => {
+    if (taskId) await step(`${kindName} ${taskId} integrated, but the accepted Tandem outcome is incomplete.`, async () => {
       // A ready report was delivered to Tandem when it was handed back, so accepting it is one
       // write (`tandem complete`); only a crashSummary or a reworked Task still delivers here.
       let shown: any;
       if (!outcome!.acceptedAt) {
         shown = await tandemShow(taskId, target);
         if (shown.accord?.status !== "delivered") {
-          await deliverReport(taskId, target, crashSummary
-            ? { summary: crashSummary, evidence: [{ criterion: "Owner verification", observation: "the Worker invocation ended without a typed ready report; the owner verified the surviving checkout and finished it." }], files: [] }
-            : report!);
+          await deliverReport(taskId, target, manusAccepted ?? (crashSummary
+            ? { summary: crashSummary, evidence: [{ criterion: "Owner verification", observation: `the ${kindName} invocation ended without a typed ready report; the owner verified the surviving checkout and finished it.` }], files: [] }
+            : report!));
           shown = await tandemShow(taskId, target);
         }
         if (shown.accord?.status !== "delivered") throw new Error(`Tandem Task ${taskId} has no current delivered outcome to accept.`);
@@ -1076,7 +1136,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         if (task.location === "logs") {
           // Archived: proven only as this finish's own completion (intent stamped first) that Tandem
           // records as a completed outcome for this Worker. Never inferred from absence on the board.
-          if (outcome!.taskCompletionRequestedAt === undefined || task.resolution?.outcome !== "completed" || task.assignee !== params.agent) {
+          if (outcome!.taskCompletionRequestedAt === undefined || task.resolution?.outcome !== "completed" || (!manus && task.assignee !== params.agent)) {
             throw new Error(`Task ${taskId} is archived (outcome ${task.resolution?.outcome ?? "unknown"}, assignee ${task.assignee ?? "none"}) without a completion this finish requested; it records no completion.`);
           }
         } else {
@@ -1089,13 +1149,13 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         await write({ ...outcome!, taskCompletedAt: Date.now(), completionMetrics: tandemTaskMetrics(task, taskId, Date.now()), finishDiagnostic: undefined });
       }
     });
-    await step(`Worker ${workerName(record)} has an accepted outcome, but its captured terminal could not be closed.`, async () => {
+    await step(`${kindName} ${workerName(record)} has an accepted outcome, but its captured terminal could not be closed.`, async () => {
       if (outcome!.presentationClosedAt) return;
-      const open = await liveInvocation(worker);
+      const open = await liveChild(worker);
       if (open) await stopInvocation(open);
       await write({ ...outcome!, presentationClosedAt: Date.now(), finishDiagnostic: undefined });
     });
-    await step(`Worker ${workerName(record)} has an accepted outcome, but Worktrunk removal of ${integration.source.branch} is incomplete.`, async () => {
+    await step(`${kindName} ${workerName(record)} has an accepted outcome, but Worktrunk removal of ${integration.source.branch} is incomplete.`, async () => {
       if (outcome!.removalCompletedAt) return;
       if (!hasWorktree(record)) {
         await write({ ...outcome!, removalResult: "worktree:false: shared checkout and branch retained; no removal", removalCompletedAt: Date.now(), finishDiagnostic: undefined });
@@ -1113,7 +1173,15 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     });
     const metrics = outcome!.completionMetrics;
     const route = `${integration.source.branch} → ${integration.target.branch}`;
-    const summary = !hasWorktree(record)
+    const summary = manus
+      ? !hasWorktree(record)
+        ? `Finished manus ${workerName(record)}: accepted its committed work on the shared checkout; closed only its captured terminal. No merge or removal.`
+        : finishedEarlier
+          ? `Manus ${workerName(record)} was already finished: its saved receipt records the integration of ${route}, the closed terminal and the removed checkout. This call made no new change.`
+          : outcomes.length > 0
+            ? `Finished manus ${workerName(record)}: resumed its saved receipt (${route} was already integrated; no new merge) and completed only the unfinished steps.`
+            : `Finished manus ${workerName(record)}: integrated ${route}, recorded the accepted outcome, closed its terminal and removed its captured checkout.`
+      : !hasWorktree(record)
       ? `Finished Worker ${workerName(record)}: accepted committed work; closed only its captured child. Shared checkout retained; no merge or removal.`
       : !record.taskId
       ? `Finished Worker ${workerName(record)}: ${finishedEarlier ? "already finished; saved receipt reused, no new changes" : "integrated, accepted in git/inbox, closed child and removed captured worktree"}; no Tandem writes.`
@@ -1124,21 +1192,23 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         : alreadyMerged
           ? `Finished Worker ${record.taskId}: ${route} was already merged in Git (no new merge); recorded its receipt and the accepted Tandem outcome, closed its terminal, and removed its captured checkout.`
           : `Finished Worker ${record.taskId}: integrated ${route}, recorded the accepted Tandem outcome, closed its terminal, and removed its captured checkout.`;
-    const checked = checks === "reused" ? " Checks passed at worker_report on this HEAD; not rerun." : checks === "rerun" ? " Checks rerun and passed." : "";
+    const checked = manus ? "" : checks === "reused" ? " Checks passed at worker_report on this HEAD; not rerun." : checks === "rerun" ? " Checks rerun and passed." : "";
     return text(`${summary}${checked}${metrics ? ` ${metrics.attemptCount} attempt(s), ${metrics.reworkCount} rework(s), ${metrics.elapsedMs} ms.` : ""}${inboxNote ? ` ${inboxNote}` : ""}`,
-      { agent: params.agent, taskId: record.taskId, deliveryId: record.deliveryId, source: integration.source, target: integration.target, accepted: true, merged: true, ...(checks ? { checks } : {}),
+      { agent: params.agent, kind: record.kind ?? "worker", taskId: record.taskId, deliveryId: record.deliveryId, source: integration.source, target: integration.target, accepted: true, merged: true, ...(checks && !manus ? { checks } : {}),
         alreadyIntegrated: outcomes.length > 0 || alreadyMerged, presentationClosed: true, removed: hasWorktree(record), checkoutRetained: !hasWorktree(record), worktree: hasWorktree(record), needsAlgorant: record.needsAlgorant ?? false, ...(crashSummary ? { deadRuntime: true } : {}), integrationOutcome: outcome, host: "hc", state: "closed" });
   }
 
   async function discardWorker(params: { agent: string; note: string }, ctx: ExtensionContext) {
     const { owner, worker } = await ownedWorker(params.agent, ctx);
     const current = worker.record;
+    const manus = isManusRecord(current);
+    const kindName = manus ? "manus" : "Worker";
     const note = params.note.trim();
     const chainIds = new Set((await workerChain(params.agent, owner.core)).map((entry) => entry.deliveryId));
-    if ((await listHcWorkerOutcomes()).some((outcome) => chainIds.has(outcome.deliveryId))) throw new Error(`Worker ${params.agent} has an integrated outcome; finish it instead of discarding integrated work.`);
+    if ((await listHcWorkerOutcomes()).some((outcome) => chainIds.has(outcome.deliveryId))) throw new Error(`${kindName} ${params.agent} has an integrated outcome; finish it instead of discarding integrated work.`);
     const integration = current.integration;
-    const base = { host: "hc", agent: params.agent, taskId: current.taskId, deliveryId: current.deliveryId, disposition: "discarded", branch: integration.source.branch, worktreePath: integration.source.checkoutPath };
-    if (current.state === "discarded") return text(`Worker ${params.agent} was already discarded; receipt ${current.deliveryId} made no changes.`, { ...base, state: "closed", removed: hasWorktree(current), branchDeleted: hasWorktree(current), checkoutRetained: !hasWorktree(current), alreadyDiscarded: true });
+    const base = { host: "hc", agent: params.agent, kind: current.kind ?? "worker", taskId: current.taskId, deliveryId: current.deliveryId, disposition: "discarded", branch: integration.source.branch, worktreePath: integration.source.checkoutPath };
+    if (current.state === "discarded") return text(`${kindName} ${params.agent} was already discarded; receipt ${current.deliveryId} made no changes.`, { ...base, state: "closed", removed: hasWorktree(current), branchDeleted: hasWorktree(current), checkoutRetained: !hasWorktree(current), alreadyDiscarded: true });
     await validateCapturedCheckout(integration.target, integration.repoKey, "Captured Worker target");
     if (!current.discardRemovalRequestedAt) await validateCapturedCheckout(integration.source, integration.repoKey, "Worker source");
     const deliveryId = current.deliveryId;
@@ -1152,7 +1222,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     let closedTerminal: string | undefined;
     try {
       if (!record.discardPresentationClosedAt) {
-        const live = await liveInvocation({ ...worker, record });
+        const live = manus ? await liveManus(record) : await liveInvocation({ ...worker, record });
         if (live) {
           if (runtimeState(live) === "working") { await hcText(["interrupt", live.address]); await waitSettled(live.address); }
           await stopInvocation(live);
@@ -1160,15 +1230,18 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         }
         await save({ discardPresentationClosedAt: Date.now() });
       }
-      if (!record.taskId) tandemOutcome = "recorded disposition in the existing Worker receipt; no Tandem writes";
+      if (!record.taskId) tandemOutcome = "recorded disposition in the existing receipt; no Tandem writes";
       if (!record.discardReleasedAt && record.taskId) {
         const task = await tandemShow(record.taskId, cwd);
         const discardedCount = Number.isSafeInteger(task.discardedCount) ? task.discardedCount : 0;
+        // A manus claims as pi:<name>; it may also have left the Task with its starter.
+        const ours = task.assignee === params.agent || (manus && task.assignee === `pi:${params.agent}`);
         if (task.location === "logs") tandemOutcome = `left Tandem unchanged because ${record.taskId} is already archived`;
-        else if (task.assignee === params.agent) {
+        else if (ours) {
           await save({ discardReleaseRequestedAt: record.discardReleaseRequestedAt ?? Date.now(), discardedCountBefore: record.discardedCountBefore ?? discardedCount });
           await command("tandem", ["accord", "release", record.taskId, "--note", record.discardNote!, "--disposition", "discarded", "--json"], cwd);
-        } else if (record.discardReleaseRequestedAt === undefined || record.discardedCountBefore === undefined || discardedCount <= record.discardedCountBefore) {
+        } else if (manus) tandemOutcome = `left Tandem unchanged because ${record.taskId} is assigned to ${task.assignee ?? "none"}, not this manus`;
+        else if (record.discardReleaseRequestedAt === undefined || record.discardedCountBefore === undefined || discardedCount <= record.discardedCountBefore) {
           // Unassigned without a discard this receipt requested and Tandem counted: not proven ours.
           throw new Error(`Task ${record.taskId} is no longer assigned to ${params.agent} (now ${task.assignee ?? "none"}, discardedCount ${discardedCount}), and this discard did not record that release; it records no disposition.`);
         } else tandemOutcome = "observed the native Tandem discarded disposition this discard requested";
@@ -1188,9 +1261,9 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       await save({ state: "discarded" });
     } catch (error) {
       await updateHcWorkerRecord(deliveryId, (latest) => ({ ...latest, discardDiagnostic: diagnosticText(error) })).catch(() => {});
-      throw new Error(`Worker ${record.taskId} discard receipt ${deliveryId} was preserved; retry resumes only unfinished steps. ${diagnosticText(error)}`);
+      throw new Error(`${kindName} ${record.taskId} discard receipt ${deliveryId} was preserved; retry resumes only unfinished steps. ${diagnosticText(error)}`);
     }
-    return text(`Discarded Worker ${workerName(record)}: ${tandemOutcome}, ${closedTerminal ? `closed its terminal ${closedTerminal}` : closedEarlier ? "its invocation was already closed" : "no invocation was running"}, and ${hasWorktree(record) ? `removed captured checkout ${integration.source.branch} through Worktrunk` : "retained shared checkout/branch and changes (no removal)"}.`,
+    return text(`Discarded ${kindName} ${workerName(record)}: ${tandemOutcome}, ${closedTerminal ? `closed its terminal ${closedTerminal}` : closedEarlier ? "its invocation was already closed" : "no invocation was running"}, and ${hasWorktree(record) ? `removed captured checkout ${integration.source.branch} through Worktrunk` : "retained shared checkout/branch and changes (no removal)"}.`,
       { ...base, state: "closed", terminal: closedTerminal, removed: hasWorktree(record), branchDeleted: hasWorktree(record), checkoutRetained: !hasWorktree(record), worktree: hasWorktree(record), presentationClosed: true, integration });
   }
 

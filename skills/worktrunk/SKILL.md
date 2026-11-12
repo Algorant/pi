@@ -16,14 +16,75 @@ skill when a task involves a Worktrunk-managed repository or the `wt` CLI. Keep 
 
 | System | Owns | Does not authorize |
 | --- | --- | --- |
-| **Worktrunk** | Worktree/branch switching, explicit merging, removal, hooks, and hook approvals | Tandem task state or Herdr agent ownership |
+| **Worktrunk** | Worktree/branch creation, switching, explicit merging, removal, hooks, and hook approvals | Tandem task state or Herdr agent ownership |
 | **hc / Herdr app** | Native terminal identity, parent/child lifetime and presentation | Worktrunk checkout/hooks or Tandem workflow |
 | **Pi and Workers** | Validated orchestration, Task execution, and the delegation/session bridge | Reimplementing Worktrunk or hc lifecycle policy |
 | **Tandem** | Task, accord, review, and delivery workflow | Proof that a branch is safe to merge or remove |
 
-## Host boundary
+## One lifecycle
 
-Under `HC_TERMINAL_ID`, an owned-worktree manus starts with `manus_start {worktree: true}`, which runs `wt switch --create <label slug> --no-cd` under the normal hook approval. A Task-backed or Task-free Worker uses `dendra_start {kind: worker}`, with exactly taskId OR brief, which owns `wt switch --create --base @ --no-cd` and Worktrunk's approved creation lifecycle before starting its native HC child. Worktrees default on; explicit `worktree:false` skips creation, refuses another active worktree-less Worker on that captured checkout, and retains shared checkout/branch on finish/discard (no merge/removal). Native Worker guidance lives in `agency` and [pi-herdr](../../extensions/pi-herdr/README.md#native-workers-m3).
+Every worktree in this setup is created, integrated and removed through
+Worktrunk. Nothing calls `git worktree` directly (the read-only registry checks
+in `pi-agency/workers/shared.ts` are inspection, not creation), and no second
+launcher, queue or cleanup script exists.
+
+| Step | Worktrunk command | Called by |
+| --- | --- | --- |
+| **create** | `wt -C <repo> switch --create <branch> --base @ --no-cd --format json` | `dendra_start {kind: worker}` for a Worker checkout, `manus_start` for a manus checkout, the Herdr app's worktree menu for a human-driven checkout |
+| **finish** | `wt -C <checkout> merge <target> --no-remove`, close the child, `wt -C <repo> remove <branch>` | the starter/owner: `worker_finish` for a Worker or a manus |
+| **discard** | `wt -C <repo> remove <branch> --force --force-delete` | the starter/owner: `worker_discard` for a Worker or a manus |
+
+- `--base @` branches from the caller's HEAD, so a new checkout never starts
+  from a stale default branch.
+- A child that owns a checkout never merges, removes its checkout or deletes its
+  branch. A Worker delivers through `worker_report`; a manus delivers through
+  `agent_send` to its starter and ends its turn. The starter then runs
+  `worker_finish` (verified, approved work) or `worker_discard` (work not to be
+  kept) on that exact child; both tools take a Worker or a manus record.
+- Closing is `hc kill` then `hc rm` on the captured terminal. The Herdr tab is a
+  presentation of that terminal and follows it; Pi never calls an app tab
+  command.
+- `worker_finish` and `worker_discard` keep receipts: the merge happens once,
+  then Tandem acceptance (only when the record carries a Task), the close and
+  the removal are stamp-first steps, so a retry resumes only what is unfinished.
+- A shared checkout (`worktree: false`) is never merged or removed by these
+  tools; only the captured child closes there.
+- `wt remove` deletes a checkout and its branch. A dirty merge target is not by
+  itself unsafe: current Worktrunk preserves non-overlapping target changes and
+  refuses overlapping paths, in-progress Git operations and synchronization
+  failures with its own diagnostics. Do not duplicate those checks.
+- Never add `-f`/`-D`, `--yes`, or `--no-hooks` merely to make a lifecycle
+  command proceed. Escalate a dirty source checkout, a Worktrunk refusal or an
+  unapproved hook to the owner instead.
+
+An orchestrator or human decides whether to create, finish or dispose; confirm
+the target, the diff, the project's validation and Worktrunk's own safety
+result. A Tandem transition alone is insufficient.
+
+## Sweeping leftover worktrees
+
+`wt list --format json` is the read. It reports each `items[].branch`, its
+`worktree.path`, its `worktree.changes` (staged, modified, untracked, renamed,
+deleted, conflicted) and `display.state` (`is_main`, `integrated`, `ahead`, ...).
+
+A checkout is disposable only when Worktrunk itself proves both facts:
+
+- `display.state` is `integrated` — the branch is merged into the default
+  branch — **and**
+- every `worktree.changes` flag is `false`.
+
+Remove exactly that branch, one at a time:
+
+```bash
+wt list --format json | jq -r '.items[] | select(.display.state == "integrated") | .branch'
+wt -C <repo> remove <branch> --foreground --format json
+```
+
+Everything else is not yours to delete. A `ahead` branch (unmerged commits), a
+dirty worktree, a directory under the checkout root that Git does not register,
+or an unreadable Worktrunk result is reported with its branch, path, unmerged
+commit count or dirty files, and the owner (or Algorant) decides. A
+merged-but-dirty checkout is preserved: `--force` would delete that work too.
 
 ## Inspect first
 
@@ -37,11 +98,10 @@ git rev-parse --show-toplevel
 git status --short --branch
 ```
 
-Use `wt list` to identify Worktrunk-managed worktrees and their status. Use
-`wt config show` to see the effective user/project configuration and whether
-shell integration is active. When more detail is needed, use `wt list --help`,
-`wt switch --help`, `wt merge --help`, or `wt remove --help` rather than
-assuming flags or paths.
+Use `wt config show` to see the effective user/project configuration and whether
+shell integration is active. When more detail is needed, use
+`wt list --help`, `wt switch --help`, `wt merge --help`, or `wt remove --help`
+rather than assuming flags or paths.
 
 ## Pi shell cwd
 
@@ -55,36 +115,6 @@ particular, `wt switch` cannot move the Pi process into another checkout.
 - Do not change branches in place to imitate a Worktrunk switch. Let `wt`
   create or select the checkout when lifecycle work has been authorized.
 
-## Lifecycle safety
-
-`wt switch` creates/selects checkouts; `wt merge` integrates and normally
-removes the source checkout; the Worker finish bridge deliberately uses
-`wt merge --no-remove`, closes the captured native terminal, then calls
-foreground `wt remove` for the captured branch. `wt remove` can delete a
-checkout and branch. These are consequential operations.
-
-- Inspect first, preserve uncommitted work, and follow the repository's
-  instructions and assigned role.
-- Board sync (the `tandem` branch, linked worktrees, conflicts, `.tandem/`) is
-  independent of source Git and Worktrunk integration; its rules are in the
-  `tandem` skill.
-- A Worker works only in its owned checkout. It must not merge, remove a
-  worktree, delete branches, or clean up its worktree; report evidence to its
-  parent.
-- An orchestrator or human decides whether to create, finish, or dispose.
-  `worker_finish` confirms the current scope/evidence, integrates once, records
-  the accepted git/inbox outcome and any linked Tandem outcome, closes its captured terminal/presentation before removal, and preserves a
-  minimal receipt for retrying only an unfinished disposal step. For a Worker whose Pi runtime crashed, `worker_finish` with `crashSummary` runs the same sequence without a typed ready report. Confirm the
-  target, diff, project-required validation, and Worktrunk's own safety result;
-  a Tandem transition alone is insufficient.
-- A dirty merge target is not by itself unsafe. Current Worktrunk preserves
-  non-overlapping staged, unstaged, and untracked target changes. It refuses
-  overlapping paths, in-progress Git operations, and synchronization failures
-  with its own diagnostics and rollback behavior. Do not duplicate those checks.
-- Never add `-f`/`-D`, `--yes`, or `--no-hooks` merely to make a lifecycle
-  command proceed. Escalate dirty source worktrees, Worktrunk refusals, and
-  unapproved hooks.
-
 ## Configuration and hooks
 
 Use `wt config show` before editing configuration. In ordinary repositories,
@@ -97,7 +127,7 @@ while these remain local per machine:
 
 Creation has two hook phases: `pre-start` blocks until required provisioning
 finishes; `post-start` runs in the background. Keep dependencies/data needed by
-the first Worker turn in `pre-start`. Dispatching `post-start` does not establish
+the first child turn in `pre-start`. Dispatching `post-start` does not establish
 completion or service readiness. Worktrunk owns background processes and logs;
 inspect them with `wt -C <checkout> config state logs`.
 
@@ -106,6 +136,10 @@ changes. Treat the prompt as a human security boundary: inspect with
 `wt config approvals list`, but do not pre-approve, copy, commit, clear, or
 bypass approvals for convenience. `--yes` is for explicitly authorized CI or
 human-directed automation, not routine agent work.
+
+Board sync (the `tandem` branch, linked worktrees, conflicts, `.tandem/`) is
+independent of source Git and Worktrunk integration; its rules are in the
+`tandem` skill.
 
 Never drive an interactive picker with synthetic terminal input or derive the
 repository from whatever workspace happens to be focused.

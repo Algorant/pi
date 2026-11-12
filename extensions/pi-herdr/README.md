@@ -270,7 +270,7 @@ checkout or space) and names it; nothing is removed automatically.
   and requires a live terminal with that name. The report arrives as before;
   an end without one arrives from `child-exit`.
 - `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?}` is the one Worker start. Exactly taskId OR brief, label required Task-free. A Task-free Worker is small self-contained work; larger work gets a Task or manus. No fabricated Task, `change` shortcut or alternate launcher.
-- `manus_start {taskId?, brief?, label?, worktree?, needsAlgorant?, direction?}` resolves the unique app host whose native space ID matches the caller's `herdr.space` label and whose tab contains the caller terminal; when `herdr.tab` exists it must match too. This also supports existing local callers that have no `herdr.tab` label, while still requiring unique actual terminal membership. It checks the app space's native machine alias against the caller's permanent HC core id using that app host's `hc machine ls`; it discovers only the local app and currently connected peers. Missing app binaries are skipped; no membership, multiple memberships, or unresolved identity refuses before side effects. The HC launch, worktree, starter and inbox return route remain on the caller's core. Native `--rm --no-parent` under `child-exit` (its `starter=` hears an unreported end), optional task=, starter=, label= and needsAlgorant= labels. The child receives the unqualified native `herdr.space` id and uses the resolved host for its one app rename and eventual own-tab close. No focus/wait/poll.
+- `manus_start {taskId?, brief?, label?, worktree?, needsAlgorant?, direction?}` resolves the unique app host whose native space ID matches the caller's `herdr.space` label and whose tab contains the caller terminal; when `herdr.tab` exists it must match too. This also supports existing local callers that have no `herdr.tab` label, while still requiring unique actual terminal membership. It checks the app space's native machine alias against the caller's permanent HC core id using that app host's `hc machine ls`; it discovers only the local app and currently connected peers. Missing app binaries are skipped; no membership, multiple memberships, or unresolved identity refuses before side effects. The HC launch, worktree, starter and inbox return route remain on the caller's core. With default worktree:true it creates the checkout through Worktrunk, `wt switch --create <branch> --base @ --no-cd`, so a manus branches from its starter's HEAD exactly as a Worker does, then writes a manus record (below) before launching, so a created checkout always has an owner. Native `--rm --no-parent` under `child-exit` (its `starter=` hears an unreported end), optional task=, starter=, label= and needsAlgorant= labels. The child receives the unqualified native `herdr.space` id and uses the resolved host for its one app rename; it never merges or closes itself. A failed launch keeps the checkout and names the record, so the starter can finish or discard it. No focus/wait/poll.
 - Task-free brief strings preserve the request verbatim with nonempty Outcome / Scope / Exclusions / Check / Done sections (Markdown headings accepted). Scope lists repo-relative files/directories, directories ending in `/`; Check uses runnable `$ ` lines plus manual observations. Managed context adds label, owner/return route, project/checkout and needsAlgorant. Git and originating inbox thread are the record, alongside existing Worker lifecycle/receipts.
 - `ceph_start {project, folder, kickoff, label?}` requires `folder` to be its own Git
   checkout root with a Tandem workspace (projectify prepares both). It refuses
@@ -444,6 +444,22 @@ the existing handoff/receipt store (`$XDG_STATE_HOME/pi/worker-handoffs`,
   discarded), handoff-read, rework and discard stamps. It names the Worker
   invocation it directs by `invocationId` and never holds what the Worker
   produced (control writes reject report/question/handoff/session fields).
+- A **manus** writes the same record with `kind: "manus"` (no separate store or
+  prefix). It is just as complete, so every reader — including a Pi still
+  running the previous release — validates it instead of failing the list: it
+  carries its label, Task plus captured `assignment` (or its brief), needsAlgorant,
+  starter `{core, terminal}`, the Pi session it was launched with, base HEAD and
+  the captured integration, with `planRequired: false` and `model: "pi-default"`
+  because a manus takes Pi's own default model rather than a dispatch model role.
+  The Worker-only delivery fields it does not have (direction, plan approval,
+  rework stamps) are refused if present. Finish and discard read it like a
+  Worker's and record the same integration receipt.
+- The writer validates before writing: an incomplete record (no
+  `childSessionId`, `model` or `planRequired`) is refused at write time with a
+  clear message and nothing is stored, so no reader is poisoned later. A
+  unreadable or invalid file already in the store is skipped by the list with a
+  stderr warning naming the file, and every tool keeps working with the healthy
+  records (task-680: one bad file must never take the store down as a whole).
 - `invocation-hc-*.started.json` is the Worker's start acknowledgement and
   `invocation-hc-*.json` its one typed handoff (question, report or failure,
   with its real terminal and session). The Worker creates each once
@@ -533,6 +549,21 @@ Files left by the retired legacy Worker runtime are not read.
   (archived `completed` for this Worker / released with a higher discard count)
   or Git state (checkout unregistered and gone), never from absence alone. One
   owner's lifecycle tools for the same Worker run one at a time.
+- Both tools also take a **manus** record. Its inbox delivery is the handoff, so
+  the Worker-only gates are skipped: no typed report, no invocation-id match, no
+  Worker scope/assignee equality, and Tandem acceptance only when the record
+  carries a Task (delivered from the integration itself, with the changed files;
+  Task-free stays git + inbox). CrashSummary applies only to a Worker. The
+  worktree half is the same code: validate the captured checkout, refuse a dirty
+  source, `wt merge --no-remove`, write the receipt, close the terminal with `hc
+  kill` then `hc rm` (the Herdr tab follows its terminal; pi never calls an app
+  tab command), foreground `wt remove`; discard force-removes with `--force
+  --force-delete`. A live manus whose terminal is working is refused until it
+  delivers. A manus belongs to the starter's core and terminal rather than one
+  Pi session, so a starter that resumes a new session still finishes it, while
+  any other Pi is refused by name. A Task-backed finish runs the Task's runnable
+  validations at the manus HEAD and a failing check blocks the merge; Task-free
+  runs the baseline diff-check plus its Check lines.
 - Explicit worktree:false refuses a second active worktree-less Worker on the same checkout. Source and target are that checkout, launch HEAD is the diff base. Finish accepts committed work there without merging and closes only its child; finish/discard retain shared checkout/branch and uncommitted work. No lock or queue. The shared accepted range covers commits since dispatch; owners coordinate other actors there.
 - Task-free report/continuation/recovery/pause/finish/discard never writes Tandem. needsAlgorant and originating thread survive recovery. worker_status/handoff/recover/resume accept an unambiguous label or hc name; recovery taskId is optional and must match when supplied. Receipts retain label, optional Task, originating thread, accepted git range and revert. Uncommitted work cannot be ready: it is preserved and reported needs-input.
 

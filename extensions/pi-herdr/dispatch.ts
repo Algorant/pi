@@ -6,7 +6,9 @@ import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/cust
 import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } from "../pi-agency/inbox/envelope.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
-import { command, diagnosticText, MAX_PROMPT_LENGTH, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
+import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
+import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
+import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
 import { requireContract } from "../pi-agency/workers/contract.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, terminalWho } from "../../scripts/whois.ts";
@@ -198,6 +200,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       requireActiveTask(task, task.id, "manus_start");
       if (!String(task.body ?? "").trim()) throw new Error(`Task ${task.id} has an empty body; write its scope first. Nothing was started.`);
     }
+    const assignment = task ? await captureWorkerAssignment(task, repo.repoRoot) : undefined;
     if (!self.space) throw new Error(`This terminal (${self.address}) has no herdr.space label: a manus opens in its starter's own app space. Nothing was started.`);
     const membership = await resolveAppSpace(self.space, self.tab, self.core, self.address);
     const { space, host } = membership;
@@ -207,13 +210,16 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const name = await nameFor(label, worktree ? repo.repoRoot : undefined);
     const branch = name;
     const baseHead = await nativeHead(repo.repoRoot, "Manus project");
+    const targetBranch = await checkoutBranch(repo.repoRoot, "Manus project");
 
     let cwd = repo.repoRoot;
+    const childSessionId = newId();
     if (worktree) {
-      // Worktrunk's own creation lifecycle under its normal hook approval.
+      // Worktrunk's own creation lifecycle under its normal hook approval, based on the
+      // starter's HEAD exactly as a Worker's is.
       let created: any;
       try {
-        created = JSON.parse(await command("wt", ["-C", repo.repoRoot, "switch", "--create", branch, "--no-cd", "--format", "json"], repo.repoRoot, 0, signal));
+        created = JSON.parse(await command("wt", ["-C", repo.repoRoot, "switch", "--create", branch, "--base", "@", "--no-cd", "--format", "json"], repo.repoRoot, 0, signal));
       } catch (error) {
         const left = await nativeWorktreeForBranch(repo.repoRoot, branch);
         throw new Error(left
@@ -225,12 +231,19 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       }
       cwd = created.path;
     }
+    // One record at start, in the Worker record's own store and atomic write: the starter
+    // finishes or discards the manus by it, so a created checkout is never ownerless.
+    const integration: HcWorkerIntegration = worktree
+      ? { repoKey: repo.repoKey, worktree: true, baseHead, source: { checkoutPath: cwd, branch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } }
+      : { repoKey: repo.repoKey, worktree: false, baseHead, source: { checkoutPath: repo.repoRoot, branch: targetBranch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } };
+    const record = await createHcManusRecord({ label, ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, ...(params.from ? { from: params.from } : {}),
+      ownerSessionId: ctx.sessionManager.getSessionId(), owner: { core: self.core, terminal: self.address }, childAgent: name, childSessionId, integration });
     // The existing starter brief/label bind the one local note before the child starts.
     if (!task) await nstarNote({ cwd, label }, { initialize: true, brief: params.brief });
     const brief = [
       `You are manus "${label}" (hc name ${name}), started by ${self.label} (${self.route}) for ${project}${task ? ` Task ${task.id}: ${task.title}` : " (Task-free)"}.`,
       task ? `Your contract is \`tandem show ${task.id}\` (board in ${repo.repoRoot}); Algorant\'s words in it are acceptance, verbatim.` : `Your contract (verbatim):\n${params.brief}`,
-      `needsAlgorant: ${needsAlgorant}. ${needsAlgorant ? "Deliver for Algorant judgement through your starter before integration." : "Integrate approved, verified work."}`,
+      `needsAlgorant: ${needsAlgorant}. ${needsAlgorant ? "Deliver for Algorant judgement through your starter before integration." : "Deliver ready, verified work to your starter for integration."}`,
       params.from ? `Originating inbox thread: ${params.from}.` : undefined,
       task ? "Validation: run the Task's validations and applicable project checks; report actual observations." : `Validation: git diff --check ${baseHead}...HEAD plus the brief Check and applicable project checks; report actual observations.`,
       params.direction?.trim() ? `Direction from your starter: ${params.direction.trim()}` : undefined,
@@ -239,19 +252,25 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       "Standing rules:",
       task ? `- Claim the Task now with yourself as assignee: tandem accord claim ${task.id} --assignee pi:${name}.` : "- This work is Task-free: git and the originating inbox thread are the record. Do not fabricate a Task or write Tandem for it.",
       ...rules(self.route, name, label, host).map((rule) => `- ${rule}`),
-      `- Merge approved, verified work yourself and tell ${self.route} in one line; if it still needs Algorant's look, deliver your branch and your starter merges after his yes. Then close your own tab: ${appRoute(host)} do tab.close --id <your tab> --confirmed true.`,
+      `- Deliver to ${self.route} with agent_send terminal=${self.route} kind=result when your work is committed, verified and ready (line 1 the answer, at most 160 characters), then end your turn and wait. ${self.label} (${self.route}) finishes or discards your delivery with worker_finish/worker_discard, which merges through Worktrunk after Algorant's yes when needed. Do not merge, close this terminal, remove this checkout or delete its branch yourself.`,
     ].filter((entry) => entry !== undefined).join("\n");
     const labels = { "herdr.space": spaceId, ...(task ? { task: `${project}:${task.id}` } : {}), starter: self.route, needsAlgorant: String(needsAlgorant), [LABEL_KEY]: label, [KIND_KEY]: "manus" };
     const failedAfter = worktree ? ` Checkout ${cwd} (branch ${branch}) is preserved; no automatic removal.` : "";
     let started: any;
     try {
-      started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
+      started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd, "--session-id", childSessionId,
         ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), brief], name);
-    } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter}`); }
+    } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
+    // The record's own observation of the terminal the launch returned; finish closes it by this.
+    try {
+      await updateHcWorkerRecord(record.deliveryId, (current) => current.child ? current : { ...current, child: { core: self.core, terminal: started.address } });
+    } catch (error) {
+      throw new Error(`Manus ${label} (${name}, ${started.address}) is running, but its record ${record.deliveryId} could not record that terminal. Finish or discard it by name. ${diagnosticText(error)}`);
+    }
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Its reports arrive in your inbox; do not wait or poll.`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, ...tab, ...closed });
+    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
   }
 
   async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, _signal: AbortSignal | undefined, _ctx: ExtensionContext): Promise<Result> {
@@ -333,7 +352,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     },
     {
       name: "manus_start", label: "Manus Start",
-      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true; false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
+      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement; reports through your inbox.",
       parameters: ManusParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => manusStart(params, signal, ctx),
