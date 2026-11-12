@@ -9,7 +9,9 @@ import { modelControlError, type Envelope, type ModelControl, type ReloadAck } f
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import { hcEndpoint, hcJson, hcMachines } from "./core.ts";
+import { sourceFingerprint } from "./fingerprint.ts";
 import { isSuccess, settleOf, summarySweep, type Ack, type Row, type Sweep } from "./reload-summary.ts";
+import { SELF_RELOAD_EVENT, type SelfReloadState } from "./turn-label.ts";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const REQUEST = "pi-reload-request";
@@ -21,6 +23,19 @@ const SWEEP_DONE = "pi-reload-sweep-done";
 const NOTIFIED = "pi-reload-notified";
 const PENDING = "pi-reload-pending";
 const FAILURE = "pi-reload-failure";
+/** The self-reload entry recorded at a trigger point; its text is the prompt the turn must not lose. */
+const SELF = "pi-self-reload";
+/** Append-only receipt that the entry's prompt was handed back (or deliberately dropped). */
+const SELF_DONE = "pi-self-reload-done";
+type SelfRequest = {
+  id: string;
+  at: string;
+  from: string;
+  expected: string;
+  /** The prompt this trigger point consumed; empty at the idle boundary, where no turn was waiting. */
+  text: string;
+  images?: { type: "image"; data: string; mimeType: string }[];
+};
 const MODEL_REQUEST = "pi-model-request";
 const MODEL_OUTCOME = "pi-model-outcome";
 type Owner = { core: string; terminal: string; label: string };
@@ -33,6 +48,8 @@ type Summary = { lines: string[]; detail: string[]; sweep?: Sweep };
 const short = (value: string | null) => value?.slice(0, 8) ?? "unknown";
 /** Private /pi-reload argument: Pi sends it to itself at the idle boundary. Argument completion never suggests it, so the command list stays one entry. */
 const APPLY_ARG = "--internal-apply";
+/** The second private argument: the one self-reload mechanism, reached from either trigger point. */
+const SELF_ARG = "--internal-self";
 /** A recorded request that still cannot apply after this long is answered with a visible outcome instead of staying pending. */
 const DEFER_BOUND_MS = 10 * 60_000;
 const reason = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -46,6 +63,10 @@ const ttyGroups = () => {
 /** Existing inbox interception + documented target-owned command dispatch; never terminal keys. */
 export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: ExtensionContext) => Promise<null | undefined> {
   let loaded: string | null = null;
+  /** The one fingerprint of the sources this Pi loaded at its last session_start; both triggers compare against it. */
+  let sources = "";
+  /** One self-reload at a time: a second trigger inside the same window is dropped, never stacked. */
+  let selfReloading = false;
   let localChanges = false;
   let own: Owner | undefined;
   let supported = false;
@@ -203,6 +224,70 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     catch (error) { dispatched = ""; defer(waiting, `deferred: dispatching the apply command failed: ${reason(error)}`); }
   };
 
+  const fingerprintOf = (ctx: ExtensionContext) => sourceFingerprint(ctx.cwd);
+  /** The self-reload entry whose prompt has not been handed back yet; at most one per reload. */
+  const pendingSelf = (ctx: ExtensionContext): SelfRequest | undefined => {
+    const branch = ctx.sessionManager.getBranch() as any[];
+    const done = new Set(branch.filter((e) => e.type === "custom" && e.customType === SELF_DONE).map((e) => e.data?.id));
+    return branch.filter((e) => e.type === "custom" && e.customType === SELF && !done.has(e.data?.id)).map((e) => e.data as SelfRequest).at(-1);
+  };
+  /** Hand a consumed prompt back to Pi exactly once; the turn then starts on the code just loaded. */
+  const replaySelf = (self: SelfRequest) => {
+    pi.appendEntry(SELF_DONE, { id: self.id });
+    if (!self.text) return;
+    // A prompt Pi itself cannot start (no model) surfaces as its own send error; the entry keeps the text.
+    pi.sendUserMessage(self.images?.length ? [{ type: "text" as const, text: self.text }, ...self.images] : self.text,
+      { expandPromptTemplates: true });
+  };
+  /**
+   * Both trigger points end here: one fingerprint, one reload, and the prompt (if a turn was waiting for
+   * it) continues after the reload instead of on stale code. Never mid-turn: a reason not to reload is
+   * said once as `reload pending`, and that turn runs on what is loaded with nothing dropped.
+   */
+  const applySelf = async (ctx: ExtensionContext) => {
+    selfReloading = false;
+    if (!supported || ctx.mode !== "tui") return;
+    const self = pendingSelf(ctx);
+    if (!self) return;
+    const now = fingerprintOf(ctx);
+    // Someone (a /pi-reload request, a person typing /reload) already loaded these exact sources.
+    if (now.fingerprint === sources) { replaySelf(self); return; }
+    const groups = ttyGroups();
+    const blocked = !ctx.isIdle() ? "this Pi started working"
+      : ctx.hasPendingMessages() ? "queued messages are waiting"
+        : groups.pgid !== groups.foreground ? "this Pi is a background job and a reload's tty replies would stop it"
+          : "";
+    if (blocked) {
+      const state: SelfReloadState = { from: short(self.from), to: short(now.fingerprint), pending: blocked };
+      pi.events.emit(SELF_RELOAD_EVENT, state);
+      replaySelf(self);
+      return;
+    }
+    summarize([`Reloading ${own!.label} before the turn: sources ${short(self.from)} → ${short(now.fingerprint)}.`],
+      ["One fingerprint covers the agent dir and this project's .pi; the turn runs after this reload, never during it."]);
+    await ctx.reload();
+  };
+  /**
+   * The same fingerprint at the second trigger point, between turns: a Pi whose turns arrive as inbox
+   * messages (which emit no input event) still notices, and no turn is ever reloaded underneath itself.
+   */
+  const selfCheck = async (ctx: ExtensionContext) => {
+    if (!own || !supported || ctx.mode !== "tui" || selfReloading || sweeping) return;
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+    const now = fingerprintOf(ctx);
+    // A typed inbox request reloads through its own path, and a waiting prompt is handed back already.
+    if (now.fingerprint === sources || pendingSelf(ctx) || pending(ctx).length) return;
+    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: "" };
+    pi.appendEntry<SelfRequest>(SELF, self);
+    selfReloading = true;
+    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
+    catch (error) {
+      selfReloading = false;
+      pi.appendEntry(SELF_DONE, { id: self.id });
+      ctx.ui.notify(`Self-reload could not start: ${reason(error)}`, "warning");
+    }
+  };
+
   pi.registerEntryRenderer<Summary>(SUMMARY, (entry, options, theme) => ({
     // Built at render time so a late acknowledgement shows in the same card on the next repaint.
     render: (width: number) => {
@@ -247,13 +332,30 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
       localChanges = source.resourcesDirty;
       if (localChanges) ctx.ui.notify(`Resources HEAD ${short(loaded)}: local changes present (informational).`, "info");
     } catch (error) { ctx.ui.notify(`Cannot identify loaded resources: ${reason(error)}`, "warning"); }
+    // One fingerprint of every source this Pi loads; both self-reload trigger points compare against it.
+    sources = supported ? fingerprintOf(ctx).fingerprint : "";
+    selfReloading = false;
     // pi.pgid lets a sweep or sender see from hc's foreground whether this Pi still owns its terminal; pi.session is its restart hint.
-    await hcJson(["label", own.terminal, `pi.resources=${loaded ?? "unknown"}`, `pi.reload=${supported ? "1" : ""}`, `pi.model-control=${supported ? "1" : ""}`,
+    await hcJson(["label", own.terminal, `pi.resources=${loaded ?? "unknown"}`, `pi.fingerprint=${sources}`, `pi.reload=${supported ? "1" : ""}`, `pi.model-control=${supported ? "1" : ""}`,
       `pi.pgid=${ttyGroups().pgid}`, `pi.session=${ctx.sessionManager.getSessionFile() ?? ""}`]);
     if (event.reason === "reload") {
       for (const request of pending(ctx)) {
         await acknowledge(ctx, request, loaded === request.expected ? "verified" : "not-verified");
       }
+    }
+    // The self-reload this Pi asked for landed: record the new stamp, say it once, and continue the turn the
+    // reload interrupted. A reload that never happened (a restart instead) never replays an old prompt silently.
+    const self = pendingSelf(ctx);
+    if (self && event.reason === "reload") {
+      await hcJson(["label", own.terminal, `pi.reloaded=${short(sources)}`, `pi.say=reloaded to ${short(sources)}`]);
+      if (self.text) {
+        const state: SelfReloadState = { from: short(self.from), to: short(sources) };
+        pi.events.emit(SELF_RELOAD_EVENT, state);
+      }
+      replaySelf(self);
+    } else if (self) {
+      pi.appendEntry(SELF_DONE, { id: self.id });
+      summarize(["Self-reload did not complete: the prompt recorded for it was NOT replayed."], [self.text.slice(0, 400)]);
     }
     // A request recorded in an earlier session stays recorded, but is not applied from inside session_start
     // (ctx.reload() there would re-enter the session being started): it applies at this Pi's next idle boundary.
@@ -269,13 +371,36 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     }
   });
   pi.on("session_shutdown", async () => {
-    await hcJson(["label", process.env.HC_TERMINAL_ID!, "pi.resources=", "pi.reload=", "pi.model-control=", "pi.pgid=", "pi.session="]);
+    await hcJson(["label", process.env.HC_TERMINAL_ID!, "pi.resources=", "pi.fingerprint=", "pi.reloaded=", "pi.reload=", "pi.model-control=", "pi.pgid=", "pi.session="]);
     own = undefined;
   });
   pi.on("agent_settled", (_event, ctx) => {
     dispatched = ""; // a fresh idle boundary: retry anything a lost or bailed dispatch left recorded
     applyModel(ctx);
     void applyNow(ctx);
+    // The second trigger point for the same fingerprint: between turns, never during one.
+    void selfCheck(ctx).catch((error) => ctx.ui.notify(`Self-reload check failed: ${reason(error)}`, "warning"));
+  });
+  // A turn start: the prompt was typed for code that is no longer on disk. Consume it (so the turn never starts
+  // on stale code), reload, and hand it back from the new runtime as the turn that continues.
+  pi.on("input", (event, ctx) => {
+    if (!own || !supported || ctx.mode !== "tui" || selfReloading) return;
+    // A person's prompt before it is expanded; never a queued steer/follow-up and never a replay.
+    if (event.source !== "interactive" || event.streamingBehavior) return;
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+    const now = fingerprintOf(ctx);
+    // A stale prompt is consumed below instead; a self-reload already waiting is handed back by its own pass.
+    if (now.fingerprint === sources || pendingSelf(ctx)) return;
+    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: event.text, images: event.images };
+    pi.appendEntry<SelfRequest>(SELF, self);
+    selfReloading = true;
+    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
+    catch (error) {
+      selfReloading = false;
+      pi.appendEntry(SELF_DONE, { id: self.id });
+      return; // the prompt runs now on the loaded code; the idle check reloads after it
+    }
+    return { action: "handled" };
   });
 
   /** Reload this Pi for its recorded typed inbox requests (the private /pi-reload mode). */
@@ -388,6 +513,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     getArgumentCompletions: () => null,
     handler: async (args, ctx) => {
       if (args.trim() === APPLY_ARG) { await applyPending(ctx); return; }
+      if (args.trim() === SELF_ARG) { await applySelf(ctx); return; }
       if (args.trim()) { ctx.ui.notify("Usage: /pi-reload (no arguments)", "error"); return; }
       if (!supported || ctx.mode !== "tui" || !ctx.isIdle() || ctx.hasPendingMessages()) {
         ctx.ui.notify("Use /pi-reload in a long-lived owner Pi at its idle ordinary prompt, with no pending messages.", "warning"); return;

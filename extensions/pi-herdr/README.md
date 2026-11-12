@@ -292,6 +292,11 @@ error, through a load-time resolver so reloaded rows keep their cards.
 
 ## Pi reload and shared live inventory
 
+A long-lived Pi no longer needs a person to type anything after a source change: it compares one
+fingerprint of what it loads at its turn boundaries and reloads itself (below). `/pi-reload` remains
+the fleet sweep for whoever merges shared resources, and the built-in `/reload` remains the forced,
+manual reload.
+
 `/pi-reload` sends typed control requests through the EXISTING inbox, never
 through another Pi's composer or `hc keys`. Its consume result records delivery
 without starting a target model turn. A typed control is consumed by its
@@ -396,6 +401,45 @@ absent target receiver. Missing receivers are reported, never blindly keyed.
 Native children/Workers are reported unsupported and never requested: their
 owner controls their job lifetime. Any target can exit before acknowledging;
 a requested result is never counted as verified. Rerun is explicit, not a watcher.
+
+### Self-reload at a turn boundary (one fingerprint, two trigger points)
+
+One fingerprint and one mechanism, reached from two places in a Pi's own lifecycle. `fingerprint.ts`
+hashes the sources this Pi actually loads by path, mtime and size, never by reading a file: the agent
+dir's `extensions`, `skills`, `prompts` and `themes` (under `PI_CODING_AGENT_DIR`, else `~/.pi/agent`)
+plus `settings.json`, `config-manifest.json`, `model-roles.json`, `models.json` and `keybindings.json`,
+and the current project's `.pi` `extensions`, `skills`, `prompts` and `themes` plus `AGENTS.md`,
+`SYSTEM.md` and `APPEND_SYSTEM.md`. The project half is what `/pi-reload` never covered: a project's
+own extension, or a change outside `~/.pi`'s history. `session_start` records the stamp once
+(about 1-2 ms and no child process, no timer, no watcher for ~220 entries; re-measured 1.65-2.17 ms
+per check on a real Pi); both triggers compare against it and never write it back unless a reload lands.
+
+- **Turn start** (`input`, before skill and template expansion, from a person, idle, nothing queued or
+  pending). A changed stamp appends a hidden `pi-self-reload` entry holding that prompt, answers
+  `handled` so no turn starts on stale code, and dispatches `/pi-reload --internal-self`. The reload's
+  new runtime records the new stamp, says it once, and hands the prompt back with
+  `pi.sendUserMessage(..., {expandPromptTemplates: true})`: the session then holds exactly one user
+  message for it and the turn runs the new code.
+- **Idle boundary** (`agent_settled`, between turns). A Pi whose turns arrive as inbox messages — a
+  custom message emits no `input` event — checks the same stamp after the turn and reloads there. This
+  is the same boundary a requested `/pi-reload` already waits for, and never inside a turn: a long
+  turn shows no `pi-self-reload` entry until it ends.
+
+One self-reload per turn, never mid-turn or mid-reply, never with a handoff or message pending, and
+never a second time for the same stamp. It says it once in the Pi's own labels: `pi.fingerprint=<16>`
+records what this runtime loaded, and the turn that reloaded carries `pi.reloaded=<fp8>` and
+`pi.say=reloaded to <fp8>`, cleared when that turn ends (the `pi-herdr:self-reload` event, consumed by
+`turn-label.ts`). If it cannot reload at that moment — the Pi started working, queued messages are
+waiting, or it is a background job whose tty replies would stop it — the turn runs on the code that is
+loaded and the label is `pi.reloaded=pending` / `pi.say=reload pending: <why>`; the prompt is never
+dropped. A reload that never landed (a restart instead) is not replayed later: `session_start` says
+so once and keeps the entry's text.
+
+Limits, stated plainly: the stamp is mtime and size, so a same-size edit inside one mtime tick is
+missed until the next real change; an open dialog on that Pi still closes when it reloads; and only a
+long-lived owner Pi (Herdra, a Ceph, a manus) does this at all — a child or Worker stays lifecycle-owned
+by its starter and keeps `/pi-reload` and the built-in `/reload`. The fingerprint covers the sources Pi
+loads, not the code a project's own runtime reads itself.
 
 ### Typed model request (cutover receiver)
 

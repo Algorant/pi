@@ -11,7 +11,7 @@ None.
 - `ui.ts` renders the transient question screen through Pi's inline custom UI.
 
 ## How to use
-Keep this directory under `~/.pi/agent/extensions/pi-ask-me/` and reload Pi. The agent will call `ask_me` when a missing decision would materially change the work.
+Keep this directory under `~/.pi/agent/extensions/pi-ask-me/`; a running long-lived Pi picks it up at its next turn start, and `/reload` is the immediate, forced reload. The agent will call `ask_me` when a missing decision would materially change the work.
 
 ## Examples
 Ask one choice question, or ask several independent questions in one call. Use freeform only when the answer space is truly open-ended. See the skill for the explain-first `context` contract.

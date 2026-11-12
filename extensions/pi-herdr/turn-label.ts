@@ -6,6 +6,9 @@ import { hcJson } from "./core.ts";
 const MAX_LABEL_LENGTH = 160;
 /** Most owed message ids one label lists; the rest are counted. */
 const MAX_OWED = 6;
+/** One reload, said once: emitted by `reload.ts` after a self-reload (or when it had to stay pending). */
+export const SELF_RELOAD_EVENT = "pi-herdr:self-reload";
+export type SelfReloadState = { from: string; to: string; pending?: string };
 
 function replyText(event: unknown): string {
   const messages = (event as { messages?: unknown[] } | undefined)?.messages;
@@ -42,6 +45,12 @@ export function owedLabel(terminal: string): string {
 export function registerHcTurnLabels(pi: ExtensionAPI): void {
   let inboxStarted = false;
   let turnOrigin: "person" | "agent" = "person";
+  // Set by a self-reload and consumed by the very next turn: the note never outlives the code change it names.
+  let reload: { say: string; field: string } | undefined;
+  pi.events.on(SELF_RELOAD_EVENT, (state) => {
+    const { to, pending } = state as SelfReloadState;
+    reload = pending ? { say: `reload pending: ${pending}`, field: "pending" } : { say: `reloaded to ${to}`, field: to };
+  });
   pi.events.on(NSTAR_INBOX, () => { inboxStarted = true; });
   pi.on("input", (event) => {
     if (event.text.startsWith("<hc from=")) inboxStarted = true;
@@ -50,10 +59,14 @@ export function registerHcTurnLabels(pi: ExtensionAPI): void {
     turnOrigin = inboxStarted ? "agent" : "person";
     inboxStarted = false;
     // The turn starts with what is owed: a request delivered to this Pi and not yet answered.
-    await hcJson(["label", process.env.HC_TERMINAL_ID!, `pi.turn=${turnOrigin}`, "pi.say=", `pi.owed=${owedLabel(process.env.HC_TERMINAL_ID!)}`]);
+    await hcJson(["label", process.env.HC_TERMINAL_ID!, `pi.turn=${turnOrigin}`, `pi.say=${reload?.say ?? ""}`,
+      `pi.reloaded=${reload?.field ?? ""}`, `pi.owed=${owedLabel(process.env.HC_TERMINAL_ID!)}`]);
+    reload = undefined;
   });
   pi.on("agent_end", async (event) => {
     // Refreshed here too, so the label between turns never claims a request this turn answered.
-    await hcJson(["label", process.env.HC_TERMINAL_ID!, `pi.turn=${turnOrigin}`, `pi.say=${labelLine(replyText(event))}`, `pi.owed=${owedLabel(process.env.HC_TERMINAL_ID!)}`]);
+    await hcJson(["label", process.env.HC_TERMINAL_ID!, `pi.turn=${turnOrigin}`, `pi.say=${labelLine(replyText(event))}`,
+      "pi.reloaded=", `pi.owed=${owedLabel(process.env.HC_TERMINAL_ID!)}`]);
+    reload = undefined;
   });
 }
