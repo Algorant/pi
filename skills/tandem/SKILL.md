@@ -19,7 +19,11 @@ Use `tandem_status` before coordination. If no workspace exists, ask before `tan
 
 ### Decisions are ADRs, not work items
 
-A Decision (`decision-N`) records a choice that has already been made, by Algorant or by an approved plan or Task under his authority: a standing architecture record of why things are the way they are. Create one only for architecturally significant choices (project rule), and set it `accepted` in the same step you create it (Tandem creates Decisions as `proposed`). Never leave a Decision `proposed`: a proposal or open question belongs in a Task or research doc, not a Decision.
+A Decision (`decision-N`) is an ADR on every board, not a homelab-server habit: it records one lasting architecture choice — a structure, protocol, storage format, boundary or dependency the project will live with — and why. Create one only when that is what happened, in the step it is settled, set `accepted` in the same step (Tandem creates Decisions as `proposed`). Never leave a Decision `proposed`: an open question belongs in a Task or a research doc.
+
+Not a Decision, whatever it decides: Algorant's answer to a question, his pick between options, a scope change, a deferral or a "do it this way" instruction. Those are recorded on the Task that asked — its evidence, note or body — where the work and its history already live. "He decided X" is not the signal; "the project will be built this way from now on" is. When in doubt it is a note on the Task, not a Decision: a wrong Decision outlives the question that produced it, and four of them on one question is exactly how a board stops being read.
+
+Decision bookkeeping is not a report for Algorant: agents correct status themselves (`tandem_update --status`, *Triage* below) and never ask him to accept, confirm or tidy one.
 
 A Decision is not work: it has no Accord, readiness, or backlog, and is never claimed, delivered, completed, or cancelled to tidy the board. It stays on the board as reference. Its status follows reality, and agents correct it themselves with `tandem_update --status`; do not ask Algorant to accept a Decision that is already in effect:
 - in effect: `accepted`;
