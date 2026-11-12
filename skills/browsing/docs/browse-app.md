@@ -23,6 +23,8 @@ For routine checks and renders, stay on Obscura.
 
 **Large file uploads (input capture only so far).** Playwright's `setInputFiles` refuses files of 50 MB or more, because browse's extension link is never "co-located". browse does allow the raw CDP command `DOM.setFileInputFiles` with a local path inside its file roots (`/tmp`, the temp dir, `OPENCODE_BROWSER_FILE_ROOTS`); stage the file in `/tmp` and set the input that way. That route was only seen to capture the input, and a completed upload is unverified. When neither path works, leave the exact page ready for Algorant to add the file himself, and say so.
 
+**If the extension is missing from the profile.** `browse status` says `Extension: disconnected` and `~/.local/share/chromium-agent/Default/Extensions` is empty, while `extensions_crx_cache/metadata.json` still names `mfnicocicmmlkpjnaffgihfjhdgjkdjg`: the profile lost the store install it once had, and browse cannot drive it until it is back. Reinstall it in that same profile from https://chromewebstore.google.com/detail/mfnicocicmmlkpjnaffgihfjhdgjkdjg — one click, same extension id, and the profile's logins survive — then `browse status` reads `Extension: connected`. Adding the extension is Algorant's click in his own window: do not re-pair another browser around it, and never drive the profile through `--remote-debugging-port` or a direct CDP client (that is the Playwright ban in the skill).
+
 **Pitfalls.**
 - `browse install --help` runs the installer (seen in 0.0.14). Never run `install`; read `browse --help` instead.
 - A locator that matches a hidden element waits its whole 30 s timeout. Take a `snapshot()` first and target what is visible.
