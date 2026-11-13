@@ -30,6 +30,15 @@ export type HcWorkerIntegration = { repoKey: string; source: HcWorkerCheckout; t
  * the Worker is the Worker's own start acknowledgement, not a field here. */
 export type HcWorkerDirection = { request: string; ofDeliveryId: string; questionId?: string; approve?: true };
 export type HcWorkerControlState = "pending" | "failed" | "paused" | "discarding" | "discarded";
+export type HcWorkerBenchmarkSelection = {
+  requestedModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  selectedModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  providerExemption: "approved-benchmark-provider-exception";
+  providerExemptionModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  fast: boolean;
+  quota: string;
+  quotaCheckedAt: number;
+};
 
 /** Owner-only control record. Captured workflow facts, never a mirror of live HC
  * status and never a copy of the Worker's handoff. One record kind covers both a
@@ -77,6 +86,8 @@ export type HcWorkerRecord = {
   /** Captured `provider/model:thinking` for every invocation of this Worker; a manus
    * records MANUS_MODEL because it runs Pi's own default. */
   model: string;
+  /** Present only for explicitly selected, approved benchmark Worker launches. */
+  benchmark?: HcWorkerBenchmarkSelection;
   integration: HcWorkerIntegration;
   assignment?: WorkerAssignment;
   planRequired: boolean;
@@ -193,6 +204,17 @@ export function validateHcWorkerRecord(value: unknown): HcWorkerRecord {
   // instead of being unreadable to every reader later.
   text(record.childSessionId, "session ID");
   text(record.model, "model");
+  if (record.benchmark !== undefined) {
+    const benchmark = record.benchmark;
+    const contenders = ["openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"];
+    if (isManusRecord(record) || !benchmark || !contenders.includes(benchmark.requestedModel) ||
+        benchmark.selectedModel !== benchmark.requestedModel || benchmark.providerExemption !== "approved-benchmark-provider-exception" || benchmark.providerExemptionModel !== benchmark.selectedModel ||
+        typeof benchmark.quotaCheckedAt !== "number" || !Number.isFinite(benchmark.quotaCheckedAt) || benchmark.quotaCheckedAt < 0 ||
+        record.model !== `${benchmark.selectedModel}:high` || benchmark.fast !== (benchmark.selectedModel === "openai-codex/gpt-6-luna") ||
+        typeof benchmark.quota !== "string" || !benchmark.quota.trim()) {
+      throw new Error("Invalid native Worker benchmark selection or provider exemption.");
+    }
+  }
   if (typeof record.planRequired !== "boolean") throw new Error("Invalid native plan policy.");
   if (record.taskId) {
     record.assignment = validateWorkerAssignment(record.assignment);

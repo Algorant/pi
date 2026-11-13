@@ -26,6 +26,10 @@ export type ModelRoles = {
   roles: Record<RoleName, readonly RoleEntry[]> & { review: { enabled: boolean; models: readonly RoleEntry[] } };
 };
 const QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex"]);
+const BENCHMARK_QUOTA_MAX_AGE_MS = 30 * 60_000;
+const BENCHMARK_QUOTA_THRESHOLD = 0.9;
+export const BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
+export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number];
 export type RoleRegistry = Pick<ExtensionContext["modelRegistry"], "find" | "hasConfiguredAuth">;
 type CatalogModel = NonNullable<ReturnType<RoleRegistry["find"]>>;
 
@@ -82,22 +86,42 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
 }
 
 /**
- * The one per-entry availability check: the catalog model, or why the entry
- * cannot be used now. The quota gate reads the cached usage the powerbar keeps:
- * the weekly window at or above `quota.weeklyThreshold`, and the 5h window at
- * or above `quota.fiveHourThreshold`. Unknown usage (no
- * cache, no current window) never gates, and a stale reading still gates while
- * its window has not reset.
+ * The one per-entry availability check: catalog/auth, machine provider policy and
+ * quota. Ordinary role selection retains its historical unknown-cache behavior;
+ * the private strict policy is used only by resolveBenchmarkWorkerModel below.
  */
-function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold, fiveHourThreshold }: ModelRoles["quota"], allowedProviders: readonly string[] | undefined): { reason: string } | { catalog: CatalogModel } {
+type EntryPolicy = { providerException?: string; requireFreshQuota?: boolean };
+type EntryCheck = { catalog: CatalogModel; quota?: string };
+function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold, fiveHourThreshold }: ModelRoles["quota"], allowedProviders: readonly string[] | undefined, policy: EntryPolicy = {}): { reason: string } | EntryCheck {
   const separator = entry.model.indexOf("/");
   const provider = entry.model.slice(0, separator);
-  if (allowedProviders && !allowedProviders.includes(provider)) return { reason: `provider ${provider} is not in "pi-agency".modelProviders in ${localSettingsPath()}` };
+  if (allowedProviders && !allowedProviders.includes(provider) && policy.providerException !== entry.model) return { reason: `provider ${provider} is not in "pi-agency".modelProviders in ${localSettingsPath()}` };
   const catalog = registry.find(provider, entry.model.slice(separator + 1));
   if (!catalog) return { reason: "not in the model catalog" };
   if (!registry.hasConfiguredAuth(catalog)) return { reason: `no credentials for provider ${provider}` };
   if (QUOTA_PROVIDERS.has(provider)) {
-    const windows = readCachedLimits(provider)?.windows ?? [];
+    const cached = readCachedLimits(provider);
+    if (policy.requireFreshQuota) {
+      const age = cached?.fetchedAt === undefined ? undefined : Date.now() - cached.fetchedAt;
+      if (age === undefined || age < 0 || age > BENCHMARK_QUOTA_MAX_AGE_MS) return { reason: "quota cache missing, future-dated, or older than 30 minutes" };
+      const windows = cached.windows;
+      const weekWindows = windows.filter((window) => window.label === "Week");
+      const fiveHourWindows = windows.filter((window) => window.label === "5h");
+      if (!weekWindows.length) return { reason: "weekly quota is missing" };
+      const checkedWindows: Array<{ label: "Week" | "5h"; usedPercent: number }> = [];
+      for (const [label, reports] of [["Week", weekWindows], ["5h", fiveHourWindows]] as const) {
+        for (const reported of reports) {
+          const current = currentWindowUsage([reported], label);
+          if (!current || current.usedPercent < 0 || current.usedPercent > 100) return { reason: `reported ${label} quota is malformed or not current` };
+          if (current.usedPercent / 100 >= BENCHMARK_QUOTA_THRESHOLD) return { reason: `${label} quota ${Math.round(current.usedPercent)}% is at or above the 90% threshold` };
+          checkedWindows.push({ label, usedPercent: current.usedPercent });
+        }
+      }
+      const weekSummary = checkedWindows.filter((window) => window.label === "Week").map((window) => `Week ${Math.round(window.usedPercent)}%`).join(", ");
+      const fiveHourSummary = checkedWindows.filter((window) => window.label === "5h").map((window) => `5h ${Math.round(window.usedPercent)}%`).join(", ") || "5h not reported";
+      return { catalog, quota: `${weekSummary}; ${fiveHourSummary}` };
+    }
+    const windows = cached?.windows ?? [];
     const week = currentWindowUsage(windows, "Week");
     if (week && week.usedPercent / 100 >= weeklyThreshold) {
       return { reason: `weekly quota ${Math.round(week.usedPercent)}% is at or above the ${Math.round(weeklyThreshold * 100)}% threshold, resets in ${week.resetDescription}` };
@@ -125,7 +149,8 @@ export const PROVIDER_COMPANY: Readonly<Record<string, string>> = Object.freeze(
   "openai-codex": "openai",
 });
 const AGGREGATOR_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot", "opencode-go"]);
-const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek" });
+// Algorant approved opencode-go/grok-4.7 as a temporary numbered-model exception: it is the newest verified selectable Grok catalog model.
+const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek", grok: "xai" });
 
 /** The company behind a `provider/id` model. Throws when it is not explicitly mapped. */
 export function modelCompany(model: string, where: string): string {
@@ -172,6 +197,31 @@ export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: R
   }
   const { entry } = resolveRoleEntry(role, registry, path);
   return { model: entry.model, thinking: overrides.thinking ?? entry.thinking };
+}
+
+/**
+ * The approved native-Worker benchmark route. Its selector is a closed union,
+ * thinking is fixed at high, and only this path can make the selected model's
+ * provider exception while retaining the shared catalog/auth/quota check.
+ */
+export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistry, path = modelRolesPath()): { model: BenchmarkWorkerModel; thinking: "high"; fast: boolean; providerExemption: "approved-benchmark-provider-exception"; providerExemptionModel: BenchmarkWorkerModel; quota: string; quotaCheckedAt: number } {
+  if (!(BENCHMARK_WORKER_MODELS as readonly string[]).includes(model)) {
+    throw new Error(`Benchmark Worker model must be exactly one of ${BENCHMARK_WORKER_MODELS.join(" or ")}.`);
+  }
+  const selected = model as BenchmarkWorkerModel;
+  const { quota } = loadModelRoles(path);
+  const fast = selected === "openai-codex/gpt-6-luna";
+  const entry: RoleEntry = { model: selected, thinking: "high", fast };
+  const checked = checkEntry(entry, registry, quota, localAgencySettings().modelProviders, {
+    providerException: selected,
+    requireFreshQuota: true,
+  });
+  if ("reason" in checked) throw new Error(`Benchmark Worker contender ${selected} is unavailable: ${checked.reason}.`);
+  if (fast && !isOpenAICodexFastTarget(checked.catalog)) {
+    throw new Error(`Benchmark Worker contender ${selected} is not eligible for the Fast priority tier.`);
+  }
+  if (checked.quota === undefined) throw new Error(`Benchmark Worker contender ${selected} passed availability without strict quota evidence.`);
+  return { model: selected, thinking: "high", fast, providerExemption: "approved-benchmark-provider-exception", providerExemptionModel: selected, quota: checked.quota, quotaCheckedAt: Date.now() };
 }
 
 /**

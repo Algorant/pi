@@ -43,6 +43,7 @@ const DendraParameters = Type.Object({
   worktree: Type.Optional(Type.Boolean({ description: "Worker: default true, false explicitly skips isolation and uses this checkout." })),
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true delivers for Algorant judgement and forbids auto-finish." })),
   prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: optional temporary direction; durable scope stays in the Task." })),
+  benchmarkModel: Type.Optional(Type.Union([Type.Literal("openai-codex/gpt-6-luna"), Type.Literal("anthropic/claude-sonnet-5-5")], { description: "Worker only: explicit benchmark contender; high thinking is fixed, Luna uses Fast, and strict fresh quota preflight applies. No general model override." })),
   from: From,
 }, { additionalProperties: false });
 
@@ -175,20 +176,20 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   // Rows rebuilt by /reload or resume before session_start registers the tools keep their cards.
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
 
-  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     if (params.kind === "worker") {
       requireContract(params);
       if (params.label !== undefined) labelOf(params.label, "");
       if (params.task !== undefined) throw new Error("dendra_start worker takes taskId or brief, not task. Nothing was started.");
       requireOpenRequest(params.from, self);
-      const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
+      const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, benchmarkModel: params.benchmarkModel, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
       const d = started.details as Record<string, any>;
       const closed = closeRequest(params.from, `${d.label} (${d.agent})`, self);
       return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}`,
         { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...closed });
     }
-    if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
+    if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant, params.benchmarkModel].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
@@ -362,8 +363,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   const tools = [
     {
       name: "dendra_start", label: "Dendra Start", executionMode: "sequential" as const,
-      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
-      promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); worktrees default on, needsAlgorant stops auto-finish; outcomes arrive in your inbox.",
+      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
+      promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); optional benchmarkModel is Worker-only and selects a fixed approved contender; outcomes arrive in your inbox.",
       parameters: DendraParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => dendraStart(params, signal, ctx),
     },

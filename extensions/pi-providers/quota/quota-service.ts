@@ -451,14 +451,15 @@ async function fetchProviderJson(ctx: ExtensionContext, provider: string, url: s
  * OpenCode Go is not officially documented but `GET /opencode.ai/zen/go/v1/usage`
  * is live and key-authenticated (the same endpoint opencode-quota reads via the
  * API key). Response: `{ usage: { rolling|weekly|monthly: { status, percent, resetsAt } } }`.
+ * An exhausted window reports `status: "rate-limited"` with its percent, so a
+ * window is kept whenever it carries a percent, whatever its status.
  */
 export function mapOpenCodeGoUsage(data: any, now = Date.now()): ProviderLimits {
 	const usage = data?.usage;
 	const windows: RateWindow[] = [];
 	for (const [label, key] of [["5h", "rolling"], ["Week", "weekly"], ["Month", "monthly"]] as const) {
 		const item = usage?.[key];
-		if (!item || item.status !== "ok") continue;
-		const percent = nonNegative(item.percent);
+		const percent = nonNegative(item?.percent);
 		if (percent === undefined) continue;
 		const resetAt = typeof item.resetsAt === "string" ? Date.parse(item.resetsAt) : NaN;
 		const remainingSec = Number.isFinite(resetAt) ? Math.max(0, Math.floor((resetAt - now) / 1000)) : undefined;
@@ -466,6 +467,7 @@ export function mapOpenCodeGoUsage(data: any, now = Date.now()): ProviderLimits 
 			label,
 			usedPercent: Math.min(100, percent),
 			resetDescription: remainingSec !== undefined ? formatDuration(remainingSec) : undefined,
+			resetAt: Number.isFinite(resetAt) ? new Date(resetAt).toISOString() : undefined,
 		});
 	}
 	return { windows };

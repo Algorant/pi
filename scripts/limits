@@ -1,0 +1,53 @@
+#!/usr/bin/env bun
+/**
+ * limits --json — the same fresh refresh `/limits` runs, printed as JSON.
+ *
+ * Reuses `/limits`' own provider set, fetchers and controller
+ * (pi-providers/quota: providerConfigured, buildFetchers, LimitsController);
+ * no second reader, endpoint or mapping. Credentials resolve through Pi's
+ * ModelRegistry exactly as in a session (an expired OAuth token may be
+ * refreshed by Pi's owner code); no inference, no settings changes.
+ *
+ * Like `/limits`, a successful fetch rewrites the provider's ~/.pi/cache file.
+ * A provider whose fresh fetch failed reports status "error" with fresh:false;
+ * any windows it still shows are the previous cached reading at fetchedAt.
+ * Exit 1 when any configured provider failed.
+ */
+import { ModelRegistry, ModelRuntime, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { LABELS, LimitsController, buildFetchers, providerConfigured } from "../extensions/pi-providers/quota/index.ts";
+
+const args = process.argv.slice(2);
+if (args.length !== 1 || args[0] !== "--json") {
+  console.error("Usage: limits --json (fresh read-only usage of every configured provider, as /limits)");
+  process.exit(args.includes("--help") ? 0 : 2);
+}
+
+const runtime = await ModelRuntime.create();
+const ctx = { modelRegistry: new ModelRegistry(runtime) } as unknown as ExtensionCommandContext;
+const started = Date.now();
+const controller = new LimitsController(() => {}, {
+  hasCredentials: (provider) => providerConfigured(provider, ctx),
+  fetchers: buildFetchers(ctx),
+});
+await controller.refresh();
+await runtime.settleCredentialWrites();
+const now = Date.now();
+
+const providers = controller.snapshot().map((view) => ({
+  provider: view.provider,
+  label: LABELS[view.provider],
+  status: view.status,
+  fresh: view.status === "ready",
+  fetchedAt: view.fetchedAt === undefined ? null : new Date(view.fetchedAt).toISOString(),
+  ageSeconds: view.fetchedAt === undefined ? null : Math.max(0, Math.round((now - view.fetchedAt) / 1000)),
+  windows: view.windows.map((window) => ({
+    label: window.label,
+    usedPercent: window.usedPercent,
+    resetAt: window.resetAt ?? null,
+  })),
+  ...(view.money?.length ? { money: view.money } : {}),
+  ...(view.balance ? { balance: view.balance } : {}),
+}));
+
+console.log(JSON.stringify({ generatedAt: new Date(now).toISOString(), elapsedMs: now - started, providers }, null, 2));
+process.exit(providers.some((provider) => !provider.fresh) ? 1 : 0);

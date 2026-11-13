@@ -14,7 +14,7 @@ import {
   acknowledgeHcWorkerStart, createHcDeliveryId, createHcInvocationId, createHcWorkerRecord, hcRecordPath, isManusRecord, listHcWorkerOutcomes,
   listHcWorkerRecords, publishHcWorkerHandoff, readHcWorkerHandoff, readHcWorkerRecord, readHcWorkerStart, updateHcWorkerRecord,
   withHcWorkerLifecycle, writeHcWorkerOutcome, type HcWorkerDirection, type HcWorkerHandoff, type HcWorkerOutcome, type HcWorkerRecord,
-  type HcWorkerStart,
+  type HcWorkerStart, type HcWorkerBenchmarkSelection,
 } from "../pi-agency/workers/hc-record.ts";
 import {
   DiscardParameters, FeedbackParameters, MAX_PROMPT_LENGTH, PauseParameters, REJECTED_REPORT_SUFFIX,
@@ -25,7 +25,7 @@ import {
   requireActiveTask, requireCleanCheckout, requireNoOpenWorkerSubtasks, runRunnableValidations, runTandemCommand,
   runWorkerProgressNative, sourceAlreadyIntegrated, tandemCounts, tandemShow,
   tandemTaskMetrics, taskPlanRequired, validateCapturedCheckout, WORKER_LIGHT_EFFORTS, validateNativeRemovalResult, validateWorkerDispatch,
-  withCheckIn, workerModelArgument, type WorkerProgressInput, type WorkerReportInput,
+  withCheckIn, workerModelArgument, benchmarkWorkerModelArgument, type WorkerProgressInput, type WorkerReportInput,
 } from "../pi-agency/workers/shared.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { CHILD_EXIT, hcFind, hcJson, hcText, isHc } from "./core.ts";
@@ -236,12 +236,30 @@ async function recordReworkOnce({ record, handoff }: WorkerView, cwd: string, me
 
 class LaunchError extends Error { constructor(message: string, readonly uncertain: boolean) { super(message); } }
 
+async function refreshBenchmarkQuota(record: HcWorkerRecord, registry: ExtensionContext["modelRegistry"]): Promise<HcWorkerRecord> {
+  if (!record.benchmark) return record;
+  const resolved = benchmarkWorkerModelArgument(registry, record.benchmark.requestedModel);
+  if (resolved.model !== record.benchmark.selectedModel || resolved.argument !== record.model || resolved.fast !== record.benchmark.fast ||
+      resolved.providerExemption !== record.benchmark.providerExemption || resolved.providerExemptionModel !== record.benchmark.providerExemptionModel) {
+    throw new Error(`Saved benchmark Worker ${record.childAgent} no longer resolves to its captured contender, high-thinking model and Fast policy; no launch or continuation was started.`);
+  }
+  const benchmark = { ...record.benchmark, quota: resolved.quota, quotaCheckedAt: resolved.quotaCheckedAt };
+  if (benchmark.quota === record.benchmark.quota && benchmark.quotaCheckedAt === record.benchmark.quotaCheckedAt) return record;
+  return updateHcWorkerRecord(record.deliveryId, (current) => {
+    if (current.model !== record.model || current.benchmark?.selectedModel !== record.benchmark!.selectedModel) {
+      throw new Error(`Saved benchmark Worker ${record.childAgent} changed during quota refresh; no launch or continuation was started.`);
+    }
+    return { ...current, benchmark };
+  });
+}
+
 /**
  * One native invocation for this delivery. A failed request is resolved by its atomic label, never retried.
  * `--no-notify`: the typed handoff/failure notice owns the outcome; hc exit notes would type into the owner's composer.
  * child-exit tells the owner through its inbox when the invocation ends without sending any message.
  */
-async function launchInvocation(record: HcWorkerRecord, prompt: string): Promise<any> {
+async function launchInvocation(record: HcWorkerRecord, prompt: string, registry: ExtensionContext["modelRegistry"]): Promise<any> {
+  record = await refreshBenchmarkQuota(record, registry);
   // The label and kind name it (whois); task= carries its Task (the label never depends on it).
   const labels = { [INVOCATION_LABEL]: record.invocationId, [KIND_KEY]: "worker", ...(record.taskId ? { task: `${basename(dirname(record.integration.repoKey))}:${record.taskId}` } : {}), needsAlgorant: String(record.needsAlgorant ?? false), ...(record.label ? { [LABEL_KEY]: record.label } : {}) };
   const args = ["run", "--bg", "--rm", "--no-notify", "--outlive-parent", "--json", "--name", record.childAgent,
@@ -318,7 +336,7 @@ const NATIVE_TOOL_CARDS = {
   worker_ask: "ask", worker_report: "report", worker_progress: "progress",
 } as const;
 
-export type StartWorker = (params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; from?: string; prompt: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<any>>;
+export type StartWorker = (params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: HcWorkerBenchmarkSelection["requestedModel"]; from?: string; prompt: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<any>>;
 export type ReadyNotice = (env: Envelope, ctx: ExtensionContext) => Promise<Envelope | undefined>;
 
 const READY_HEADLINE = /^Worker handoff ready for review: .+ \(([a-z0-9_-]+)\)$/;
@@ -623,6 +641,17 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (live && (!sessionPath || live.labels?.[CONTEXT_LABEL] !== workerContextCapability(sessionPath))) {
       throw new Error(`Kept Worker ${params.agent} (${live.address}) has not loaded managed context for its session; no input was sent.`);
     }
+    const benchmark = previous.benchmark
+      ? benchmarkWorkerModelArgument(ctx.modelRegistry, previous.benchmark.requestedModel)
+      : undefined;
+    if (benchmark && (benchmark.model !== previous.benchmark!.selectedModel || benchmark.argument !== previous.model ||
+        benchmark.fast !== previous.benchmark!.fast || benchmark.providerExemption !== previous.benchmark!.providerExemption ||
+        benchmark.providerExemptionModel !== previous.benchmark!.providerExemptionModel)) {
+      throw new Error(`Saved benchmark Worker ${params.agent} no longer resolves to its captured contender, high-thinking model and Fast policy; no retarget or continuation was started.`);
+    }
+    const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark
+      ? { ...previous.benchmark!, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt }
+      : undefined;
     const assignment = task ? await captureWorkerAssignment(task, target) : undefined;
     // A plan handoff supersedes any earlier approval: only approve:true approves it again.
     const planAcceptedAt = params.approve ? Date.now() : planPending ? undefined : previous.planAcceptedAt;
@@ -645,7 +674,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const next: HcWorkerRecord = {
       version: 8, deliveryId: createHcDeliveryId(), recoveryOfDeliveryId: previous.deliveryId, invocationId: createHcInvocationId(), taskId: previous.taskId,
       ownerSessionId: owner.sessionId, owner: { core: owner.core, terminal: owner.terminal }, childAgent: previous.childAgent,
-      ...(previous.label ? { label: previous.label } : {}), brief: previous.brief, needsAlgorant: previous.needsAlgorant, from: previous.from, childSessionId: previous.childSessionId, model: previous.model, integration, assignment, planRequired,
+      ...(previous.label ? { label: previous.label } : {}), brief: previous.brief, needsAlgorant: previous.needsAlgorant, from: previous.from, childSessionId: previous.childSessionId, model: previous.model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), integration, assignment, planRequired,
       ...(live ? { child: { core: owner.core, terminal: live.address } } : {}),
       ...(planAcceptedAt !== undefined ? { planAcceptedAt } : {}),
       direction, createdAt: now, updatedAt: now, state: "pending",
@@ -654,6 +683,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     let terminal: string;
     try {
       if (live) {
+        // Recheck the strict quota gate immediately before sending a new invocation to a kept child.
+        await refreshBenchmarkQuota(next, ctx.modelRegistry);
         // Refuse before changing the label. Settled is idle or done; `--if` only
         // distinguishes idle from working.
         if (!["idle", "done"].includes(runtimeState(live))) throw new LaunchError(`Kept Worker ${live.address} is ${runtimeState(live)}, not settled.`, false);
@@ -665,7 +696,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         if (receipt?.started === false) throw new LaunchError(`hc send did not confirm the kept Worker's turn started: ${JSON.stringify(receipt).slice(0, 300)}`, true);
         terminal = live.address;
       } else {
-        terminal = (await launchInvocation(next, prompt)).address;
+        terminal = (await launchInvocation(next, prompt, ctx.modelRegistry)).address;
       }
     } catch (error) {
       // Never retried here. A refusal proves nothing arrived: the delivery fails and keeps its exact
@@ -682,7 +713,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     return text(`${undelivered ? "Delivered the preserved direction to" : answering ? "Answered clarification for" : params.redeliver ? "Sent the generic continuation to" : "Sent feedback to"} Worker ${params.agent} in the same session and checkout (${terminal}); opened delivery ${next.deliveryId}.`,
       // The invocation now carrying this delivery: a kept one got a new turn, otherwise a new one is starting.
       { host: "hc", agent: params.agent, terminal, taskId: previous.taskId, deliveryId: next.deliveryId, invocationId: next.invocationId, state: live ? "kept · turn sent" : "new invocation · starting", routed: "new-cycle",
-        direction: undelivered ? "redelivered" : "new", ...(live ? { kept: true } : {}),
+        direction: undelivered ? "redelivered" : "new", ...(live ? { kept: true } : {}), ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}),
         ...(planPending && !answering ? { plan: params.approve ? "approved" : "revise" } : {}), ...(answering ? { questionId: params.questionId, answer: params.message.trim() } : {}) });
   }
 
@@ -722,7 +753,12 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     requireContract(params);
     const worktree = params.worktree ?? true;
     const needsAlgorant = params.needsAlgorant ?? false;
-    const model = workerModelArgument(ctx.modelRegistry);
+    const benchmark = params.benchmarkModel ? benchmarkWorkerModelArgument(ctx.modelRegistry, params.benchmarkModel) : undefined;
+    const model = benchmark?.argument ?? workerModelArgument(ctx.modelRegistry);
+    const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark ? {
+      requestedModel: params.benchmarkModel!, selectedModel: benchmark.model, providerExemption: benchmark.providerExemption,
+      providerExemptionModel: benchmark.providerExemptionModel, fast: benchmark.fast, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt,
+    } : undefined;
     const project = await nativeProjectIdentity(ctx.cwd);
     const task = params.taskId ? await tandemShow(params.taskId, ctx.cwd) : undefined;
     if (task) {
@@ -785,7 +821,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       const now = Date.now();
       const record: HcWorkerRecord = {
         version: 8, deliveryId, invocationId: createHcInvocationId(), ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, from: params.from, ownerSessionId: owner.sessionId, owner: { core: owner.core, terminal: owner.terminal },
-        childAgent: agent, label, childSessionId: newId(), model, createdAt: now, updatedAt: now, state: "pending", planRequired,
+        childAgent: agent, label, childSessionId: newId(), model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), createdAt: now, updatedAt: now, state: "pending", planRequired,
         direction: { request: params.prompt.trim(), ofDeliveryId: deliveryId },
         integration: { repoKey: project.repoKey, worktree, baseHead, source: { checkoutPath, branch }, target: { checkoutPath: project.repoRoot, branch: targetBranch } },
       };
@@ -799,11 +835,11 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       }
       launchAttempted = true;
       let started: any;
-      try { started = await launchInvocation(record, prompt); }
+      try { started = await launchInvocation(record, prompt, ctx.modelRegistry); }
       catch (error) { launchUncertain = error instanceof LaunchError ? error.uncertain : true; throw error; }
-      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.`,
+      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
         { host: "hc", state: "starting", taskId: task?.id, title: task?.title, label, worktree, needsAlgorant, from: params.from, agent, terminal: started.address, core: owner.core, worktreePath: checkoutPath, branch, deliveryId, invocationId: record.invocationId,
-          integrationTarget: record.integration.target, sessionId: record.childSessionId, model, outlivesParent: true });
+          integrationTarget: record.integration.target, sessionId: record.childSessionId, model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), outlivesParent: true });
     } catch (error) {
       const identity = `${task ? `Task ${task.id}, ` : ""}Worker ${agent}, checkout ${checkoutPath ?? "(none)"}, branch ${branch}, delivery ${deliveryId}`;
       if (provisioningFailed) throw new Error(`${diagnosticText(error)} Preserve ${identity} for inspection (wt -C ${JSON.stringify(checkoutPath)} config state logs). Resolve provisioning or dispose this checkout through Worktrunk before retrying; do not blindly rerun creation hooks.`);

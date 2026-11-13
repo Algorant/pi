@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import { resolveRole, type RoleRegistry } from "../model-roles.ts";
+import { resolveRole, resolveBenchmarkWorkerModel, type BenchmarkWorkerModel, type RoleRegistry } from "../model-roles.ts";
 import type { WorkerProjectRule } from "./brief.ts";
 import { tandemShow } from "../state.ts";
 import { nstarContractBody } from "../nstar-note.ts";
@@ -162,6 +162,12 @@ export type WorkerThinkingLevel = (typeof WORKER_THINKING_LEVELS)[number];
 export function workerModelArgument(registry: RoleRegistry, model?: string, thinkingLevel?: WorkerThinkingLevel): string {
   const resolved = resolveRole("worker", registry, { model, thinking: thinkingLevel });
   return `${resolved.model}:${resolved.thinking}`;
+}
+
+/** Closed benchmark-only selection; never accepts a general model/thinking override. */
+export function benchmarkWorkerModelArgument(registry: RoleRegistry, benchmarkModel: BenchmarkWorkerModel) {
+  const resolved = resolveBenchmarkWorkerModel(benchmarkModel, registry);
+  return { ...resolved, argument: `${resolved.model}:${resolved.thinking}` };
 }
 
 export type CommandError = Error & { stdout?: string; stderr?: string };

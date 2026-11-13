@@ -8,7 +8,7 @@ import { labelFrom } from "../../../../scripts/whois.ts";
 
 /** The pi-herdr dispatch tools (pi-herdr/dispatch.ts): dendra_start, manus_start, ceph_start. */
 export type DispatchTool = "dendra_start" | "manus_start" | "ceph_start";
-type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
+type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; benchmarkModel?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
 type Details = Record<string, any>;
 
 const LABEL: Record<DispatchTool, string> = { dendra_start: "Dendra Start", manus_start: "Manus Start", ceph_start: "Ceph Start" };
@@ -32,6 +32,15 @@ function idsOf(d: Details): string {
   return ids.length ? ` (${ids.join(", ")})` : "";
 }
 
+function benchmarkText(args: Args, d: Details): string {
+  const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : {};
+  const selected = text(benchmark.selectedModel) || text(args.benchmarkModel);
+  if (!selected) return "";
+  const exemption = text(benchmark.providerExemption) || "approved-benchmark-provider-exception";
+  const exceptionModel = text(benchmark.providerExemptionModel) || selected;
+  return ` · benchmark ${selected} · ${exemption} for ${exceptionModel}`;
+}
+
 /** Where it started, in a few words: the place Algorant would look for it. */
 function whereOf(tool: DispatchTool, d: Details): string {
   const tab = d.tab === "pending" ? "tab pending" : text(d.tabName) ? `tab ${text(d.tabName)}` : "";
@@ -44,13 +53,15 @@ function whereOf(tool: DispatchTool, d: Details): string {
 function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: Theme, status?: string): string {
   const details = d ?? {};
   const parts = [theme.fg("accent", "⇢"), " ", theme.fg("toolTitle", kindOf(tool, args, details)), " ", theme.fg("text", labelOf(tool, args, details))];
-  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}`));
+  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}${benchmarkText(args, details)}`));
   else {
     parts.push(theme.fg("dim", idsOf(details)));
     const where = whereOf(tool, details);
     if (where) parts.push(theme.fg("muted", ` · ${where}`));
     if (details.requestClosed) parts.push(theme.fg("dim", ` · closed ${text(details.requestClosed)}`));
     if (details.requestCloseError || details.tabError || details.notChecked?.length) parts.push(theme.fg("warning", " · see details"));
+    const benchmark = benchmarkText(args, details);
+    if (benchmark) parts.push(theme.fg("warning", benchmark));
   }
   return ` ${parts.join("")}`;
 }
@@ -61,12 +72,16 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
   const expanded = Boolean(options.expanded);
   const status = pending ? (context.executionStarted ? "starting" : "queued") : error ? "refused" : "launched";
   const sections = error
-    ? [section("Error", [theme.fg("error", truncatePlain(output, expanded ? 4000 : 500))])]
+    ? [section("Error", [
+      theme.fg("error", truncatePlain(output, expanded ? 4000 : 500)),
+      text(args.benchmarkModel) ? fieldLine(theme, "benchmark", `${text(args.benchmarkModel)} · approved-benchmark-provider-exception for selected contender`, "warning") : undefined,
+    ])]
     : pending ? [] : [section("Started", [
       fieldLine(theme, "label", labelOf(tool, args, d), "accent"),
       fieldLine(theme, "name", text(d.name) || "—", "muted"),
       fieldLine(theme, "terminal", text(d.terminal) || "—", "muted"),
       text(d.taskId) ? fieldLine(theme, "task", joinTitleParts([text(d.taskId), text(d.title) ? truncatePlain(text(d.title), expanded ? 200 : 80) : undefined]), "toolOutput") : undefined,
+      d.benchmark ? fieldLine(theme, "benchmark", `${text(d.benchmark.requestedModel)} → ${text(d.benchmark.selectedModel)} · ${text(d.benchmark.providerExemption)} for ${text(d.benchmark.providerExemptionModel)} · high thinking · ${text(d.benchmark.quota)} · Fast ${d.benchmark.fast ? "on" : "off"}`, "warning") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "needsAlgorant", String(d.needsAlgorant ?? false), d.needsAlgorant ? "warning" : "muted") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "isolation", d.worktree === false ? "shared checkout · retained on finish" : "Worktrunk worktree", "muted") : undefined,
       text(d.cwd) ? fieldLine(theme, "cwd", truncatePlain(text(d.cwd), 200), "muted") : undefined,
