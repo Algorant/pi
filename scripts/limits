@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * limits --json — the same fresh refresh `/limits` runs, printed as JSON.
+ * limits --json [--max-age <seconds>] — the same refresh `/limits` runs, printed as JSON.
  *
  * Reuses `/limits`' own provider set, fetchers and controller
  * (pi-providers/quota: providerConfigured, buildFetchers, LimitsController);
@@ -8,46 +8,121 @@
  * ModelRegistry exactly as in a session (an expired OAuth token may be
  * refreshed by Pi's owner code); no inference, no settings changes.
  *
+ * Without --max-age (or with 0) every configured provider is fetched fresh.
  * Like `/limits`, a successful fetch rewrites the provider's ~/.pi/cache file.
- * A provider whose fresh fetch failed reports status "error" with fresh:false;
- * any windows it still shows are the previous cached reading at fetchedAt.
- * Exit 1 when any configured provider failed.
+ * With --max-age N a provider is not fetched on this call when its cached
+ * reading is younger than N seconds (status "cached", fresh:false, the original
+ * fetchedAt) or when an unsuccessful attempt newer than its last success is
+ * younger than N seconds (status "error", fresh:false, known windows kept).
+ * Other providers are fetched through the same controller; the attempt is
+ * recorded in the provider's own cache file (reserveLimitsAttempt) before the
+ * fetch, never as a fresh fetchedAt. fresh:false means "not fetched on this
+ * call", not ineligible: the consumer judges age and window resets itself.
+ * Exit 1 when any configured provider is in error.
  */
 import { ModelRegistry, ModelRuntime, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { LABELS, LimitsController, buildFetchers, providerConfigured } from "../extensions/pi-providers/quota/index.ts";
+import { LABELS, LIMITS_PROVIDERS, LimitsController, buildFetchers, providerConfigured, readCachedLimits, reserveLimitsAttempt, type LimitsProvider } from "../extensions/pi-providers/quota/index.ts";
+
+const USAGE = "Usage: limits --json [--max-age <seconds>]  (usage of every configured provider as /limits; --max-age N reuses cached readings younger than N seconds and attempts each other provider at most once per N seconds)";
+
+function fail(message: string): never {
+  console.error(`limits: ${message}\n${USAGE}`);
+  process.exit(2);
+}
+
+function parseMaxAge(raw: string | undefined): number {
+  if (raw === undefined || !/^\d+$/.test(raw)) fail(`--max-age needs a non-negative integer number of seconds, got ${raw === undefined ? "nothing" : JSON.stringify(raw)}`);
+  const seconds = Number(raw);
+  if (!Number.isSafeInteger(seconds)) fail(`--max-age ${raw} is too large`);
+  return seconds;
+}
 
 const args = process.argv.slice(2);
-if (args.length !== 1 || args[0] !== "--json") {
-  console.error("Usage: limits --json (fresh read-only usage of every configured provider, as /limits)");
-  process.exit(args.includes("--help") ? 0 : 2);
+if (args.includes("--help")) {
+  console.log(USAGE);
+  process.exit(0);
 }
+let json = false;
+let maxAgeSeconds: number | undefined;
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "--json") {
+    if (json) fail("--json given twice");
+    json = true;
+  } else if (arg === "--max-age" || arg.startsWith("--max-age=")) {
+    if (maxAgeSeconds !== undefined) fail("--max-age given twice");
+    maxAgeSeconds = parseMaxAge(arg === "--max-age" ? args[++i] : arg.slice("--max-age=".length));
+  } else {
+    fail(`unknown argument ${JSON.stringify(arg)}`);
+  }
+}
+if (!json) fail("--json is required");
+const budgetMs = (maxAgeSeconds ?? 0) * 1000;
 
 const runtime = await ModelRuntime.create();
 const ctx = { modelRegistry: new ModelRegistry(runtime) } as unknown as ExtensionCommandContext;
 const started = Date.now();
+const configured = LIMITS_PROVIDERS.filter((provider) => providerConfigured(provider, ctx));
+
+// Decide per provider, from its own cache file, what this call must not fetch.
+type Held = { kind: "cached" | "suppressed"; cache: NonNullable<ReturnType<typeof readCachedLimits>> };
+const held = new Map<LimitsProvider, Held>();
+const attemptedAt = new Map<LimitsProvider, number>();
+if (budgetMs > 0) {
+  for (const provider of configured) {
+    const cache = readCachedLimits(provider);
+    const age = (at: number | undefined) => (at === undefined || at > started ? undefined : started - at);
+    const readingAge = age(cache?.fetchedAt);
+    const attemptAge = age(cache?.attemptedAt);
+    if (cache && readingAge !== undefined && readingAge < budgetMs) held.set(provider, { kind: "cached", cache });
+    else if (cache && attemptAge !== undefined && attemptAge < budgetMs && (cache.fetchedAt === undefined || cache.attemptedAt! > cache.fetchedAt)) held.set(provider, { kind: "suppressed", cache });
+    else {
+      reserveLimitsAttempt(provider, started);
+      attemptedAt.set(provider, started);
+    }
+  }
+}
+
 const controller = new LimitsController(() => {}, {
-  hasCredentials: (provider) => providerConfigured(provider, ctx),
+  hasCredentials: (provider) => configured.includes(provider) && !held.has(provider),
   fetchers: buildFetchers(ctx),
 });
 await controller.refresh();
 await runtime.settleCredentialWrites();
 const now = Date.now();
+const fetched = new Map(controller.snapshot().map((view) => [view.provider, view]));
 
-const providers = controller.snapshot().map((view) => ({
-  provider: view.provider,
-  label: LABELS[view.provider],
-  status: view.status,
-  fresh: view.status === "ready",
-  fetchedAt: view.fetchedAt === undefined ? null : new Date(view.fetchedAt).toISOString(),
-  ageSeconds: view.fetchedAt === undefined ? null : Math.max(0, Math.round((now - view.fetchedAt) / 1000)),
-  windows: view.windows.map((window) => ({
-    label: window.label,
-    usedPercent: window.usedPercent,
-    resetAt: window.resetAt ?? null,
-  })),
-  ...(view.money?.length ? { money: view.money } : {}),
-  ...(view.balance ? { balance: view.balance } : {}),
-}));
+const iso = (at: number | undefined) => (at === undefined ? null : new Date(at).toISOString());
+const ageOf = (at: number | undefined) => (at === undefined ? null : Math.max(0, Math.round((now - at) / 1000)));
 
-console.log(JSON.stringify({ generatedAt: new Date(now).toISOString(), elapsedMs: now - started, providers }, null, 2));
-process.exit(providers.some((provider) => !provider.fresh) ? 1 : 0);
+const providers = configured.map((provider) => {
+  const hold = held.get(provider);
+  const view = fetched.get(provider);
+  const source = hold?.cache ?? view!;
+  const status = hold ? (hold.kind === "cached" ? "cached" : "error") : view!.status;
+  const attempt = hold?.kind === "suppressed" ? hold.cache.attemptedAt : status === "error" ? attemptedAt.get(provider) : undefined;
+  return {
+    provider,
+    label: LABELS[provider],
+    status,
+    fresh: status === "ready",
+    fetchedAt: iso(source.fetchedAt),
+    ageSeconds: ageOf(source.fetchedAt),
+    ...(attempt === undefined ? {} : { attemptedAt: iso(attempt), attemptAgeSeconds: ageOf(attempt) }),
+    windows: source.windows.map((window) => ({
+      label: window.label,
+      usedPercent: window.usedPercent,
+      resetAt: window.resetAt ?? null,
+    })),
+    ...(source.money?.length ? { money: source.money } : {}),
+    ...(source.balance ? { balance: source.balance } : {}),
+  };
+});
+
+console.log(JSON.stringify({
+  generatedAt: new Date(now).toISOString(),
+  elapsedMs: now - started,
+  ...(maxAgeSeconds === undefined ? {} : { maxAgeSeconds }),
+  providers,
+}, null, 2));
+process.exit(providers.some((provider) => provider.status === "error") ? 1 : 0);

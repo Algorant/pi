@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ export type LimitState = {
 	status: "idle" | "loading" | "ready" | "error";
 	windows: RateWindow[];
 	fetchedAt?: number;
+	/** Last fetch attempt reserved by `limits --max-age`; cleared by the next success write. */
+	attemptedAt?: number;
 	failureAt?: number;
 	retryAt?: number;
 	error?: string;
@@ -272,20 +274,48 @@ export function readCachedLimits(provider: string): (LimitState & Pick<ProviderL
 			money: Array.isArray(parsed.money) ? parsed.money : undefined,
 			balance: parsed.balance && typeof parsed.balance === "object" ? parsed.balance : undefined,
 			fetchedAt: typeof parsed.fetchedAt === "number" ? parsed.fetchedAt : undefined,
+			attemptedAt: typeof parsed.attemptedAt === "number" ? parsed.attemptedAt : undefined,
 		};
 	} catch {
 		return undefined;
 	}
 }
 
+/** Replace a cache file in one rename so a concurrent reader never sees a partial write. */
+function writeCacheFile(provider: string, content: object): void {
+	const path = CACHE_PATHS[provider];
+	mkdirSync(join(homedir(), ".pi", "cache"), { recursive: true });
+	const temporary = `${path}.${process.pid}.tmp`;
+	writeFileSync(temporary, JSON.stringify(content, null, 2) + "\n");
+	renameSync(temporary, path);
+}
+
 export function writeCachedLimits(provider: string, data: ProviderLimits): void {
 	try {
-		mkdirSync(join(homedir(), ".pi", "cache"), { recursive: true });
 		const { windows, money, balance } = data;
-		writeFileSync(CACHE_PATHS[provider], JSON.stringify({ fetchedAt: Date.now(), windows, money, balance }, null, 2) + "\n");
+		writeCacheFile(provider, { fetchedAt: Date.now(), windows, money, balance });
 	} catch {
 		// Cache failures should not affect the UI.
 	}
+}
+
+/**
+ * Record a fetch attempt in the provider's existing cache file BEFORE fetching,
+ * keeping the last successful fetchedAt/windows/money/balance untouched (a
+ * provider never cached gets `attemptedAt` and empty windows only). Nothing is
+ * rewritten after the fetch, so a concurrent successful write is never clobbered
+ * by a stale copy; the success writer replaces the file without `attemptedAt`.
+ * Throws if the marker cannot be stored, so the retry budget is never silently void.
+ */
+export function reserveLimitsAttempt(provider: string, attemptedAt = Date.now()): void {
+	const current = readCachedLimits(provider);
+	writeCacheFile(provider, {
+		fetchedAt: current?.fetchedAt,
+		windows: current?.windows ?? [],
+		money: current?.money,
+		balance: current?.balance,
+		attemptedAt,
+	});
 }
 
 class MissingUsageCredentialsError extends Error {
