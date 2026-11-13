@@ -8,7 +8,7 @@ import { hcProfileRequested } from "./subagents/profile.ts";
 /**
  * Apply the "orchestrator" entry of agent/model-roles.json to a fresh
  * interactive main session (Herdra, Cephs, manus): set the session model and
- * thinking level (nothing else sets `high` for new sessions). Skipped for
+ * its configured thinking level. Skipped for
  * Workers, resumed sessions, reloads and forks, and whenever the command line
  * names a model or thinking level, which still win.
  *
