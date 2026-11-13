@@ -135,7 +135,24 @@ async function nameTab(host: AppHost, spaceId: string, terminal: string, tabName
 
 /** A raw `pi <brief>` launch has no first message to check: proof is the live terminal with the
  * requested name, then its own inbox report. A failed request is reported, never retried. */
+/**
+ * `hc run` takes only hc's own options before `--`; a Pi flag placed there makes the launcher read it
+ * as the program to run ("cannot start --session-id"). Name the offender instead of retrying.
+ */
+const HC_RUN_OPTIONS = new Set(["--json", "--name", "--cwd", "--on", "--label", "--parent", "--no-parent", "--no-notify", "--outlive-parent", "--rm", "--keep", "--bg", "--timeout"]);
+
+function assertLauncherArgs(args: string[]): void {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") return;
+    if (!arg.startsWith("-")) continue;
+    const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (!HC_RUN_OPTIONS.has(flag)) throw new Error(`Nothing was started: "${flag}" is not an hc run option, so it would be run as the program. hc run takes only hc flags before "--"; the program's own flags go after it.`);
+  }
+}
+
 async function launchRaw(args: string[], name: string): Promise<any> {
+  assertLauncherArgs(args);
   let started: any;
   try { started = await hcJson(["run", ...args], 30_000); }
   catch (error) { throw new Error(`hc run did not confirm ${name}: ${diagnosticText(error)} Inspect hc get ${name} before anything else; nothing was retried.`); }
@@ -258,8 +275,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const failedAfter = worktree ? ` Checkout ${cwd} (branch ${branch}) is preserved; no automatic removal.` : "";
     let started: any;
     try {
-      started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd, "--session-id", childSessionId,
-        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), brief], name);
+      started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
+        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, "--", brief], name);
     } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
     // The record's own observation of the terminal the launch returned; finish closes it by this.
     try {
