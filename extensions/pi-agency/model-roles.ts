@@ -345,6 +345,10 @@ export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistr
  * Adversarial review (task-407): the first available `review.models` entry whose
  * company differs from the caller's own model (`provider/id`). Throws when review
  * is disabled, either company is unmapped, or no opposite-company entry is available.
+ * Named claude/openai review selections route by author company before checking
+ * candidates: Anthropic -> claude.review (Astra, then Grok), OpenAI -> openai.review
+ * (Fable, then Grok). Other companies and explicit grok/custom selections keep
+ * their configured row. Validate the original complete map before routing.
  */
 export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
   const { quota, roles, sets } = loadModelRoles(path);
@@ -354,7 +358,11 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
   const settings = localAgencySettings();
   const rejected: string[] = [];
   if (settings.modelSets) {
-    const { set, cell } = selectedCell(sets, settings.modelSets, "review", path);
+    let { set, cell } = selectedCell(sets, settings.modelSets, "review", path);
+    const routed = (set === "claude" || set === "openai")
+      ? callerCompany === "anthropic" ? "claude" : callerCompany === "openai" ? "openai" : set
+      : set;
+    if (routed !== set) ({ set, cell } = selectedCell(sets, { ...settings.modelSets, review: routed }, "review", path));
     for (const entry of cell) {
       if (modelCompany(entry.model, `${path}: sets.${set}.review entry ${entry.model}`) === callerCompany) {
         rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);
