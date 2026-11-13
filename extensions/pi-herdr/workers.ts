@@ -754,7 +754,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const worktree = params.worktree ?? true;
     const needsAlgorant = params.needsAlgorant ?? false;
     const benchmark = params.benchmarkModel ? benchmarkWorkerModelArgument(ctx.modelRegistry, params.benchmarkModel) : undefined;
-    const model = benchmark?.argument ?? workerModelArgument(ctx.modelRegistry);
+    const ordinary = benchmark ? undefined : workerModelArgument(ctx.modelRegistry);
+    const model = benchmark?.argument ?? ordinary!.argument;
     const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark ? {
       requestedModel: params.benchmarkModel!, selectedModel: benchmark.model, providerExemption: benchmark.providerExemption,
       providerExemptionModel: benchmark.providerExemptionModel, fast: benchmark.fast, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt,
@@ -837,7 +838,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       let started: any;
       try { started = await launchInvocation(record, prompt, ctx.modelRegistry); }
       catch (error) { launchUncertain = error instanceof LaunchError ? error.uncertain : true; throw error; }
-      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
+      if (ordinary?.set && ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${model}; set ${ordinary.set}, quota ${ordinary.quota}`, "info");
+      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${model} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
         { host: "hc", state: "starting", taskId: task?.id, title: task?.title, label, worktree, needsAlgorant, from: params.from, agent, terminal: started.address, core: owner.core, worktreePath: checkoutPath, branch, deliveryId, invocationId: record.invocationId,
           integrationTarget: record.integration.target, sessionId: record.childSessionId, model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), outlivesParent: true });
     } catch (error) {

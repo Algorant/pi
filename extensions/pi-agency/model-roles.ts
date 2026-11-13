@@ -6,7 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isOpenAICodexFastTarget } from "../pi-providers/openai/model.ts";
 import { currentWindowUsage, readCachedLimits } from "../pi-providers/quota/quota-service.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "./subagents/profile.ts";
-import { localAgencySettings, localSettingsPath } from "./local-settings.ts";
+import { localAgencySettings, localSettingsPath, MODEL_SET_ROLES, type ModelSetRole, type ModelSetSelection } from "./local-settings.ts";
 
 /**
  * The single source of default models (task-404). `agent/model-roles.json` holds
@@ -16,14 +16,28 @@ import { localAgencySettings, localSettingsPath } from "./local-settings.ts";
  * `quota.fiveHourThreshold` in the corresponding window counts as unavailable.
  * On a machine whose local settings set `"pi-agency": { "modelProviders": [...] }`,
  * entries from other providers count as unavailable too.
+ *
+ * Named sets (task-714): the optional root `sets` holds named sets, each with
+ * optional `herdra`/`orchestrator`/`worker`/`subagent` entries and an ordered
+ * `review` list. A machine whose local settings set `"pi-agency".modelSets`
+ * resolves each role only from its selected set: no cross-set or legacy
+ * fallback, no provider filter, and the set quota rule below. Without
+ * `modelSets` the legacy lists above apply unchanged.
+ *
+ * Version exception (AGENTS.md *Versions*): model-roles.json names exact
+ * numbered model ids, including Algorant's approved 2026-11-13 set matrix
+ * (task-714). opencode-go never carries Anthropic, OpenAI or xAI models; load
+ * fails on such an entry and there is no approved exception.
  */
 export const ROLE_NAMES = ["orchestrator", "worker", "subagent"] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
 export type RoleEntry = { model: string; thinking: ThinkingLevel; fast: boolean };
+export type ModelSet = Partial<Record<Exclude<ModelSetRole, "review">, RoleEntry>> & { review?: readonly RoleEntry[] };
 export type ModelRoles = {
   quota: { weeklyThreshold: number; fiveHourThreshold: number };
   roles: Record<RoleName, readonly RoleEntry[]> & { review: { enabled: boolean; models: readonly RoleEntry[] } };
+  sets?: Readonly<Record<string, ModelSet>>;
 };
 const QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex"]);
 const BENCHMARK_QUOTA_MAX_AGE_MS = 30 * 60_000;
@@ -45,16 +59,42 @@ function object(value: unknown, where: string, keys: readonly string[], path: st
   return value as Record<string, unknown>;
 }
 
+function roleEntry(item: unknown, at: string, path: string): RoleEntry {
+  const entry = object(item, at, ["model", "thinking", "fast"], path);
+  if (typeof entry.model !== "string") throw new TypeError(`${path}: ${at}.model must be a "provider/id" string`);
+  if (typeof entry.thinking !== "string" || !THINKING_LEVELS.has(entry.thinking as ThinkingLevel)) throw new TypeError(`${path}: ${at}.thinking must be one of ${[...THINKING_LEVELS].join(", ")}`);
+  if (entry.fast !== undefined && typeof entry.fast !== "boolean") throw new TypeError(`${path}: ${at}.fast must be a boolean`);
+  const model = validateModelIdentifier(entry.model, `${path}: ${at}.model`);
+  if (model.startsWith("opencode-go/")) {
+    const family = model.slice("opencode-go/".length).split("-")[0]!;
+    const company = Object.hasOwn(MODEL_FAMILY_COMPANY, family) ? MODEL_FAMILY_COMPANY[family] : undefined;
+    if (company && MAJOR_COMPANIES.has(company)) throw new TypeError(`${path}: ${at} routes ${company} model ${model} through opencode-go; Anthropic, OpenAI and xAI models go direct (no approved exception)`);
+  }
+  return { model, thinking: entry.thinking as ThinkingLevel, fast: entry.fast === true };
+}
+
 function entries(value: unknown, where: string, path: string): readonly RoleEntry[] {
   if (!Array.isArray(value) || value.length === 0) throw new TypeError(`${path}: ${where} must be a non-empty array`);
-  return value.map((item, index) => {
-    const at = `${where}[${index}]`;
-    const entry = object(item, at, ["model", "thinking", "fast"], path);
-    if (typeof entry.model !== "string") throw new TypeError(`${path}: ${at}.model must be a "provider/id" string`);
-    if (typeof entry.thinking !== "string" || !THINKING_LEVELS.has(entry.thinking as ThinkingLevel)) throw new TypeError(`${path}: ${at}.thinking must be one of ${[...THINKING_LEVELS].join(", ")}`);
-    if (entry.fast !== undefined && typeof entry.fast !== "boolean") throw new TypeError(`${path}: ${at}.fast must be a boolean`);
-    return { model: validateModelIdentifier(entry.model, `${path}: ${at}.model`), thinking: entry.thinking as ThinkingLevel, fast: entry.fast === true };
-  });
+  return value.map((item, index) => roleEntry(item, `${where}[${index}]`, path));
+}
+
+function modelSets(value: unknown, path: string): Record<string, ModelSet> {
+  const sets: Record<string, ModelSet> = {};
+  for (const [name, raw] of Object.entries(object(value, "sets", Object.keys(value ?? {}), path))) {
+    if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new TypeError(`${path}: sets has invalid set name "${name}" (lowercase letters, digits, -)`);
+    const where = `sets.${name}`;
+    const set = object(raw, where, MODEL_SET_ROLES, path);
+    if (Object.keys(set).length === 0) throw new TypeError(`${path}: ${where} must fill at least one of ${MODEL_SET_ROLES.join(", ")}`);
+    const parsed: ModelSet = {};
+    for (const role of MODEL_SET_ROLES) {
+      if (set[role] === undefined) continue;
+      if (role === "review") parsed.review = entries(set.review, `${where}.review`, path);
+      else if (Array.isArray(set[role])) throw new TypeError(`${path}: ${where}.${role} must be one {model, thinking, fast?} object`);
+      else parsed[role] = roleEntry(set[role], `${where}.${role}`, path);
+    }
+    sets[name] = parsed;
+  }
+  return sets;
 }
 
 /** Read and strictly validate the roles file. Read per call so edits apply to the next launch. */
@@ -65,7 +105,7 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
   } catch (error) {
     throw new Error(`Unable to read model roles from ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const root = object(parsed, "the file", ["quota", "roles"], path);
+  const root = object(parsed, "the file", ["quota", "roles", "sets"], path);
   const quota = object(root.quota, "quota", ["weeklyThreshold", "fiveHourThreshold"], path);
   const threshold = quota.weeklyThreshold;
   if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold <= 0 || threshold > 1) throw new TypeError(`${path}: quota.weeklyThreshold must be a number above 0 and at most 1 (for example 0.9)`);
@@ -82,6 +122,7 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
       subagent: entries(roles.subagent, "roles.subagent", path),
       review: { enabled: review.enabled, models: entries(review.models, "roles.review.models", path) },
     },
+    ...(root.sets === undefined ? {} : { sets: modelSets(root.sets, path) }),
   };
 }
 
@@ -134,8 +175,72 @@ function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold,
   return { catalog };
 }
 
-/** `skipped` lists the earlier entries passed over, each with its reason (also for quota). */
-export type ResolvedRoleEntry = { entry: RoleEntry; catalog: CatalogModel; skipped: string[] };
+/**
+ * `skipped` lists the earlier entries passed over, each with its reason (also for quota).
+ * With named sets, `set` names the selected set and `quota` is the chosen entry's
+ * quota notice (`checked: …` or `unknown: …`), never a skip.
+ */
+export type ResolvedRoleEntry = { entry: RoleEntry; catalog: CatalogModel; skipped: string[]; set?: string; quota?: string };
+
+/**
+ * Set-path quota rule (task-714, agreed with Model cutover): only current
+ * provider-wide windows (these labels, reset still ahead) count, each at
+ * Algorant's fixed 90%. A window at or above it blocks until its reset at any
+ * reading age; a reading at most 30 minutes old with every current window below
+ * it is checked; anything else (no reading, older low reading, no current
+ * window) is unknown and the entry proceeds with that notice. No fetch here.
+ */
+const SET_QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "xai", "opencode-go"]);
+const SET_QUOTA_LIMITS: Readonly<Record<string, number>> = Object.freeze({ "5h": 0.9, Day: 0.9, Week: 0.9, Month: 0.9 });
+const SET_QUOTA_RECENT_MS = 30 * 60_000;
+
+function setQuota(provider: string, now = Date.now()): { blocked: string } | { notice: string } {
+  if (!SET_QUOTA_PROVIDERS.has(provider)) return { notice: `unknown: ${provider} has no quota reading` };
+  const cached = readCachedLimits(provider);
+  if (!cached) return { notice: `unknown: no ${provider} quota reading` };
+  const age = cached.fetchedAt === undefined ? undefined : now - cached.fetchedAt;
+  const read = age === undefined ? "reading time missing" : age < 0 ? "reading time in the future" : `read ${Math.round(age / 60_000)}m ago`;
+  const current = cached.windows.filter((window) => Object.hasOwn(SET_QUOTA_LIMITS, window.label) && typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent) && !!window.resetAt && Date.parse(window.resetAt) > now);
+  for (const window of current) {
+    const limit = SET_QUOTA_LIMITS[window.label]!;
+    if (window.usedPercent / 100 >= limit) return { blocked: `${provider} ${window.label} ${Math.round(window.usedPercent)}% is at or above the ${Math.round(limit * 100)}% limit (${read}), resets ${window.resetAt}` };
+  }
+  const usage = `${provider} ${current.map((window) => `${window.label} ${Math.round(window.usedPercent)}%`).join(", ")} (${read})`;
+  if (!current.length) return { notice: `unknown: ${provider} has no current quota window (${read})` };
+  if (age === undefined || age < 0 || age > SET_QUOTA_RECENT_MS) return { notice: `unknown: ${usage}` };
+  return { notice: `checked: ${usage}` };
+}
+
+/** The selected set name and cell for one role; first checks that all five selections exist and are filled. */
+function selectedCell<R extends ModelSetRole>(sets: ModelRoles["sets"], selection: ModelSetSelection, role: R, path: string): { set: string; cell: NonNullable<ModelSet[R]> } {
+  const where = `"pi-agency".modelSets in ${localSettingsPath()}`;
+  if (!sets) throw new Error(`${where} selects named model sets, but ${path} has no "sets"`);
+  for (const each of MODEL_SET_ROLES) {
+    const name = selection[each];
+    if (!Object.hasOwn(sets, name)) throw new Error(`${where}: ${each} names set "${name}", which ${path} does not define (sets: ${Object.keys(sets).join(", ")})`);
+    if (sets[name]![each] === undefined) throw new Error(`${where}: ${each} names set "${name}", which has no ${each} target`);
+  }
+  return { set: selection[role], cell: sets[selection[role]]![role]! };
+}
+
+/** Catalog, auth, Fast tier and the set quota rule for one entry of a selected set. */
+function checkSetEntry(entry: RoleEntry, registry: RoleRegistry, where: string): { reason: string } | { catalog: CatalogModel; quota: string } {
+  const separator = entry.model.indexOf("/");
+  const provider = entry.model.slice(0, separator);
+  const catalog = registry.find(provider, entry.model.slice(separator + 1));
+  if (!catalog) return { reason: "not in the model catalog" };
+  if (!registry.hasConfiguredAuth(catalog)) return { reason: `no credentials for provider ${provider}` };
+  if (entry.fast && !isOpenAICodexFastTarget(catalog)) throw new Error(`${where} entry ${entry.model} sets fast:true but is not eligible for the Fast priority tier`);
+  const quota = setQuota(provider);
+  return "blocked" in quota ? { reason: quota.blocked } : { catalog, quota: quota.notice };
+}
+
+function resolveSetEntry(role: Exclude<ModelSetRole, "review">, registry: RoleRegistry, sets: ModelRoles["sets"], selection: ModelSetSelection, path: string): ResolvedRoleEntry {
+  const { set, cell } = selectedCell(sets, selection, role, path);
+  const checked = checkSetEntry(cell, registry, `${path}: sets.${set}.${role}`);
+  if ("reason" in checked) throw new Error(`Model set "${set}" ${role} target ${cell.model} is unavailable: ${checked.reason}. No fallback to other sets.`);
+  return { entry: cell, catalog: checked.catalog, skipped: [], set, quota: checked.quota };
+}
 
 /**
  * Provider ID to the company that trains its models, for the adversarial review
@@ -151,7 +256,9 @@ export const PROVIDER_COMPANY: Readonly<Record<string, string>> = Object.freeze(
   xai: "xai",
 });
 const AGGREGATOR_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot", "opencode-go"]);
-const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek" });
+const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", grok: "xai", deepseek: "deepseek" });
+/** Companies whose models never go through opencode-go (AGENTS.md; Algorant 2026-11-13). */
+const MAJOR_COMPANIES: ReadonlySet<string> = new Set(["anthropic", "openai", "xai"]);
 
 /** The company behind a `provider/id` model. Throws when it is not explicitly mapped. */
 export function modelCompany(model: string, where: string): string {
@@ -168,10 +275,16 @@ export function modelCompany(model: string, where: string): string {
   return company;
 }
 
-/** The first available entry of a role. Throws, naming the role, when none is. */
-export function resolveRoleEntry(role: RoleName, registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
-  const { quota, roles } = loadModelRoles(path);
-  const allowed = localAgencySettings().modelProviders;
+/**
+ * The first available entry of a role, or with named sets the selected set's
+ * entry. Throws, naming the role, when none is. `herdra` exists only in sets.
+ */
+export function resolveRoleEntry(role: RoleName | "herdra", registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
+  const { quota, roles, sets } = loadModelRoles(path);
+  const settings = localAgencySettings();
+  if (settings.modelSets) return resolveSetEntry(role, registry, sets, settings.modelSets, path);
+  if (role === "herdra") throw new Error(`The herdra role exists only in named model sets; "pi-agency".modelSets is not set in ${localSettingsPath()}`);
+  const allowed = settings.modelProviders;
   const rejected: string[] = [];
   for (const entry of roles[role]) {
     const checked = checkEntry(entry, registry, quota, allowed);
@@ -192,12 +305,15 @@ export function resolveRoleEntry(role: RoleName, registry: RoleRegistry, path = 
  * the list (its thinking defaults to the role's first entry); an explicit
  * thinking level replaces only the chosen entry's thinking.
  */
-export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: RoleRegistry, overrides: { model?: string; thinking?: ThinkingLevel } = {}, path = modelRolesPath()): { model: string; thinking: ThinkingLevel } {
+export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: RoleRegistry, overrides: { model?: string; thinking?: ThinkingLevel } = {}, path = modelRolesPath()): { model: string; thinking: ThinkingLevel; set?: string; quota?: string } {
   if (overrides.model !== undefined) {
-    return { model: validateModelIdentifier(overrides.model, `${role} model`), thinking: overrides.thinking ?? loadModelRoles(path).roles[role][0]!.thinking };
+    const { roles, sets } = loadModelRoles(path);
+    const selection = localAgencySettings().modelSets;
+    const thinking = selection ? selectedCell(sets, selection, role, path).cell.thinking : roles[role][0]!.thinking;
+    return { model: validateModelIdentifier(overrides.model, `${role} model`), thinking: overrides.thinking ?? thinking };
   }
-  const { entry } = resolveRoleEntry(role, registry, path);
-  return { model: entry.model, thinking: overrides.thinking ?? entry.thinking };
+  const { entry, set, quota } = resolveRoleEntry(role, registry, path);
+  return { model: entry.model, thinking: overrides.thinking ?? entry.thinking, ...(set ? { set, quota } : {}) };
 }
 
 /**
@@ -231,12 +347,29 @@ export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistr
  * is disabled, either company is unmapped, or no opposite-company entry is available.
  */
 export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
-  const { quota, roles } = loadModelRoles(path);
+  const { quota, roles, sets } = loadModelRoles(path);
   const review = roles.review;
   if (!review.enabled) throw new Error(`Review is disabled: set roles.review.enabled to true in ${path}`);
   const callerCompany = modelCompany(callerModel, "Review caller");
-  const allowed = localAgencySettings().modelProviders;
+  const settings = localAgencySettings();
   const rejected: string[] = [];
+  if (settings.modelSets) {
+    const { set, cell } = selectedCell(sets, settings.modelSets, "review", path);
+    for (const entry of cell) {
+      if (modelCompany(entry.model, `${path}: sets.${set}.review entry ${entry.model}`) === callerCompany) {
+        rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);
+        continue;
+      }
+      const checked = checkSetEntry(entry, registry, `${path}: sets.${set}.review`);
+      if ("reason" in checked) {
+        rejected.push(`${entry.model} (${checked.reason})`);
+        continue;
+      }
+      return { entry, catalog: checked.catalog, skipped: rejected, set, quota: checked.quota };
+    }
+    throw new Error(`No available opposite-company review model in set "${set}" for caller "${callerModel}": ${rejected.join("; ")}. No fallback to other sets.`);
+  }
+  const allowed = settings.modelProviders;
   for (const entry of review.models) {
     if (modelCompany(entry.model, `${path}: roles.review entry ${entry.model}`) === callerCompany) {
       rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);

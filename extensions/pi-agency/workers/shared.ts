@@ -158,10 +158,13 @@ export const WORKER_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"
 
 export type WorkerThinkingLevel = (typeof WORKER_THINKING_LEVELS)[number];
 
-/** The `--model` argument: caller arguments win, then the first available "worker" entry of model-roles.json. */
-export function workerModelArgument(registry: RoleRegistry, model?: string, thinkingLevel?: WorkerThinkingLevel): string {
-  const resolved = resolveRole("worker", registry, { model, thinking: thinkingLevel });
-  return `${resolved.model}:${resolved.thinking}`;
+/**
+ * The `--model` argument: caller arguments win, then the first available "worker" entry of model-roles.json
+ * (or the selected named set's, with its `set` and quota notice for the launch result).
+ */
+export function workerModelArgument(registry: RoleRegistry, model?: string, thinkingLevel?: WorkerThinkingLevel): { argument: string; set?: string; quota?: string } {
+  const { set, quota, ...resolved } = resolveRole("worker", registry, { model, thinking: thinkingLevel });
+  return { argument: `${resolved.model}:${resolved.thinking}`, ...(set ? { set, quota } : {}) };
 }
 
 /** Closed benchmark-only selection; never accepts a general model/thinking override. */

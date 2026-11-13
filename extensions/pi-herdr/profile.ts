@@ -39,7 +39,7 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
       for (const tool of allowed) if (!available.has(tool)) throw new Error(`Profile tool ${tool} is not registered.`);
       pi.setActiveTools([...allowed]);
       pi.appendEntry("pi-herdr-profile", { profile: name, terminal: self.address, parent: self.parent, model: entry.entry.model });
-      ctx.ui.notify(`HC ${name}: ${entry.entry.model}${entry.skipped?.length ? `; skipped ${entry.skipped.join("; ")}` : ""}`, "info");
+      ctx.ui.notify(`HC ${name}: ${entry.entry.model}${entry.set ? `; set ${entry.set}, quota ${entry.quota}` : ""}${entry.skipped?.length ? `; skipped ${entry.skipped.join("; ")}` : ""}`, "info");
     } catch (error) {
       profile = undefined;
       allowed.clear();
