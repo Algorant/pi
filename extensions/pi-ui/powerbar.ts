@@ -207,6 +207,8 @@ export function registerPowerbar(pi: ExtensionAPI) {
 	const refreshInFlight = new Map<UsageProvider, Promise<void>>();
 	const refreshControllers = new Map<UsageProvider, AbortController>();
 	const usage = createUsageAccumulator();
+	// Cleared on session_shutdown, so a render from a replaced instance paints nothing.
+	let live = true;
 
 	function getLimitState(provider: UsageProvider | undefined): LimitState {
 		if (!provider) return { status: "idle", windows: [] };
@@ -224,11 +226,21 @@ export function registerPowerbar(pi: ExtensionAPI) {
 		if (!ctx?.hasUI) return;
 		// Resolved once per refresh (event-driven) so OAuth presence is not
 		// re-read from disk on every footer paint.
-		const provider = getUsageProvider(ctx);
 		ctx.ui.setFooter((_tui, theme) => ({
+			// A footer installed before a reload outlives it, and the ctx captured at
+			// install time throws once the session is replaced: this render must never
+			// take the process down, so it paints one empty line instead.
 			render(width: number): string[] {
-				const totals = usage.consume(ctx);
-				return [buildLine(pi, ctx, theme, width, provider, getLimitState(provider), fast, totals)];
+				if (!live) return [""];
+				const current = currentCtx;
+				if (!current) return [""];
+				try {
+					const provider = getUsageProvider(current);
+					const totals = usage.consume(current);
+					return [buildLine(pi, current, theme, width, provider, getLimitState(provider), fast, totals)];
+				} catch {
+					return [""];
+				}
 			},
 			invalidate() {},
 		}));
@@ -294,7 +306,10 @@ export function registerPowerbar(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (ctx.hasUI) ctx.ui.setFooter(undefined);
+		// The instance is done: its footer must stop painting before the session it
+		// was bound to is replaced, and a cleared footer is not this instance's to keep.
+		live = false;
+		try { if (ctx.hasUI) ctx.ui.setFooter(undefined); } catch { /* already replaced */ }
 		for (const controller of refreshControllers.values()) controller.abort();
 		refreshControllers.clear();
 		usage.reset();
