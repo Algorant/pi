@@ -83,8 +83,7 @@ function getContextStats(ctx: ExtensionContext): { tokens?: number; percent?: nu
 	return { tokens, percent: percent !== undefined && Number.isFinite(percent) ? percent : undefined };
 }
 
-function formatContextBar(ctx: ExtensionContext, theme: Theme, tier: FooterTier): string | undefined {
-	const stats = getContextStats(ctx);
+function formatContextBar(stats: { tokens?: number; percent?: number } | undefined, theme: Theme, tier: FooterTier): string | undefined {
 	if (!stats) return undefined;
 	const pct = stats.percent ?? 0;
 	const tokenText = stats.tokens !== undefined ? formatTokens(stats.tokens) : "?";
@@ -153,6 +152,7 @@ function buildLine(
 	limits: LimitState,
 	fast: OpenAIFastState,
 	totals: UsageTotals,
+	contextStats: { tokens?: number; percent?: number } | undefined,
 ): string {
 	if (width <= 1) return " ".slice(0, width);
 	// Herdr repaints a VS16 emoji at the right edge as a monochrome text glyph
@@ -179,7 +179,7 @@ function buildLine(
 		if (tier.tokens) tokenParts.push(`↑${formatTokens(totals.input)}`, `↓${formatTokens(totals.output)}`);
 		if (tier.cost && totals.cost > 0) tokenParts.push(`$${totals.cost.toFixed(2)}`);
 		const tokens = tokenParts.length > 0 ? theme.fg("dim", tokenParts.join(" ")) : "";
-		const left = [identity, tokens, formatContextBar(ctx, theme, tier)].filter(Boolean).join(separator);
+		const left = [identity, tokens, formatContextBar(contextStats, theme, tier)].filter(Boolean).join(separator);
 		const limitsText = formatLimits(provider, ctx, theme, limits, tier, separator) ?? "";
 		const right = limitsText ? `${limitsText}${separator}${modelText}` : modelText;
 		return { left, right };
@@ -207,6 +207,9 @@ export function registerPowerbar(pi: ExtensionAPI) {
 	const refreshInFlight = new Map<UsageProvider, Promise<void>>();
 	const refreshControllers = new Map<UsageProvider, AbortController>();
 	const usage = createUsageAccumulator();
+	// ctx.getContextUsage() walks the conversation, so it is measured once per event:
+	// calling it from the footer made every keystroke pay for a 33k-entry session.
+	let contextStats: { tokens?: number; percent?: number } | undefined;
 	// Cleared on session_shutdown, so a render from a replaced instance paints nothing.
 	let live = true;
 
@@ -225,7 +228,10 @@ export function registerPowerbar(pi: ExtensionAPI) {
 		const ctx = currentCtx;
 		if (!ctx?.hasUI) return;
 		// Resolved once per refresh (event-driven) so OAuth presence is not
-		// re-read from disk on every footer paint.
+		// re-read from disk on every footer paint. The context bar is the same:
+		// ctx.getContextUsage() walks the conversation, so it is measured here and
+		// reused by every paint until the next event.
+		contextStats = getContextStats(ctx);
 		ctx.ui.setFooter((_tui, theme) => ({
 			// A footer installed before a reload outlives it, and the ctx captured at
 			// install time throws once the session is replaced: this render must never
@@ -237,7 +243,7 @@ export function registerPowerbar(pi: ExtensionAPI) {
 				try {
 					const provider = getUsageProvider(current);
 					const totals = usage.consume(current);
-					return [buildLine(pi, current, theme, width, provider, getLimitState(provider), fast, totals)];
+					return [buildLine(pi, current, theme, width, provider, getLimitState(provider), fast, totals, contextStats)];
 				} catch {
 					return [""];
 				}
@@ -314,6 +320,7 @@ export function registerPowerbar(pi: ExtensionAPI) {
 		// The instance is done: its footer must stop painting before the session it
 		// was bound to is replaced, and a cleared footer is not this instance's to keep.
 		live = false;
+		contextStats = undefined;
 		try { if (ctx.hasUI) ctx.ui.setFooter(undefined); } catch { /* already replaced */ }
 		for (const controller of refreshControllers.values()) controller.abort();
 		refreshControllers.clear();
