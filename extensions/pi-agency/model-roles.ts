@@ -147,10 +147,11 @@ export const PROVIDER_COMPANY: Readonly<Record<string, string>> = Object.freeze(
   anthropic: "anthropic",
   openai: "openai",
   "openai-codex": "openai",
+  // Approved 2026-11-13: review uses direct xai/grok-4.7 (xhigh), the verified selectable version; never Go unless Algorant explicitly asks.
+  xai: "xai",
 });
 const AGGREGATOR_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot", "opencode-go"]);
-// Algorant approved opencode-go/grok-4.7 as a temporary numbered-model exception: it is the newest verified selectable Grok catalog model.
-const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek", grok: "xai" });
+const MODEL_FAMILY_COMPANY: Readonly<Record<string, string>> = Object.freeze({ claude: "anthropic", gpt: "openai", deepseek: "deepseek" });
 
 /** The company behind a `provider/id` model. Throws when it is not explicitly mapped. */
 export function modelCompany(model: string, where: string): string {
