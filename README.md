@@ -54,7 +54,7 @@ It's a showroom, not an installer.
 
 ## Theme
 
-[verdigris](https://github.com/Algorant/omarchy-verdigris-theme)
+
 
 ## License
 
