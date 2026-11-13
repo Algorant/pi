@@ -246,7 +246,12 @@ export function registerPowerbar(pi: ExtensionAPI) {
 		}));
 	}
 
+	/** Called from timers too, where a throw would end the process: a ctx replaced by a reload just skips the refresh. */
 	function scheduleLimitRefresh(ctx: ExtensionContext, force = false) {
+		try { scheduleLimitRefreshOrThrow(ctx, force); } catch { /* stale ctx after a reload */ }
+	}
+
+	function scheduleLimitRefreshOrThrow(ctx: ExtensionContext, force = false) {
 		const provider = getUsageProvider(ctx);
 		if (!provider) return;
 		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) return;
