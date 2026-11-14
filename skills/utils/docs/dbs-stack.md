@@ -84,7 +84,7 @@ Postgres publishes on the LAN address only. On the LAN, `dbs` connects directly.
 
 ## The duckdb CLI
 
-Every machine that runs `dbs` has the distribution's `duckdb` CLI (Arch `extra`; workstation and laptop via the algomarchy package list, homelab-server already). The CLI must be at least as new as the newest DuckDB that writes a project's file (older DuckDB cannot read a newer storage format). `dbs` reads the writer version from the file header and fails with the upgrade step otherwise. Projects whose own code uses DuckDB (p40 from Python via uv) keep their own dependency. `DBS_DUCKDB` overrides the CLI path.
+Every machine that runs `dbs` has the distribution's `duckdb` CLI (Arch `extra`; workstation and laptop via the algOS package list, homelab-server already). The CLI must be at least as new as the newest DuckDB that writes a project's file (older DuckDB cannot read a newer storage format). `dbs` reads the writer version from the file header and fails with the upgrade step otherwise. Projects whose own code uses DuckDB (p40 from Python via uv) keep their own dependency. `DBS_DUCKDB` overrides the CLI path.
 
 ## When the mirror runs
 

@@ -95,7 +95,7 @@ that.
   ~/scripts/pass-agent-exec --reason "<why>" -- <fnox args>
   ```
 
-- The wrapper is owned by Algomarchy (`~/scripts`, omarchy dotfiles); homelab-server
+- The wrapper is owned by algOS (`~/scripts`, omarchy dotfiles); homelab-server
   keeps a byte-identical copy. The PAT lives at
   `~/.config/pass-agent/homelab-agents.pat` (mode 0600) on homelab-server, desktop and
   laptop only, never in Git, dotfiles, Proton or chat. Never read it.

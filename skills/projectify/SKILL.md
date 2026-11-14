@@ -13,7 +13,7 @@ For an existing project, projectify is mostly detection: open what is there and 
 
 ## 1. Directory
 
-Every project, throwaway or not, lives at `~/Projects/<name>`.
+New projects, throwaway or not, live at `~/Projects/<name>`. Existing projects keep their agreed canonical paths and case: algOS uses `~/.algOS`, private `Algorant/.algOS`, and public `Algorant/algOS`; its project/memory slug is `algos` and Ceph label is `algOS Ceph`. Pass the exact filesystem path as `folder` and the lowercase project slug as `project` to `ceph_start`. An existing Ceph may have no hc name: discover its actual terminal via `hc ls`, never assume the project slug is a message route.
 
 - Look for it first with FFF `find` under that root (a near match may be the same project under another name).
 - For a new project, **confirm the name with Algorant before creating anything**. Prefer short, lowercase, hyphenated names (`[a-z][a-z0-9_-]{0,31}`) that also work as a repo name and a Herdr space or terminal name.

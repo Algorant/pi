@@ -160,7 +160,7 @@ select_sources() {  # fills SEL with source indexes
 
 # ── duckdb CLI, source files, Postgres route ──────────────────────────────────
 need_cli() {
-  command -v "$DUCKDB" >/dev/null 2>&1 || die "duckdb CLI not found ($DUCKDB)" "install it (Arch: pacman -S duckdb; tracked in the algomarchy package list) or set DBS_DUCKDB"
+  command -v "$DUCKDB" >/dev/null 2>&1 || die "duckdb CLI not found ($DUCKDB)" "install it (Arch: pacman -S duckdb; tracked in the algOS package list) or set DBS_DUCKDB"
 }
 
 check_source_file() {  # check_source_file IDX   exists, matches its engine, CLI not older than the writer
@@ -577,7 +577,7 @@ cmd_bootstrap() {
         || { echo "  missing  $(head -1 "$WORK/ver.err" | sed 's/^dbs: //'). $(sed -n 's/^  next: /next: /p' "$WORK/ver.err" | head -1)"; bad=1; }
     done
   else
-    echo "  missing  duckdb CLI. next: install it (Arch: pacman -S duckdb; tracked in the algomarchy package list)"; bad=1
+    echo "  missing  duckdb CLI. next: install it (Arch: pacman -S duckdb; tracked in the algOS package list)"; bad=1
   fi
   if tcp_open "$PGH" "$PGP"; then echo "  ok       $PGH:$PGP reachable directly"
   else echo "  note     $PGH:$PGP not reachable directly; mirror, status, verify and sql need --via-ssh from here"; fi
