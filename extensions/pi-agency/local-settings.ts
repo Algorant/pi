@@ -29,16 +29,21 @@ export class LocalAgencySettingsError extends Error {
 
 export const localSettingsPath = () => join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "settings.json");
 
+/** The settings file's text, or undefined when this machine has none yet. */
+function settingsText(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 /** Read per call so settings edits apply to the next launch. */
 export function localAgencySettings(): LocalAgencySettings {
   const path = localSettingsPath();
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
-  }
+  const text = settingsText(path);
+  if (text === undefined) return {};
   const section: unknown = JSON.parse(text)?.["pi-agency"];
   if (section === undefined) return {};
   if (typeof section !== "object" || section === null || Array.isArray(section)) throw new Error(`${path}: "pi-agency" must be an object.`);
@@ -68,4 +73,36 @@ export function localAgencySettings(): LocalAgencySettings {
     if (modelProviders !== undefined) fail(`${path}: "pi-agency" sets both modelSets and modelProviders; modelSets replaces modelProviders, so remove modelProviders.`);
   }
   return { machine: machine as string | undefined, modelProviders: modelProviders as string[] | undefined, modelSets: modelSets as ModelSetSelection | undefined };
+}
+
+/**
+ * The optional machine-local `"pi-agency-temporary"` section of the same
+ * settings.json, deliberately a separate top-level key so a Pi running an older
+ * `"pi-agency"` reader (which rejects unknown keys) keeps working. Both keys are
+ * optional and only these exact values are accepted; an absent section is the
+ * normal routing, and removing it (or a key) restores the old path.
+ *
+ * - `manus: "worker"`: a new manus runs the existing `worker` role and quota
+ *   selection instead of the orchestrator entry (task-726).
+ * - `review: "paused"`: reviewer launches and review resolution fail clearly.
+ */
+export type TemporaryAgencySettings = { manus?: "worker"; review?: "paused" };
+
+/** Read per launch so adding or removing the section applies to the next dispatch. */
+export function temporaryAgencySettings(): TemporaryAgencySettings {
+  const path = localSettingsPath();
+  const text = settingsText(path);
+  if (text === undefined) return {};
+  const section: unknown = JSON.parse(text)?.["pi-agency-temporary"];
+  if (section === undefined) return {};
+  if (typeof section !== "object" || section === null || Array.isArray(section)) {
+    throw new Error(`${path}: "pi-agency-temporary" must be an object.`);
+  }
+  for (const key of Object.keys(section)) {
+    if (key !== "manus" && key !== "review") throw new Error(`${path}: "pi-agency-temporary" has unknown key "${key}" (known: manus, review).`);
+  }
+  const { manus, review } = section as Record<string, unknown>;
+  if (manus !== undefined && manus !== "worker") throw new Error(`${path}: "pi-agency-temporary".manus must be "worker"; remove it to restore orchestrator selection for a new manus.`);
+  if (review !== undefined && review !== "paused") throw new Error(`${path}: "pi-agency-temporary".review must be "paused"; remove it to restore reviews.`);
+  return { ...(manus === undefined ? {} : { manus: "worker" }), ...(review === undefined ? {} : { review: "paused" }) };
 }

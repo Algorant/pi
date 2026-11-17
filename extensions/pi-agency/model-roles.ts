@@ -6,7 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isOpenAICodexFastTarget } from "../pi-providers/openai/model.ts";
 import { currentWindowUsage, readCachedLimits } from "../pi-providers/quota/quota-service.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "./subagents/profile.ts";
-import { localAgencySettings, localSettingsPath, MODEL_SET_ROLES, type ModelSetRole, type ModelSetSelection } from "./local-settings.ts";
+import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_SET_ROLES, type ModelSetRole, type ModelSetSelection } from "./local-settings.ts";
 
 /**
  * The single source of default models (task-404). `agent/model-roles.json` holds
@@ -344,13 +344,15 @@ export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistr
 /**
  * Adversarial review (task-407): the first available `review.models` entry whose
  * company differs from the caller's own model (`provider/id`). Throws when review
- * is disabled, either company is unmapped, or no opposite-company entry is available.
+ * is disabled by roles, paused by the temporary machine policy, either company is
+ * unmapped, or no opposite-company entry is available.
  * Named claude/openai review selections route by author company before checking
  * candidates: Anthropic -> claude.review (Astra, then Grok), OpenAI -> openai.review
  * (Fable, then Grok). Other companies and explicit grok/custom selections keep
  * their configured row. Validate the original complete map before routing.
  */
 export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
+  if (temporaryAgencySettings().review === "paused") throw new Error(`Reviews are paused by "pi-agency-temporary".review in ${localSettingsPath()}; remove that key to restore review routing.`);
   const { quota, roles, sets } = loadModelRoles(path);
   const review = roles.review;
   if (!review.enabled) throw new Error(`Review is disabled: set roles.review.enabled to true in ${path}`);

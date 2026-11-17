@@ -4,9 +4,10 @@ import { Type } from "typebox";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/custom-tools/dispatch.ts";
 import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } from "../pi-agency/inbox/envelope.ts";
+import { localSettingsPath, temporaryAgencySettings } from "../pi-agency/local-settings.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
-import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
+import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow, workerModelArgument } from "../pi-agency/workers/shared.ts";
 import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
 import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
@@ -191,6 +192,11 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant, params.benchmarkModel].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
+    // The temporary machine policy pauses reviews before any launch side effect; the
+    // reviewer child would also refuse inside resolveReviewEntry, but nothing starts.
+    if (params.kind === "reviewer" && temporaryAgencySettings().review === "paused") {
+      throw new Error(`Reviews are paused by "pi-agency-temporary".review in ${localSettingsPath()}; remove that key to restore reviewer launches. Nothing was started.`);
+    }
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
     const name = await nameFor(label);
@@ -211,6 +217,9 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const self = await caller();
     if (params.label !== undefined) labelOf(params.label, "");
     requireOpenRequest(params.from, self);
+    // The optional temporary machine policy routes a new manus through the existing
+    // worker role and quota. Resolve it here, before any worktree, record or terminal.
+    const manusModel = temporaryAgencySettings().manus === "worker" ? workerModelArgument(ctx.modelRegistry) : undefined;
     const repo = await nativeProjectIdentity(ctx.cwd);
     const project = basename(dirname(repo.repoKey));
     const task = params.taskId ? await tandemShow(params.taskId, repo.repoRoot) : undefined;
@@ -255,6 +264,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       ? { repoKey: repo.repoKey, worktree: true, baseHead, source: { checkoutPath: cwd, branch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } }
       : { repoKey: repo.repoKey, worktree: false, baseHead, source: { checkoutPath: repo.repoRoot, branch: targetBranch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } };
     const record = await createHcManusRecord({ label, ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, ...(params.from ? { from: params.from } : {}),
+      ...(manusModel ? { model: manusModel.argument } : {}),
       ownerSessionId: ctx.sessionManager.getSessionId(), owner: { core: self.core, terminal: self.address }, childAgent: name, childSessionId, integration });
     // The existing starter brief/label bind the one local note before the child starts.
     if (!task) await nstarNote({ cwd, label }, { initialize: true, brief: params.brief });
@@ -277,7 +287,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
-        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, "--", brief], name);
+        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, ...(manusModel ? ["--model", manusModel.argument] : []), "--", brief], name);
     } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
     // The record's own observation of the terminal the launch returned; finish closes it by this.
     try {
@@ -287,8 +297,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
+    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}.${manusModel ? ` Temporary manus=worker policy: model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}.` : ""} Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), ...(manusModel ? { model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, temporaryManus: "worker" } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
   }
 
   async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, _signal: AbortSignal | undefined, _ctx: ExtensionContext): Promise<Result> {
@@ -363,14 +373,14 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   const tools = [
     {
       name: "dendra_start", label: "Dendra Start", executionMode: "sequential" as const,
-      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
+      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. A temporary machine policy can pause reviewer launches; nothing is started then. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); optional benchmarkModel is Worker-only and selects a fixed approved contender; outcomes arrive in your inbox.",
       parameters: DendraParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => dendraStart(params, signal, ctx),
     },
     {
       name: "manus_start", label: "Manus Start",
-      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
+      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. An optional temporary machine policy routes a new manus through the existing worker role and quota with an explicit model; otherwise it takes Pi's own orchestrator-selected default. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement; reports through your inbox.",
       parameters: ManusParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => manusStart(params, signal, ctx),

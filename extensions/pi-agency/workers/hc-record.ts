@@ -84,7 +84,7 @@ export type HcWorkerRecord = {
    * record carries the session ID its one Pi was launched with. */
   childSessionId: string;
   /** Captured `provider/model:thinking` for every invocation of this Worker; a manus
-   * records MANUS_MODEL because it runs Pi's own default. */
+   * records MANUS_MODEL, or the temporary manus=worker policy's exact selection. */
   model: string;
   /** Present only for explicitly selected, approved benchmark Worker launches. */
   benchmark?: HcWorkerBenchmarkSelection;
@@ -306,8 +306,8 @@ async function createOnce(path: string, value: unknown): Promise<boolean> {
 export async function readHcWorkerRecord(id: string): Promise<HcWorkerRecord> {
   return validateHcWorkerRecord(JSON.parse(await readFile(hcRecordPath(id), "utf8")));
 }
-/** A manus takes Pi's own default model (manus_start passes no --model), so its record
- * states that instead of a captured model role. Nothing reads it as a model choice. */
+/** A manus takes Pi's own default model unless the temporary manus=worker policy
+ * selected the worker role, in which case the record states that exact selection. */
 export const MANUS_MODEL = "pi-default";
 
 /** A new control record; its id is fresh, so an existing file is a protocol error. */
@@ -332,6 +332,8 @@ export type HcManusRecordParams = {
   owner: HcWorkerEndpoint;
   childAgent: string;
   childSessionId: string;
+  /** Explicit `provider/model:thinking` when the temporary manus=worker policy selected it; omitted means Pi's own default. */
+  model?: string;
   integration: HcWorkerIntegration;
 };
 
@@ -343,7 +345,7 @@ export async function createHcManusRecord(params: HcManusRecordParams): Promise<
   const record: HcWorkerRecord = {
     version: 8, kind: "manus", deliveryId: createHcDeliveryId(), invocationId: createHcInvocationId(),
     childAgent: params.childAgent, label: params.label, needsAlgorant: params.needsAlgorant,
-    childSessionId: params.childSessionId, model: MANUS_MODEL, planRequired: false,
+    childSessionId: params.childSessionId, model: params.model ?? MANUS_MODEL, planRequired: false,
     ...(params.taskId ? { taskId: params.taskId, assignment: params.assignment } : { brief: params.brief }),
     ...(params.from ? { from: params.from } : {}),
     ownerSessionId: params.ownerSessionId, owner: params.owner, createdAt: now, updatedAt: now, state: "pending", integration: params.integration,

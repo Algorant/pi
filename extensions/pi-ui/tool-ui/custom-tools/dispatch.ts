@@ -82,6 +82,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
       fieldLine(theme, "terminal", text(d.terminal) || "—", "muted"),
       text(d.taskId) ? fieldLine(theme, "task", joinTitleParts([text(d.taskId), text(d.title) ? truncatePlain(text(d.title), expanded ? 200 : 80) : undefined]), "toolOutput") : undefined,
       d.benchmark ? fieldLine(theme, "benchmark", `${text(d.benchmark.requestedModel)} → ${text(d.benchmark.selectedModel)} · ${text(d.benchmark.providerExemption)} for ${text(d.benchmark.providerExemptionModel)} · high thinking · ${text(d.benchmark.quota)} · Fast ${d.benchmark.fast ? "on" : "off"}`, "warning") : undefined,
+      text(d.model) && d.temporaryManus === "worker" ? fieldLine(theme, "model", joinTitleParts([text(d.model), text(d.modelSet) ? `set ${text(d.modelSet)}` : undefined, text(d.modelQuota) ? truncatePlain(text(d.modelQuota), expanded ? 300 : 120) : undefined]), "warning") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "needsAlgorant", String(d.needsAlgorant ?? false), d.needsAlgorant ? "warning" : "muted") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "isolation", d.worktree === false ? "shared checkout · retained on finish" : "Worktrunk worktree", "muted") : undefined,
       text(d.cwd) ? fieldLine(theme, "cwd", truncatePlain(text(d.cwd), 200), "muted") : undefined,
