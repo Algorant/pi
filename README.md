@@ -4,6 +4,18 @@ This is my current [pi](https://github.com/earendil-works/pi) setup.
 
 It's got extensions, skills, and associated tools that I integrate with my main workflow.
 
+## Showcase
+
+![pi reading a tandem board, writing a todo plan, then searching tasks](docs/demo.webp)
+
+the demo and these stills replay a scripted turn against a local stand-in model, so nothing was spent making them.
+
+![startup header listing extensions, skills and tools](docs/screenshot-startup.png)
+
+![tandem read and todos tool cards with the todos widget](docs/screenshot-turn.png)
+
+![read-only task search across local boards](docs/screenshot-task-search.png)
+
 ## How to use this repo
 
 Do not clone or try to install anything from here.
