@@ -1,4 +1,4 @@
-import type { ReloadAck } from "../pi-agency/inbox/envelope.ts";
+import type { CutoverOperation, CutoverTarget, ModelAck, ReloadAck } from "../pi-agency/inbox/envelope.ts";
 
 /** One /pi-reload sweep, as recorded on the caller, and the live summary text derived from it plus the recorded acknowledgements. */
 export type Row = {
@@ -88,5 +88,56 @@ export function summarySweep(sweep: Sweep, acks: Map<string, Ack>): { compact: A
     "No terminal keys, polling or timers: a not-reached target updates this card when its acknowledgement arrives, and applies the request at its own idle boundary.",
     "an open dialog on a target closes when it reloads",
   );
+  return { compact, rows: lines, detail };
+}
+
+/** One planned target as the cutover card shows it: its acknowledgement (if any) and derived status. */
+export type CutoverRow = { target: CutoverTarget; ack?: ModelAck };
+const onOff = (fast: boolean | null) => fast === null ? "unknown" : fast ? "on" : "off";
+const choiceText = (choice: { model: string | null; thinking: string | null; fast: boolean | null }) => `${choice.model ?? "unknown model"} · thinking ${choice.thinking ?? "unknown"} · Fast ${onOff(choice.fast)}`;
+/** Confirmed only when the observed model, thinking and Fast all equal the planned request; "applied" alone is not equality. */
+export function cutoverStatus(ack: ModelAck): { status: "confirmed" | "failed"; why?: string } {
+  if (ack.outcome !== "applied" || ack.problems.length) return { status: "failed", why: ack.problems.join("; ") || "request failed" };
+  const { requested } = ack.target;
+  if (!ack.actual) return { status: "failed", why: "no observed state after the switch" };
+  const mismatch = ack.actual.model !== requested.model ? `actual model ${ack.actual.model ?? "unobserved"}, requested ${requested.model}`
+    : ack.actual.thinking !== requested.thinking ? `actual thinking ${ack.actual.thinking ?? "unobserved"}, requested ${requested.thinking}`
+      : ack.actual.fast !== requested.fast ? `actual Fast ${onOff(ack.actual.fast)}, requested ${onOff(requested.fast)}`
+        : undefined;
+  return mismatch ? { status: "failed", why: `did not verify: ${mismatch}` } : { status: "confirmed" };
+}
+/** The card's rows for one operation: every planned target, in plan order, with its own outcome. */
+export const cutoverRows = (operation: CutoverOperation, acks: Map<string, ModelAck>): CutoverRow[] =>
+  operation.targets.map((target) => ({ target, ack: acks.get(target.terminal) }));
+/** Planned targets still pending, failed, confirmed, and whether every one is acknowledged. */
+export const settleCutover = (operation: CutoverOperation, acks: Map<string, ModelAck>) => {
+  const rows = cutoverRows(operation, acks);
+  const statuses = rows.map((row) => (row.ack ? cutoverStatus(row.ack).status : "pending"));
+  return { rows, pending: statuses.filter((s) => s === "pending").length, failed: statuses.filter((s) => s === "failed").length, confirmed: statuses.filter((s) => s === "confirmed").length, settled: rows.every((row) => row.ack) };
+};
+/** Compact segments, the per-target proof lines, and the expanded detail lines for one cutover card. */
+export function summaryCutover(operation: CutoverOperation, acks: Map<string, ModelAck>): { compact: Array<{ text: string; tone?: "error" | "warning" }>; rows: string[]; detail: string[] } {
+  const { rows, pending, failed, confirmed, settled } = settleCutover(operation, acks);
+  const failedRows = rows.flatMap((row) => row.ack && cutoverStatus(row.ack).status === "failed" ? [{ row, why: cutoverStatus(row.ack).why! }] : []);
+  const pendingRows = rows.filter((row) => !row.ack);
+  const compact: Array<{ text: string; tone?: "error" | "warning" }> = [
+    { text: `${confirmed} confirmed` },
+    { text: `${pending} pending`, ...(pending ? { tone: "warning" as const } : {}) },
+    { text: `${failed} failed`, ...(failed ? { tone: "error" as const } : {}) },
+    ...failedRows.map(({ row, why }) => ({ text: `FAILED: ${row.target.label} (${why})`, tone: "error" as const })),
+    ...pendingRows.map((row) => ({ text: `pending: ${row.target.label} (no acknowledgement yet)`, tone: "warning" as const })),
+  ];
+  const lines = rows.map((row) => {
+    const requested = `requested ${choiceText(row.target.requested)}`;
+    if (!row.ack) return `${row.target.label}: pending · ${requested} · no acknowledgement yet`;
+    const { status, why } = cutoverStatus(row.ack);
+    const actual = row.ack.actual ? `actual ${choiceText(row.ack.actual)}` : "actual not observed";
+    return `${row.target.label}: ${status}${why ? ` (${why})` : ""} · ${requested} · ${actual}${row.ack.request ? ` · request ${row.ack.request}` : ""}`;
+  });
+  const detail = [...lines,
+    `Requested is the caller's exact control; actual is what the target reported running afterwards. They are never folded together, and only an equal actual is confirmed.`,
+    `Successes are consumed silently; the first failure of this operation sends one ordinary alert, and every later acknowledgement only updates this card. No polling or timers.`,
+    settled ? `Every planned target is acknowledged${operation.completion === "requested" ? " (one settled message was requested)" : ""}.` : `${pending} of ${rows.length} planned target${rows.length === 1 ? "" : "s"} still pending; this card updates when each acknowledgement arrives.`,
+  ];
   return { compact, rows: lines, detail };
 }

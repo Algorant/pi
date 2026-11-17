@@ -443,27 +443,73 @@ long-lived owner Pi (Herdra, a Ceph, a manus) does this at all — a child or Wo
 by its starter and keeps `/pi-reload` and the built-in `/reload`. The fingerprint covers the sources Pi
 loads, not the code a project's own runtime reads itself.
 
-### Typed model request (cutover receiver)
+### Typed model request and grouped cutover receipts
 
 Same endpoints, same inbox interception and same idle/`agent_settled` dispatch as reload (long-lived
-tui owners only; Workers/children and non-tui get a failure result). Control
-`{type:"pi-model", model:"provider/id", thinking, fast}` (canonical refs as in `model-roles.json`;
-`modelControlError` in `inbox/envelope.ts` validates on both sides) is consumed before note capture: no
-target model turn and no composer input, so drafts survive. At idle (from the inbox transform) or
+tui owners only). Control `{type:"pi-model", model:"provider/id", thinking, fast, operation}`
+(canonical refs as in `model-roles.json`; `modelControlError`/`operationError` in
+`inbox/envelope.ts` validate on both sides) is consumed before note capture: no target model turn and
+no composer input, so drafts survive. `operation` is the caller's explicit identity plus its complete
+planned target list, each target carrying the exact choice requested of it
+(`{id:"cut-<8hex>", targets:[{core,terminal,label,requested:{model,thinking,fast}}], completion}`); a
+group is never inferred from timing or held only in memory. At idle (from the inbox transform) or
 `agent_settled` the receiver itself calls `pi.setModel()` and `pi.setThinkingLevel()` and dispatches
 the existing `/fast on|off` command (no new command; the Fast owner is required, else the request
-fails); when that owner publishes `pi-openai:fast-state` it sends ONE `result`
-(reply_to the request) with the actual end model, thinking and Fast, or `model request FAILED:
-<reasons>. Actual: ...` for an unknown/unauthenticated model, invalid field, unsupported endpoint,
-clamped thinking or ineligible Fast. Sender, standalone Bun (no Pi runtime), no fake context:
-`import { requestModel } from "agent/scripts/live-pis.ts"`;
-`requestModel(target /* LivePi.address */, { model, thinking, fast }): Promise<{ id, route }>`
-(throws on invalid fields or an unroutable target). The change is recorded in the target's session
-and published as `pi.model`; defaults and settings are untouched. Fast is session-local and resets
-to on at the next `session_start` (including `/reload`). Needs the updated resources loaded on the
-target (one ordinary `/reload` to install, as for reload). Receivers advertise `pi.model-control=1` (cleared at shutdown; `LivePi.modelCapable`); `requestModel`
-refuses a target without it before anything is queued, because an older Pi would deliver the request to its
-model. Ack aggregation is not part of this.
+fails); when that owner publishes `pi-openai:fast-state` it sends ONE typed `result` — control
+`{type:"pi-model-ack", request, operation, target, outcome, actual, problems}` (reply_to the request)
+— with the model, thinking and Fast it actually runs afterwards, or its failure. `actual` is the
+observed end state even for a failed or clamped attempt (null only where Pi reported no state);
+requested and actual are never folded together. The first line stays inside the 160-character
+headline limit. The caller confirms a target only when the observed model, thinking AND Fast all equal
+the planned request; Fast eligibility alone is not equality.
+
+Protocol gates, all before any model change: an unsupported endpoint, an invalid operation, invalid
+model/thinking/Fast fields (checked for every shape, the ungrouped remote form included), a terminal
+that is not a planned target, or a choice that differs from that target's planned request is refused
+with an ORDINARY failed `result` (reply_to, no typed control) — never invented group metadata, and
+never a downgrade from a grouped request. A request with NO operation is the preserved ungrouped
+form and is accepted only when its envelope originates on another core (a genuine remote caller); a
+no-operation request that resolves to the receiving core is refused with the same ordinary failure.
+Malformed choices on a valid operation are answered with a typed failed ack. A grouped request also
+requires the target to advertise both `pi.model-control=1` and `pi.cutover=1`; the ungrouped form
+requires only `pi.model-control=1`, matching the old remote API.
+
+Caller side, standalone Bun (no Pi runtime), no fake context:
+`import { openCutover, requestModel, recordCutoverSendFailure } from "agent/scripts/live-pis.ts"`.
+`openCutover(targets, {completion?: "silent"|"requested"})` reads the caller and EVERY planned target
+from hc and refuses (throws, naming the cause) unless each is live, foreground, a long-lived Pi owner,
+and advertises both `pi.model-control=1` and `pi.cutover=1`; nothing is queued first, so a cutover
+aborts before its settings write. An empty plan is a map-only change and returns `undefined`.
+Otherwise it drops one typed `pi-model-operation` notice into the caller Pi's own existing inbox, whose
+transform records the card in its own session: no session file is appended externally and there is no
+second store. A notice is the producer's own self-notice, so the caller records it only when the
+envelope's `from` is its own core and terminal; any other origin is rejected passively for inspection. `requestModel(target, {model,thinking,fast}, operation?)` queues each planned request; the
+third argument is optional so the old two-argument ungrouped form still serves a REMOTE address (a
+route that resolves to this core is local and needs a group), and it never turns a failed group into an
+ungrouped request. Targets are matched by resolved core+terminal, not by route-string equality, so a
+machine-qualified local route is still local. `recordCutoverSendFailure(operation, target, reason)`
+records a target that could not be queued as its durable failed outcome (request null). Every send event is journaled BEFORE transport, so an
+acknowledgement that arrives immediately can bind and close it; a transport failure keeps that record
+with the existing `fail` event. The notice is a one-way result, not an unanswered request, so it never
+leaves an owed inbox item; each target request stays a `request` closed by its `reply_to` acknowledgement.
+A later validated target acknowledgement supersedes a provisional local send-failure row.
+
+The caller consumes typed acknowledgements before any model turn. Each ack is bound to its envelope
+origin, to a request this caller actually sent (journal `send` whose `from` equals this caller's own
+core+terminal, addressed to the target, `reply_to` equal to the request id, and the full echoed
+operation and planned choices equal to the outbound control) and to the plan; duplicates and replays are dropped, order never changes counts, and a late ack updates
+the same card. The card is one `registerEntryRenderer` entry (`pi-model-cutover`) rendered at display
+time: `Model cutover <id> · N targets`, `x confirmed · y pending · z failed`, the `FAILED:` and
+`pending:` names, and expanded per-target proof with requested vs actual, request id and reason. Every
+failed ack appends the card immediately; the FIRST failure of an operation sends one ordinary alert,
+and every later acknowledgement only updates the card (no newest-operation suppression). Settlement
+sends nothing by default; with `completion:"requested"` it sends at most one ordinary settled message
+when every planned target is acknowledged, independent of the alert. Misaddressed successes are
+consumed silently and recorded as rejected; an unmatched real failure is delivered once as the result
+it is. `pi.cutover=1` advertises the loaded consumer (cleared at shutdown; `LivePi.cutoverCapable`).
+The change is recorded in the target's session and published as `pi.model`; defaults and settings are
+untouched. Fast is session-local and resets to on at the next `session_start` (including `/reload`).
+Needs the updated resources loaded on the target (one ordinary `/reload` to install, as for reload).
 
 Shared read-only discovery: `agent/scripts/live-pis [--json]`, or import
 `livePis(): Promise<LivePiInventory>` / `resourceRevision(root?)` from

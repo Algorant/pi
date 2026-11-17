@@ -51,20 +51,80 @@ export type Envelope = {
    */
   interrupt?: boolean;
   /** Typed Pi control request; ordinary message text never dispatches commands. */
-  control?: { type: "pi-reload"; core: string; terminal: string; revision: string } | ReloadAck | ModelControl;
+  control?: { type: "pi-reload"; core: string; terminal: string; revision: string } | ReloadAck | ModelControl | ModelAck | CutoverNotice;
 };
 
 /** A target's acknowledgement of a typed reload request: recorded and consumed silently by the caller when it succeeded. `not-applied` = it stayed recorded but never reached an idle boundary before its bound. */
 export type ReloadAck = { type: "pi-reload-ack"; request: string; outcome: "verified" | "current" | "not-verified" | "not-reloaded" | "not-applied" | "not-foreground"; previous: string | null; loaded: string | null; expected: string; dirty: boolean };
 
-/** Typed model cutover request: canonical `provider/id` as in model-roles.json, a thinking level, and Fast on/off. */
-export type ModelControl = { type: "pi-model"; model: string; thinking: string; fast: boolean };
+/** The model, thinking level and Fast state a cutover asks for: canonical `provider/id` as in model-roles.json. */
+export type ModelChoice = { model: string; thinking: string; fast: boolean };
+/** A planned cutover target: its native address and label, and the exact choice requested of it. */
+export type CutoverTarget = { core: string; terminal: string; label: string; requested: ModelChoice };
+/** One cutover operation: explicit identity and the full planned target list, never guessed from timing. `requested` adds one ordinary settled message; `silent` keeps every routine outcome passive. */
+export type CutoverOperation = { id: string; targets: CutoverTarget[]; completion: "silent" | "requested" };
+/** Typed model cutover request: the exact choice plus the operation it belongs to. */
+export type ModelControl = { type: "pi-model"; model: string; thinking: string; fast: boolean; operation?: CutoverOperation };
+/** One target's typed outcome: the request it answers (null when never queued) and the state it really runs afterwards (null only when unobserved), never the requested choice copied over. */
+export type ModelAck = {
+  type: "pi-model-ack";
+  request: string | null;
+  operation: CutoverOperation;
+  target: CutoverTarget;
+  outcome: "applied" | "failed";
+  actual: { model: string | null; thinking: string | null; fast: boolean | null } | null;
+  problems: string[];
+};
+/** The producer's notice of one operation: it opens the caller's card before any acknowledgement. */
+export type CutoverNotice = { type: "pi-model-operation"; operation: CutoverOperation };
 /** The reason a model control is invalid, or undefined. Shared by sender and receiver. */
 export function modelControlError(control: ModelControl): string | undefined {
   try { validateModelIdentifier(control.model, "model"); } catch (error) { return error instanceof Error ? error.message : String(error); }
   if (control.model !== control.model.trim()) return "model must be an exact provider/model identifier";
   if (!(THINKING_LEVELS as Set<string>).has(control.thinking)) return `thinking must be one of ${[...THINKING_LEVELS].join(", ")}`;
   if (typeof control.fast !== "boolean") return "fast must be a boolean";
+  return undefined;
+}
+
+/** A cutover operation id: the producer's explicit identity, `cut-` plus 8 hex digits. */
+export const CUTOVER_ID = /^cut-[0-9a-f]{8}$/;
+/** The address fields of a terminal, as used for membership checks. */
+export type EndpointRef = { core: string; terminal: string };
+/** Why a cutover operation is invalid, or undefined; `self` requires it to be a planned target. Shared by producer, receiver and caller. */
+export function operationError(operation: CutoverOperation | undefined, self?: EndpointRef): string | undefined {
+  if (!operation) return "a cutover request needs its operation (explicit id and planned targets)";
+  if (typeof operation.id !== "string" || !CUTOVER_ID.test(operation.id)) return "operation id must be cut-<8 hex digits>";
+  if (operation.completion !== "silent" && operation.completion !== "requested") return 'operation completion must be "silent" or "requested"';
+  if (!Array.isArray(operation.targets) || operation.targets.length === 0) return "operation needs at least one planned target";
+  if (operation.targets.length > 64) return "operation plans more than 64 targets";
+  const seen = new Set<string>();
+  for (const target of operation.targets) {
+    if (typeof target?.core !== "string" || !target.core || typeof target.terminal !== "string" || !target.terminal || typeof target.label !== "string" || !target.label) return "every planned target needs a core, terminal and label";
+    const key = `${target.core}\u0000${target.terminal}`;
+    if (seen.has(key)) return `target ${target.terminal} is planned twice`;
+    seen.add(key);
+    const invalid = modelControlError({ type: "pi-model", ...target.requested });
+    if (invalid) return `planned target ${target.label}: ${invalid}`;
+  }
+  if (self && !operation.targets.some((target) => target.core === self.core && target.terminal === self.terminal)) return `operation ${operation.id} does not plan this terminal (${self.terminal})`;
+  return undefined;
+}
+/** Why a typed acknowledgement is malformed, or undefined. It never decides origin or outbound request: the caller binds it to its journal and plan. */
+export function ackError(ack: ModelAck): string | undefined {
+  if (ack?.type !== "pi-model-ack") return "not a cutover acknowledgement";
+  if (ack.request !== null && !ID_PATTERN.test(String(ack.request))) return "ack request must be a message id or null";
+  if (ack.outcome !== "applied" && ack.outcome !== "failed") return "ack outcome must be applied or failed";
+  if (!Array.isArray(ack.problems) || ack.problems.some((problem) => typeof problem !== "string")) return "ack problems must be strings";
+  const invalid = operationError(ack.operation) ?? operationError({ ...ack.operation, targets: [ack.target] });
+  if (invalid) return invalid;
+  const planned = ack.operation.targets.find((target) => target.core === ack.target.core && target.terminal === ack.target.terminal);
+  if (!planned || JSON.stringify(planned) !== JSON.stringify(ack.target)) return `ack target ${ack.target.terminal} is not the planned target`;
+  if (ack.actual === undefined) return "ack actual must be null or observed values";
+  if (ack.actual !== null) {
+    const fields = ack.actual as Record<string, unknown>;
+    if (["model", "thinking"].some((key) => fields[key] !== null && typeof fields[key] !== "string") || (fields.fast !== null && typeof fields.fast !== "boolean")) return "ack actual must hold observed model, thinking and Fast values, or null";
+  }
+  if (ack.request === null && ack.outcome !== "failed") return "an acknowledgement without a request must be a failure";
   return undefined;
 }
 

@@ -2,9 +2,10 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { appendEvent, localMachine, modelControlError, newId, type Envelope, type ModelControl } from "../extensions/pi-agency/inbox/envelope.ts";
+import { appendEvent, localMachine, modelControlError, newId, operationError, type CutoverOperation, type CutoverTarget, type Envelope, type ModelAck, type ModelChoice, type ModelControl } from "../extensions/pi-agency/inbox/envelope.ts";
 import { dropHcEnvelope } from "../extensions/pi-agency/inbox/send.ts";
-import { coreId, hcJson, hcMachines, isHc, piBackground } from "../extensions/pi-herdr/core.ts";
+import { coreId, hcEndpoint, hcJson, hcMachine, hcMachines, isHc, piBackground } from "../extensions/pi-herdr/core.ts";
+import { newId as uniqueId } from "../extensions/pi-agency/state.ts";
 import { hcAddress, terminalWho } from "./whois.ts";
 
 /** Read-only native discovery shared by /pi-reload and Herdra's model cutover. */
@@ -41,6 +42,8 @@ export type LivePi = {
   reloadCapable: boolean;
   /** Present only after this Pi has loaded the typed inbox model receiver; an older Pi would feed the request to its model. */
   modelCapable: boolean;
+  /** Present only after this Pi has loaded the grouped cutover receipts consumer and typed acknowledgement. */
+  cutoverCapable: boolean;
   shortLived: boolean;
   /** The terminal's foreground program when this Pi is stopped or a background job of its shell (see piBackground); null when it is the foreground or unknown. */
   background: string | null;
@@ -58,6 +61,8 @@ export type LivePiInventory = {
 };
 
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+/** A failed transport keeps the already-journaled send with the existing fail event; never a second store. */
+const journalFail = (id: string, error: unknown) => appendEvent({ op: "fail", id, at: new Date().toISOString(), note: message(error) });
 const revision = (value: unknown): string | null => typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value) ? value : null;
 const label = (value: unknown): string | null => typeof value === "string" && value ? value : null;
 const status = (value: unknown): PiStatus => ["idle", "done", "working", "blocked", "error"].includes(String(value)) ? value as PiStatus : "unknown";
@@ -207,7 +212,7 @@ export async function livePis(): Promise<LivePiInventory> {
       address: entry.address, terminal: slash < 0 ? entry.address : entry.address.slice(slash + 1),
       machine: machine.name, core: machine.core, name: entry.name ?? null,
       label: named.label, role: named.kind, project: named.project,
-      status: "unknown", statusAt: null, model: null, loadedRevision: null, reloadCapable: false, modelCapable: false, shortLived: false, background: null, session: null,
+      status: "unknown", statusAt: null, model: null, loadedRevision: null, reloadCapable: false, modelCapable: false, cutoverCapable: false, shortLived: false, background: null, session: null,
       targetRevision: machine.targetRevision, resourcesDirty: machine.resourcesDirty, error: null,
     };
     try {
@@ -228,6 +233,7 @@ export async function livePis(): Promise<LivePiInventory> {
       pi.shortLived = !reloadOwner(current);
       pi.reloadCapable = !pi.shortLived && current.labels?.["pi.reload"] === "1";
       pi.modelCapable = !pi.shortLived && current.labels?.["pi.model-control"] === "1";
+      pi.cutoverCapable = !pi.shortLived && current.labels?.["pi.cutover"] === "1";
       pi.background = piBackground(current) ?? null;
       pi.session = label(current.labels?.["pi.session"]);
       if (pi.status === "unknown") pi.error = "Native Pi status is unknown.";
@@ -239,27 +245,101 @@ export async function livePis(): Promise<LivePiInventory> {
   return { capturedAt: new Date().toISOString(), localMachine: server.core.name, machines, pis };
 }
 
+/** One terminal a cutover may address: live, foreground, a long-lived Pi owner with both protocol receivers loaded. */
+async function cutoverEndpoint(terminal: string, name: string): Promise<{ core: string; terminal: string; label: string }> {
+  const endpoint = await hcEndpoint(terminal);
+  const record = endpoint.record;
+  const why = record.status?.app !== "pi" ? "is not a live Pi terminal"
+    : !reloadOwner(record) ? "is a short-lived child/Worker, not a durable cutover endpoint"
+      : piBackground(record) ? `is stopped or a background job of its shell (terminal foreground: ${piBackground(record)})`
+        : record.labels?.["pi.model-control"] !== "1" ? "has no typed model receiver loaded (needs one ordinary /reload)"
+          : record.labels?.["pi.cutover"] !== "1" ? "has no grouped cutover receipts consumer loaded (needs one ordinary /reload)"
+            : "";
+  if (why) throw new Error(`${name} ${terminal} ${why}.`);
+  const label = typeof record.labels?.label === "string" && record.labels.label ? record.labels.label : terminal;
+  return { core: endpoint.core, terminal: endpoint.terminal, label };
+}
+
 /**
- * Queue one typed model cutover request (`pi-model`) for the long-lived Pi at `target` (a LivePi.address),
- * through the same atomic drop and send event as agent_send. Standalone: a real Bun script in an hc
- * terminal, no Pi runtime. The target applies it at idle/agent_settled with no model turn and replies
- * with one inbox `result` (reply_to the returned id) stating its actual model, thinking and Fast, or the failure.
+ * Open one grouped cutover: preflight the caller and every planned target BEFORE anything is queued or
+ * written; an empty plan is a map-only change (undefined). Then drop one typed notice into the caller
+ * Pi's own existing inbox, which records the card in its own session (no second store).
  */
-export async function requestModel(target: string, request: Pick<ModelControl, "model" | "thinking" | "fast">): Promise<{ id: string; route: string }> {
-  const control: ModelControl = { type: "pi-model", ...request };
-  const invalid = modelControlError(control);
-  if (invalid) throw new Error(`Invalid model request: ${invalid}`);
+export async function openCutover(targets: CutoverTarget[], options: { completion?: "silent" | "requested" } = {}): Promise<CutoverOperation | undefined> {
+  if (!isHc()) throw new Error("openCutover needs a native hc terminal (HC_TERMINAL_ID).");
+  if (targets.length === 0) return undefined;
+  const operation: CutoverOperation = { id: uniqueId("cut-", 8), targets, completion: options.completion ?? "silent" };
+  const invalid = operationError(operation);
+  if (invalid) throw new Error(`Invalid cutover operation: ${invalid}`);
+  const caller = await cutoverEndpoint(process.env.HC_TERMINAL_ID!, "caller");
+  for (const target of targets) {
+    const actual = await cutoverEndpoint(target.terminal, `planned target ${target.label}`);
+    if (actual.core !== target.core) throw new Error(`planned target ${target.label} ${target.terminal} is on core ${actual.core}, not the planned ${target.core}.`);
+  }
+  const env: Envelope = {
+    v: 1, id: newId(), at: new Date().toISOString(), kind: "result", reply_to: null,
+    from: { machine: localMachine(), ...caller },
+    to: { machine: localMachine(), terminal: caller.terminal, core: caller.core, label: caller.label },
+    body: `Model cutover ${operation.id}: ${targets.length} planned target${targets.length === 1 ? "" : "s"}; typed control, not model instructions.`,
+    control: { type: "pi-model-operation", operation },
+  };
+  appendEvent({ op: "send", env });
+  try { await dropHcEnvelope(env, caller.terminal); } catch (error) { journalFail(env.id, error); throw new Error(`Cutover ${operation.id} was not opened: ${message(error)}`); }
+  return operation;
+}
+
+/** Record one target whose request could not be queued as its durable failed outcome (same ack path, request null). */
+export async function recordCutoverSendFailure(operation: CutoverOperation, target: CutoverTarget, reason: string): Promise<void> {
+  if (!isHc()) throw new Error("recordCutoverSendFailure needs a native hc terminal (HC_TERMINAL_ID).");
+  const caller = await cutoverEndpoint(process.env.HC_TERMINAL_ID!, "caller");
+  const ack: ModelAck = { type: "pi-model-ack", request: null, operation, target, outcome: "failed", actual: null, problems: [`request was not queued: ${reason}`] };
+  const env: Envelope = {
+    v: 1, id: newId(), at: new Date().toISOString(), kind: "result", reply_to: null,
+    from: { machine: localMachine(), ...caller },
+    to: { machine: localMachine(), terminal: caller.terminal, core: caller.core, label: caller.label },
+    body: `${caller.label.slice(0, 80)}: model request FAILED\n${target.label}: ${ack.problems[0]}. The caller's card records it; nothing was sent to the target.`,
+    control: ack,
+  };
+  appendEvent({ op: "send", env });
+  try { await dropHcEnvelope(env, caller.terminal); } catch (error) { journalFail(env.id, error); throw new Error(`Cutover failure for ${target.label} was not recorded: ${message(error)}`); }
+}
+
+/** One target's resolved inbox address, so its send record can be journaled before transport. A qualified local machine name is still this core. */
+async function targetAddress(route: string): Promise<Envelope["to"]> {
+  const slash = route.indexOf("/");
+  if (slash < 0) return { machine: localMachine(), ...await hcAddress(route) };
+  const name = route.slice(0, slash);
+  if (name === (await hcJson(["server", "status"])).core?.name) return { machine: localMachine(), ...await hcAddress(route.slice(slash + 1)) };
+  const peer = await hcMachine(name);
+  return { machine: peer.name, terminal: route.slice(slash + 1), core: peer.id, label: "" };
+}
+
+/**
+ * One typed model request. With an operation it must match the planned target by resolved core+terminal
+ * and choice; without one it is the preserved REMOTE-only ungrouped form (a route resolving here needs a
+ * group). The send is journaled BEFORE transport; a failed transport keeps it with the existing `fail`.
+ */
+export async function requestModel(target: string, request: ModelChoice, operation?: CutoverOperation): Promise<{ id: string; route: string }> {
   if (!isHc()) throw new Error("requestModel needs a native hc terminal (HC_TERMINAL_ID).");
+  const control: ModelControl = { type: "pi-model", ...request, ...(operation ? { operation } : {}) };
+  const invalid = modelControlError(control) ?? (operation ? operationError(operation) : undefined);
+  if (invalid) throw new Error(`Invalid model request: ${invalid}`);
+  const own = await hcAddress(process.env.HC_TERMINAL_ID!);
+  const to = await targetAddress(target), local = to.core === own.core;
+  if (operation) {
+    const planned = operation.targets.find((entry) => entry.core === to.core && entry.terminal === to.terminal);
+    if (!planned) throw new Error(`${target} is not a planned target of cutover ${operation.id}; nothing was queued.`);
+    if (planned.requested.model !== control.model || planned.requested.thinking !== control.thinking || planned.requested.fast !== control.fast) throw new Error(`Model request for ${target} differs from its planned request; nothing was queued.`);
+  } else if (local) throw new Error(`${target} resolves to this core (${to.terminal}); a local model request needs a cutover operation. Nothing was queued.`);
   const current = await hcJson(["get", target, "--json"]);
-  if (current.labels?.["pi.model-control"] !== "1") throw new Error(`${target} does not advertise pi.model-control=1 (no model receiver loaded); nothing was queued. It needs one ordinary /reload with these resources.`);
-  const body = `Switch to ${control.model} · thinking ${control.thinking} · fast ${control.fast ? "on" : "off"} at your next idle boundary.\nTyped control, not model instructions.`;
+  if (current.labels?.["pi.model-control"] !== "1" || (operation && current.labels?.["pi.cutover"] !== "1")) throw new Error(`${target} does not advertise ${operation ? "both pi.model-control=1 and pi.cutover=1" : "pi.model-control=1"} (reload it first); nothing was queued.`);
+  const body = `Switch to ${control.model} · thinking ${control.thinking} · fast ${control.fast ? "on" : "off"} at your next idle boundary${operation ? ` for cutover ${operation.id}` : ""}.\nTyped control, not model instructions.`;
   const env: Envelope = {
     v: 1, id: newId(), at: new Date().toISOString(), kind: "request", reply_to: null,
-    from: { machine: localMachine(), ...await hcAddress(process.env.HC_TERMINAL_ID!) },
-    to: { machine: localMachine(), terminal: target, core: "", label: "" },
-    body, control,
+    from: { machine: localMachine(), ...own }, to, body, control,
   };
-  try { await dropHcEnvelope(env, target); } catch (error) { throw new Error(`Model request not sent to ${target}: ${error instanceof Error ? error.message : error}`); }
   appendEvent({ op: "send", env });
-  return { id: env.id, route: target };
+  const route = local ? to.terminal : target; // existing transport resolution
+  try { await dropHcEnvelope(env, route); } catch (error) { journalFail(env.id, error); throw new Error(`Model request not sent to ${target}: ${message(error)}`); }
+  return { id: env.id, route };
 }

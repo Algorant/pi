@@ -5,12 +5,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text } from "@earendil-works/pi-tui";
 import { livePis, pullBehind, reloadOwner, resourceRevision } from "../../scripts/live-pis.ts";
 import { terminalWho } from "../../scripts/whois.ts";
-import { modelControlError, type Envelope, type ModelControl, type ReloadAck } from "../pi-agency/inbox/envelope.ts";
+import { ackError, messages, modelControlError, operationError, readEvents, type CutoverOperation, type Envelope, type ModelAck, type ModelControl, type ReloadAck } from "../pi-agency/inbox/envelope.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import { hcEndpoint, hcJson, hcMachines } from "./core.ts";
 import { sourceFingerprint } from "./fingerprint.ts";
-import { isSuccess, settleOf, summarySweep, type Ack, type Row, type Sweep } from "./reload-summary.ts";
+import { cutoverStatus, isSuccess, settleCutover, settleOf, summaryCutover, summarySweep, type Ack, type Row, type Sweep } from "./reload-summary.ts";
 import { SELF_RELOAD_EVENT, type SelfReloadState } from "./turn-label.ts";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -38,6 +38,14 @@ type SelfRequest = {
 };
 const MODEL_REQUEST = "pi-model-request";
 const MODEL_OUTCOME = "pi-model-outcome";
+/** One cutover operation's card, per-target acks, and its at-most-one alert and completion. */
+const CUTOVER = "pi-model-cutover";
+const CUTOVER_ACK = "pi-model-ack";
+const CUTOVER_ALERT = "pi-model-cutover-alert";
+const CUTOVER_COMPLETE = "pi-model-cutover-complete";
+const CUTOVER_REJECTED = "pi-model-cutover-rejected";
+const CUTOVER_FAILURE = "pi-model-cutover-failure";
+const CUTOVER_DONE = "pi-model-cutover-done";
 type Owner = { core: string; terminal: string; label: string };
 type Request = { id: string; previous: string | null; expected: string; owner: Owner };
 /** A recorded request plus the session entry's time, which bounds how long it may stay unapplied. */
@@ -79,18 +87,85 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
   const acks = new Map<string, Ack>();
   const sent = new Set<string>();
   const notified = new Set<string>();
+  // Cutover cards on this caller, rebuilt from its append-only session entries.
+  const cutovers = new Map<string, CutoverOperation>();
+  const cutoverAcks = new Map<string, ModelAck>();
+  const cutoverAlerts = new Set<string>();
+  const cutoverCompletions = new Set<string>();
   let sweeping = false;
   const readAcks = (ctx: ExtensionContext) => {
     acks.clear();
     notified.clear();
     deferrals.clear();
-    for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === NOTIFIED) notified.add(e.data.sweep);
-    for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === ACK) acks.set(e.data.request, e.data);
+    cutovers.clear();
+    cutoverAcks.clear();
+    cutoverAlerts.clear();
+    cutoverCompletions.clear();
     // A pending state already recorded for a request is not recorded again after a resume.
-    for (const e of ctx.sessionManager.getBranch() as any[]) if (e.type === "custom" && e.customType === PENDING) deferrals.set(e.data.id, e.data.why);
+    for (const e of ctx.sessionManager.getBranch() as any[]) {
+      if (e.type !== "custom") continue;
+      if (e.customType === NOTIFIED) notified.add(e.data.sweep);
+      else if (e.customType === ACK) acks.set(e.data.request, e.data);
+      else if (e.customType === CUTOVER) cutovers.set(e.data.operation.id, e.data.operation);
+      else if (e.customType === CUTOVER_ACK) cutoverAcks.set(`${e.data.operation.id}\u0000${e.data.target.terminal}`, e.data);
+      else if (e.customType === CUTOVER_ALERT) cutoverAlerts.add(e.data.operation);
+      else if (e.customType === CUTOVER_COMPLETE) cutoverCompletions.add(e.data.operation);
+      else if (e.customType === PENDING) deferrals.set(e.data.id, e.data.why);
+    }
   };
   // Entries are append-only: a late acknowledgement is a new hidden entry, and the card's component reads `acks` at render time, so the same card shows it on the repaint that appending triggers.
   const recordAck = (ack: Ack) => { pi.appendEntry(ACK, ack); acks.set(ack.request, ack); };
+  /** One outcome per planned target of one operation; a different operation never shares its rows. */
+  const ackKey = (ack: ModelAck) => `${ack.operation.id}\u0000${ack.target.terminal}`;
+  const ackRows = (operation: CutoverOperation) => new Map([...cutoverAcks.values()].filter((ack) => ack.operation.id === operation.id).map((ack) => [ack.target.terminal, ack]));
+  /** Record an operation once: a notice after its acks, or an echoed operation, never forks the group. */
+  const recordCutover = (operation: CutoverOperation) => { if (cutovers.has(operation.id)) return; cutovers.set(operation.id, operation); pi.appendEntry(CUTOVER, { operation }); };
+  /** Record one target's outcome once; a validated target acknowledgement supersedes a provisional local send-failure row. */
+  const recordCutoverAck = (ack: ModelAck) => {
+    const existing = cutoverAcks.get(ackKey(ack));
+    if (existing && !(existing.request === null && ack.request !== null)) return false;
+    recordCutover(ack.operation);
+    cutoverAcks.set(ackKey(ack), ack);
+    pi.appendEntry(CUTOVER_ACK, ack);
+    return true;
+  };
+  /** One ordinary message: the first failure's alert, or the requested settled completion. */
+  const sendCutover = (ctx: ExtensionContext, customType: string, content: string, operation: CutoverOperation, rows: string[]) =>
+    pi.sendMessage({ customType, display: true, details: { operation: operation.id, rows }, content }, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
+  /** The first failure of an operation wakes once; every later acknowledgement only updates its card. */
+  const alertCutover = (ctx: ExtensionContext, operation: CutoverOperation) => {
+    if (cutoverAlerts.has(operation.id)) return;
+    cutoverAlerts.add(operation.id);
+    pi.appendEntry(CUTOVER_ALERT, { operation: operation.id });
+    const card = summaryCutover(operation, ackRows(operation));
+    sendCutover(ctx, CUTOVER_FAILURE, `Model cutover ${operation.id}: ${card.compact.map((part) => part.text).join("; ")}`, operation, card.rows);
+  };
+  /** One settled message, only when the producer asked for it and every planned target is acknowledged. */
+  const completeCutover = (ctx: ExtensionContext, operation: CutoverOperation) => {
+    if (operation.completion !== "requested" || cutoverCompletions.has(operation.id) || !settleCutover(operation, ackRows(operation)).settled) return;
+    cutoverCompletions.add(operation.id);
+    pi.appendEntry(CUTOVER_COMPLETE, { operation: operation.id });
+    const card = summaryCutover(operation, ackRows(operation));
+    sendCutover(ctx, CUTOVER_DONE, `Model cutover ${operation.id} settled: ${card.compact.map((part) => part.text).join("; ")}`, operation, card.rows);
+  };
+  /** Bind an acknowledgement to its origin, this caller's own outbound request and the planned values. */
+  const cutoverAckError = (ack: ModelAck, env: Envelope): string | undefined => {
+    const invalid = ackError(ack);
+    if (invalid) return invalid;
+    const { target } = ack;
+    const known = cutovers.get(ack.operation.id);
+    if (known && JSON.stringify(known.targets) !== JSON.stringify(ack.operation.targets)) return `operation ${ack.operation.id} differs from the one already recorded`;
+    if (ack.request === null) return env.from.core === own!.core && env.from.terminal === own!.terminal ? undefined : `a target's failed request must come from this caller, not ${env.from.terminal}`;
+    if (env.from.core !== target.core || env.from.terminal !== target.terminal) return `acknowledgement origin ${env.from.terminal} is not planned target ${target.terminal}`;
+    if (env.reply_to !== ack.request) return `acknowledgement ${env.id} does not reply to request ${ack.request}`;
+    const sent = messages(readEvents()).get(ack.request);
+    const control = sent?.control;
+    if (!sent || sent.to.core !== target.core || sent.to.terminal !== target.terminal) return `no outbound request ${ack.request} to ${target.terminal}`;
+    if (sent.from.core !== own!.core || sent.from.terminal !== own!.terminal) return `request ${ack.request} was not sent by this caller (${sent.from.terminal})`;
+    if (control?.type !== "pi-model" || JSON.stringify(control.operation) !== JSON.stringify(ack.operation)) return `request ${ack.request} is not this operation`;
+    if (control.model !== target.requested.model || control.thinking !== target.requested.thinking || control.fast !== target.requested.fast) return `request ${ack.request} differs from the planned request for ${target.terminal}`;
+    return undefined;
+  };
   /** The one ordinary message a sweep may send: once, when every request is answered and something failed. Everything else lives in the card. */
   const notifyIfSettled = (ctx: ExtensionContext) => {
     const latest = (ctx.sessionManager.getBranch() as any[]).findLast((e) => e.type === "custom" && e.customType === SUMMARY && e.data?.sweep?.id)?.data.sweep.id;
@@ -148,21 +223,34 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
       body: `${label}: ${result}`,
     });
   };
-  /** One outcome per model request: record it, then one ordinary inbox result to the requester. */
-  const finishModel = async (ctx: ExtensionContext, request: ModelRequest, applied: boolean | string) => {
+  /** One outcome per model request: a typed ack for this protocol, or an ordinary failed reply for a protocol rejection. */
+  const finishModel = async (ctx: ExtensionContext, request: ModelRequest, applied: boolean | string, typed = true) => {
     if (applying?.request.id === request.id) applying = undefined;
-    const { model, thinking, fast: wantFast } = request.control;
+    const { model, thinking, fast: wantFast, operation } = request.control;
     const problems = typeof applied === "string" ? [applied] : [];
     if (applied === true) {
       if (`${ctx.model?.provider}/${ctx.model?.id}` !== model) problems.push("model differs from request");
       if (pi.getThinkingLevel() !== thinking) problems.push(`thinking clamped to ${pi.getThinkingLevel()}`);
       if (wantFast && !fast?.eligible) problems.push("model not Fast-eligible");
     }
-    const actual = `${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no model"} · thinking ${pi.getThinkingLevel()} · fast ${fast?.enabled ? "on" : "off"}`;
-    const result = `${problems.length ? `model request FAILED: ${problems.join("; ")}. Actual` : "model applied. Actual"}: ${actual}`;
+    // Observed after the attempt, failed or clamped too; null only where Pi reported no state.
+    const actual: NonNullable<ModelAck["actual"]> = {
+      model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
+      thinking: pi.getThinkingLevel(),
+      fast: typeof fast?.enabled === "boolean" ? fast.enabled : null,
+    };
+    const actualText = `${actual.model ?? "no model"} · thinking ${actual.thinking ?? "unknown"} · fast ${actual.fast === null ? "unknown" : actual.fast ? "on" : "off"}`;
+    const result = `${problems.length ? `model request FAILED: ${problems.join("; ")}. Actual` : "model applied. Actual"}: ${actualText}`;
     pi.appendEntry(MODEL_OUTCOME, { id: request.id, result });
+    const target = operation?.targets.find((planned) => planned.core === own!.core && planned.terminal === own!.terminal);
+    const ack: ModelAck | undefined = typed && operation && target ? {
+      type: "pi-model-ack", request: /^m[0-9a-f]{8}$/.test(request.id) ? request.id : null, operation, target,
+      outcome: problems.length ? "failed" : "applied", actual, problems,
+    } : undefined;
+    // The first line stays inside the 160-character headline limit; the proof continues below it.
+    const body = `${own!.label.slice(0, 80)}: model ${problems.length ? "request FAILED" : "applied"}\n${result}\nRequest ${request.id}. Typed control: no model turn for the request.`;
     try {
-      await sendAgentMessage(ctx, { terminal: await route(request.owner), kind: "result", ...(/^m[0-9a-f]{8}$/.test(request.id) ? { reply_to: request.id } : {}), body: `${own!.label.slice(0, 80)}: ${result}\nRequest ${request.id}. Typed control: no model turn for the request.` });
+      await sendAgentMessage(ctx, { terminal: await route(request.owner), kind: "result", ...(ack ? { control: ack } : {}), ...(/^m[0-9a-f]{8}$/.test(request.id) ? { reply_to: request.id } : {}), body });
     } finally { applyModel(ctx); }
   };
   /** Runs from the inbox transform (idle) or agent_settled: model/thinking through Pi's API, Fast through its existing owner. */
@@ -170,6 +258,9 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     if (!own || !supported || applying || !ctx.isIdle() || ctx.hasPendingMessages()) return;
     const request = pending<ModelRequest>(ctx, MODEL_REQUEST, MODEL_OUTCOME)[0];
     if (!request) return;
+    // A local record with no operation is a rejection; an accepted remote ungrouped request is applied.
+    const invalid = request.control.operation ? operationError(request.control.operation, own) : request.owner.core === own.core ? "a model request that resolves to this core needs a cutover operation" : undefined;
+    if (invalid) { void finishModel(ctx, request, invalid, false).catch((error) => ctx.ui.notify(`Model request outcome could not be sent: ${reason(error)}`, "warning")); return; }
     const state: Applying = applying = { request, ctx, fast: false };
     void (async () => {
       try {
@@ -308,6 +399,31 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     invalidate() {},
   }));
 
+  pi.registerEntryRenderer<{ operation: CutoverOperation }>(CUTOVER, (entry, options, theme) => ({
+    render: (width: number) => {
+      const operation = entry.data!.operation;
+      const card = summaryCutover(operation, ackRows(operation));
+      const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+      const body = card.compact.map((part) => part.tone ? theme.fg(part.tone, part.text) : part.text).join(" · ");
+      const title = `${theme.fg("accent", theme.bold("Model cutover"))} ${theme.fg("muted", `${operation.id} · ${operation.targets.length} target${operation.targets.length === 1 ? "" : "s"}`)}`;
+      box.addChild(new Text(`${title}\n${body}`, 0, 0));
+      if (options.expanded && card.detail.length) box.addChild(new Text(theme.fg("muted", card.detail.join("\n")), 0, 0));
+      return box.render(width);
+    },
+    invalidate() {},
+  }));
+
+  // The one settled or failure message: one tone line compact, the per-target proof expanded; same box as the card.
+  const cutoverMessage = (message: any, options: any, theme: any) => {
+    const rows = ((message.details ?? {}) as { rows?: string[] }).rows ?? [];
+    const box = new Box(options.outputPad, 1, (text: string) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(theme.fg(message.customType === CUTOVER_FAILURE ? "error" : "accent", String(message.content)), 0, 0));
+    if (options.expanded && rows.length) box.addChild(new Text(theme.fg("muted", rows.join("\n")), 0, 0));
+    return box;
+  };
+  pi.registerMessageRenderer(CUTOVER_FAILURE, cutoverMessage);
+  pi.registerMessageRenderer(CUTOVER_DONE, cutoverMessage);
+
   // The one failure message: one red line compact, the per-Pi rows expanded; same box as the card.
   pi.registerMessageRenderer(FAILURE, (message, options, theme) => {
     const rows = ((message.details ?? {}) as { rows?: string[] }).rows ?? [];
@@ -336,7 +452,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     sources = supported ? fingerprintOf(ctx).fingerprint : "";
     selfReloading = false;
     // pi.pgid lets a sweep or sender see from hc's foreground whether this Pi still owns its terminal; pi.session is its restart hint.
-    await hcJson(["label", own.terminal, `pi.resources=${loaded ?? "unknown"}`, `pi.fingerprint=${sources}`, `pi.reload=${supported ? "1" : ""}`, `pi.model-control=${supported ? "1" : ""}`,
+    await hcJson(["label", own.terminal, `pi.resources=${loaded ?? "unknown"}`, `pi.fingerprint=${sources}`, `pi.reload=${supported ? "1" : ""}`, `pi.model-control=${supported ? "1" : ""}`, `pi.cutover=${supported ? "1" : ""}`,
       `pi.pgid=${ttyGroups().pgid}`, `pi.session=${ctx.sessionManager.getSessionFile() ?? ""}`]);
     if (event.reason === "reload") {
       for (const request of pending(ctx)) {
@@ -371,7 +487,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     }
   });
   pi.on("session_shutdown", async () => {
-    await hcJson(["label", process.env.HC_TERMINAL_ID!, "pi.resources=", "pi.fingerprint=", "pi.reloaded=", "pi.reload=", "pi.model-control=", "pi.pgid=", "pi.session="]);
+    await hcJson(["label", process.env.HC_TERMINAL_ID!, "pi.resources=", "pi.fingerprint=", "pi.reloaded=", "pi.reload=", "pi.model-control=", "pi.cutover=", "pi.pgid=", "pi.session="]);
     own = undefined;
   });
   pi.on("agent_settled", (_event, ctx) => {
@@ -530,16 +646,51 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
 
   return async (env, ctx) => {
     const control = env.control;
+    if (control?.type === "pi-model-operation") {
+      // The producer's own self-notice: it opens this caller's card before any acknowledgement. Only this
+      // Pi's own terminal may open it; anything else is rejected passively for inspection, never recorded.
+      const invalid = !own ? "this Pi has no terminal identity"
+        : env.from.core !== own.core || env.from.terminal !== own.terminal ? `notice ${env.id} was not sent by this Pi (${env.from.terminal})`
+          : operationError(control.operation);
+      if (invalid) pi.appendEntry(CUTOVER_REJECTED, { at: new Date().toISOString(), notice: env.id, why: invalid });
+      else if (control.operation) recordCutover(control.operation);
+      return null;
+    }
+    if (control?.type === "pi-model-ack") {
+      if (!own) return null;
+      const ack = control;
+      const why = cutoverAckError(ack, env);
+      if (why) {
+        pi.appendEntry(CUTOVER_REJECTED, { at: new Date().toISOString(), request: ack.request, target: ack.target?.terminal, why });
+        // A misaddressed success must never become a model message; a real failure with no card is delivered as what it is.
+        return ack.outcome === "applied" && ack.problems.length === 0 ? null : undefined;
+      }
+      if (!recordCutoverAck(ack)) return null;
+      const operation = cutovers.get(ack.operation.id)!;
+      // Every failure updates the visible card immediately (recordCutoverAck appended it); the operation's first one also wakes once.
+      if (cutoverStatus(ack).status === "failed") alertCutover(ctx, operation);
+      completeCutover(ctx, operation);
+      return null;
+    }
     if (control?.type === "pi-model") {
       if (!own || !env.from.core || !env.from.terminal) throw new Error("Malformed typed Pi model request; no change scheduled.");
       const request: ModelRequest = { id: env.id, control, owner: { core: env.from.core, terminal: env.from.terminal, label: env.from.label } };
-      const invalid = modelControlError(control) ?? (supported ? undefined : "unsupported endpoint: only a long-lived Pi owner in tui mode applies model requests");
-      if (invalid) { pi.appendEntry(MODEL_REQUEST, request); await finishModel(ctx, request, invalid); }
-      else if (!ctx.sessionManager.getBranch().some((e: any) => e.type === "custom" && e.customType === MODEL_REQUEST && e.data?.id === env.id)) {
-        pi.appendEntry(MODEL_REQUEST, request);
-        summarize([`Model request for ${own.label} recorded${ctx.isIdle() ? " (idle dispatch)" : "; deferred until agent_settled"}: ${control.model} · thinking ${control.thinking} · fast ${control.fast ? "on" : "off"}.`], ["Control consumed by the existing inbox: no model turn and no composer input."]);
-        applyModel(ctx);
+      if (ctx.sessionManager.getBranch().some((e: any) => e.type === "custom" && e.customType === MODEL_REQUEST && e.data?.id === env.id)) return null;
+      pi.appendEntry(MODEL_REQUEST, request);
+      // Refused before any model change: unsupported endpoint, invalid operation, or a no-operation request from this core.
+      const protocol = !supported ? "unsupported endpoint: only a long-lived Pi owner in tui mode applies model requests"
+        : control.operation ? operationError(control.operation, own) : env.from.core === own!.core ? "a model request that resolves to this core needs a cutover operation" : undefined;
+      if (protocol) { await finishModel(ctx, request, protocol, false); return null; }
+      // Field validation applies to every shape, including the ungrouped remote form.
+      const fields = modelControlError(control);
+      if (fields) { await finishModel(ctx, request, fields, Boolean(control.operation)); return null; }
+      if (control.operation) {
+        const planned = control.operation.targets.find((target) => target.core === own!.core && target.terminal === own!.terminal)!;
+        const mismatch = control.model !== planned.requested.model || control.thinking !== planned.requested.thinking || control.fast !== planned.requested.fast ? `request differs from the planned request for ${planned.label}` : undefined;
+        if (mismatch) { await finishModel(ctx, request, mismatch); return null; }
       }
+      summarize([`Model request for ${own.label} recorded${ctx.isIdle() ? " (idle dispatch)" : "; deferred until agent_settled"}: ${control.model} · thinking ${control.thinking} · fast ${control.fast ? "on" : "off"}${control.operation ? ` · cutover ${control.operation.id}` : " · ungrouped remote request"}.`], ["Control consumed by the existing inbox: no model turn and no composer input; a grouped request closes with one typed acknowledgement, an ungrouped one with one ordinary result."]);
+      applyModel(ctx);
       return null;
     }
     if (control?.type === "pi-reload-ack") {
