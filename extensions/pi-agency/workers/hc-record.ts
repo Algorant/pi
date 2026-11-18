@@ -84,7 +84,7 @@ export type HcWorkerRecord = {
    * record carries the session ID its one Pi was launched with. */
   childSessionId: string;
   /** Captured `provider/model:thinking` for every invocation of this Worker; a manus
-   * records MANUS_MODEL, or the temporary manus=worker policy's exact selection. */
+   * records the exact model its own `manus` role selection resolved. */
   model: string;
   /** Present only for explicitly selected, approved benchmark Worker launches. */
   benchmark?: HcWorkerBenchmarkSelection;
@@ -306,10 +306,6 @@ async function createOnce(path: string, value: unknown): Promise<boolean> {
 export async function readHcWorkerRecord(id: string): Promise<HcWorkerRecord> {
   return validateHcWorkerRecord(JSON.parse(await readFile(hcRecordPath(id), "utf8")));
 }
-/** A manus takes Pi's own default model unless the temporary manus=worker policy
- * selected the worker role, in which case the record states that exact selection. */
-export const MANUS_MODEL = "pi-default";
-
 /** A new control record; its id is fresh, so an existing file is a protocol error. */
 export async function createHcWorkerRecord(record: HcWorkerRecord): Promise<void> {
   let valid: HcWorkerRecord;
@@ -332,20 +328,22 @@ export type HcManusRecordParams = {
   owner: HcWorkerEndpoint;
   childAgent: string;
   childSessionId: string;
-  /** Explicit `provider/model:thinking` when the temporary manus=worker policy selected it; omitted means Pi's own default. */
-  model?: string;
+  /** Exact `provider/model:thinking` the `manus` role resolved for this launch. */
+  model: string;
   integration: HcWorkerIntegration;
 };
 
 /** A manus's own control record: written once at start, in the same store, by the
  * same atomic exclusive create as a Worker's, and complete enough that every reader -
- * including a Pi running the previous release - validates it instead of failing the list. */
+ * including a Pi running the previous release - validates it instead of failing the list.
+ * It always names the exact selection its own `manus` role resolved; historical
+ * records written before that change may still say "pi-default". */
 export async function createHcManusRecord(params: HcManusRecordParams): Promise<HcWorkerRecord> {
   const now = Date.now();
   const record: HcWorkerRecord = {
     version: 8, kind: "manus", deliveryId: createHcDeliveryId(), invocationId: createHcInvocationId(),
     childAgent: params.childAgent, label: params.label, needsAlgorant: params.needsAlgorant,
-    childSessionId: params.childSessionId, model: params.model ?? MANUS_MODEL, planRequired: false,
+    childSessionId: params.childSessionId, model: params.model, planRequired: false,
     ...(params.taskId ? { taskId: params.taskId, assignment: params.assignment } : { brief: params.brief }),
     ...(params.from ? { from: params.from } : {}),
     ownerSessionId: params.ownerSessionId, owner: params.owner, createdAt: now, updatedAt: now, state: "pending", integration: params.integration,

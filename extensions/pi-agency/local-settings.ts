@@ -11,11 +11,11 @@ import { join } from "node:path";
  * - `modelProviders`: when set, only model-roles entries from these providers
  *   are available on this machine (work-machine: Copilot only).
  * - `modelSets`: opts this machine into the named sets of model-roles.json
- *   (task-714): one set name per role, all five roles. Replaces
+ *   (task-714): one set name per role, all six roles. Replaces
  *   `modelProviders`; the two never combine. Only the shape is checked here;
  *   model-roles.ts checks that each named set exists and fills its role.
  */
-export const MODEL_SET_ROLES = ["herdra", "orchestrator", "worker", "subagent", "review"] as const;
+export const MODEL_SET_ROLES = ["herdra", "orchestrator", "manus", "worker", "subagent", "review"] as const;
 export type ModelSetRole = (typeof MODEL_SET_ROLES)[number];
 export type ModelSetSelection = Readonly<Record<ModelSetRole, string>>;
 export type LocalAgencySettings = { machine?: string; modelProviders?: readonly string[]; modelSets?: ModelSetSelection };
@@ -82,11 +82,9 @@ export function localAgencySettings(): LocalAgencySettings {
  * optional and only these exact values are accepted; an absent section is the
  * normal routing, and removing it (or a key) restores the old path.
  *
- * - `manus: "worker"`: a new manus runs the existing `worker` role and quota
- *   selection instead of the orchestrator entry (task-726).
  * - `review: "paused"`: reviewer launches and review resolution fail clearly.
  */
-export type TemporaryAgencySettings = { manus?: "worker"; review?: "paused" };
+export type TemporaryAgencySettings = { review?: "paused" };
 
 /** Read per launch so adding or removing the section applies to the next dispatch. */
 export function temporaryAgencySettings(): TemporaryAgencySettings {
@@ -99,10 +97,9 @@ export function temporaryAgencySettings(): TemporaryAgencySettings {
     throw new Error(`${path}: "pi-agency-temporary" must be an object.`);
   }
   for (const key of Object.keys(section)) {
-    if (key !== "manus" && key !== "review") throw new Error(`${path}: "pi-agency-temporary" has unknown key "${key}" (known: manus, review).`);
+    if (key !== "review") throw new Error(`${path}: "pi-agency-temporary" has unknown key "${key}" (known: review).`);
   }
-  const { manus, review } = section as Record<string, unknown>;
-  if (manus !== undefined && manus !== "worker") throw new Error(`${path}: "pi-agency-temporary".manus must be "worker"; remove it to restore orchestrator selection for a new manus.`);
+  const { review } = section as Record<string, unknown>;
   if (review !== undefined && review !== "paused") throw new Error(`${path}: "pi-agency-temporary".review must be "paused"; remove it to restore reviews.`);
-  return { ...(manus === undefined ? {} : { manus: "worker" }), ...(review === undefined ? {} : { review: "paused" }) };
+  return { ...(review === undefined ? {} : { review: "paused" }) };
 }

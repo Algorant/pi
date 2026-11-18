@@ -167,6 +167,12 @@ export function workerModelArgument(registry: RoleRegistry, model?: string, thin
   return { argument: `${resolved.model}:${resolved.thinking}`, ...(set ? { set, quota } : {}) };
 }
 
+/** A manus selects its own "manus" role, never the orchestrator or worker one. */
+export function manusModelArgument(registry: RoleRegistry): { argument: string; set?: string; quota?: string } {
+  const { set, quota, ...resolved } = resolveRole("manus", registry);
+  return { argument: `${resolved.model}:${resolved.thinking}`, ...(set ? { set, quota } : {}) };
+}
+
 /** Closed benchmark-only selection; never accepts a general model/thinking override. */
 export function benchmarkWorkerModelArgument(registry: RoleRegistry, benchmarkModel: BenchmarkWorkerModel) {
   const resolved = resolveBenchmarkWorkerModel(benchmarkModel, registry);

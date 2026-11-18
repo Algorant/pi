@@ -7,7 +7,7 @@ import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } 
 import { localSettingsPath, temporaryAgencySettings } from "../pi-agency/local-settings.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
-import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow, workerModelArgument } from "../pi-agency/workers/shared.ts";
+import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, manusModelArgument, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
 import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
 import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
@@ -217,9 +217,9 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const self = await caller();
     if (params.label !== undefined) labelOf(params.label, "");
     requireOpenRequest(params.from, self);
-    // The optional temporary machine policy routes a new manus through the existing
-    // worker role and quota. Resolve it here, before any worktree, record or terminal.
-    const manusModel = temporaryAgencySettings().manus === "worker" ? workerModelArgument(ctx.modelRegistry) : undefined;
+    // The manus role (its own entry, never the orchestrator or worker one) is resolved
+    // before any worktree, record or terminal. A missing role or cell fails closed here.
+    const manusModel = manusModelArgument(ctx.modelRegistry);
     const repo = await nativeProjectIdentity(ctx.cwd);
     const project = basename(dirname(repo.repoKey));
     const task = params.taskId ? await tandemShow(params.taskId, repo.repoRoot) : undefined;
@@ -264,7 +264,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       ? { repoKey: repo.repoKey, worktree: true, baseHead, source: { checkoutPath: cwd, branch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } }
       : { repoKey: repo.repoKey, worktree: false, baseHead, source: { checkoutPath: repo.repoRoot, branch: targetBranch }, target: { checkoutPath: repo.repoRoot, branch: targetBranch } };
     const record = await createHcManusRecord({ label, ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, ...(params.from ? { from: params.from } : {}),
-      ...(manusModel ? { model: manusModel.argument } : {}),
+      model: manusModel.argument,
       ownerSessionId: ctx.sessionManager.getSessionId(), owner: { core: self.core, terminal: self.address }, childAgent: name, childSessionId, integration });
     // The existing starter brief/label bind the one local note before the child starts.
     if (!task) await nstarNote({ cwd, label }, { initialize: true, brief: params.brief });
@@ -287,7 +287,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
-        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, ...(manusModel ? ["--model", manusModel.argument] : []), "--", brief], name);
+        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, "--model", manusModel.argument, "--", brief], name);
     } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
     // The record's own observation of the terminal the launch returned; finish closes it by this.
     try {
@@ -297,8 +297,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}.${manusModel ? ` Temporary manus=worker policy: model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}.` : ""} Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), ...(manusModel ? { model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, temporaryManus: "worker" } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
+    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
   }
 
   async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, _signal: AbortSignal | undefined, _ctx: ExtensionContext): Promise<Result> {
@@ -380,7 +380,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     },
     {
       name: "manus_start", label: "Manus Start",
-      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. An optional temporary machine policy routes a new manus through the existing worker role and quota with an explicit model; otherwise it takes Pi's own orchestrator-selected default. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
+      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. It resolves the native manus role (or the selected model set's manus cell) before any side effect and passes that exact model; there is no orchestrator or worker fallback. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement; reports through your inbox.",
       parameters: ManusParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => manusStart(params, signal, ctx),

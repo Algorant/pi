@@ -18,7 +18,7 @@ import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_
  * entries from other providers count as unavailable too.
  *
  * Named sets (task-714): the optional root `sets` holds named sets, each with
- * optional `herdra`/`orchestrator`/`worker`/`subagent` entries and an ordered
+ * optional `herdra`/`orchestrator`/`manus`/`worker`/`subagent` entries and an ordered
  * `review` list. A machine whose local settings set `"pi-agency".modelSets`
  * resolves each role only from its selected set: no cross-set or legacy
  * fallback, no provider filter, and the set quota rule below. Without
@@ -29,7 +29,7 @@ import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_
  * (task-714). opencode-go never carries Anthropic, OpenAI or xAI models; load
  * fails on such an entry and there is no approved exception.
  */
-export const ROLE_NAMES = ["orchestrator", "worker", "subagent"] as const;
+export const ROLE_NAMES = ["orchestrator", "manus", "worker", "subagent"] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
 export type RoleEntry = { model: string; thinking: ThinkingLevel; fast: boolean };
@@ -118,6 +118,7 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
     quota: { weeklyThreshold: threshold, fiveHourThreshold },
     roles: {
       orchestrator: entries(roles.orchestrator, "roles.orchestrator", path),
+      manus: entries(roles.manus, "roles.manus", path),
       worker: entries(roles.worker, "roles.worker", path),
       subagent: entries(roles.subagent, "roles.subagent", path),
       review: { enabled: review.enabled, models: entries(review.models, "roles.review.models", path) },
@@ -211,7 +212,7 @@ function setQuota(provider: string, now = Date.now()): { blocked: string } | { n
   return { notice: `checked: ${usage}` };
 }
 
-/** The selected set name and cell for one role; first checks that all five selections exist and are filled. */
+/** The selected set name and cell for one role; first checks that all six selections exist and are filled. */
 function selectedCell<R extends ModelSetRole>(sets: ModelRoles["sets"], selection: ModelSetSelection, role: R, path: string): { set: string; cell: NonNullable<ModelSet[R]> } {
   const where = `"pi-agency".modelSets in ${localSettingsPath()}`;
   if (!sets) throw new Error(`${where} selects named model sets, but ${path} has no "sets"`);
