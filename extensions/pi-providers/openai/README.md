@@ -14,7 +14,7 @@ A successful remote request stores one version-2 opaque artifact under `Compacti
 
 Runtime context prefixes (currently the managed Worker brief) arrive through the same-process `pi:context-prefix` event. Each event carries exactly the messages supplied by the `context` hook, scoped to its Pi session. Remote replay inserts them after the immutable replacement prefix and before the subsequent live history; it does not save them into `explicitHistory`, compaction artifacts or chat. The prefix resets at each agent run and shutdown. This preserves non-persistent context without parsing text sentinels or deriving Task state in the provider adapter. Ordinary requests without remote replay keep the SDK-built input.
 
-The extension intentionally does not support direct `openai/*` provider overrides, custom WebSocket transport, `previous_response_id`, Azure, version-1 artifacts, separate configuration files, or migration shims. Pi's built-in `openai-codex` transport remains authoritative.
+The extension intentionally does not support direct `openai/*` provider overrides, custom WebSocket transport, `previous_response_id`, Azure, version-1 artifacts, separate configuration files, or migration shims. Pi's built-in `openai` Responses transport is the active inference route after the provider rename; `openai-codex` remains supported for existing sessions and historical records until the last legacy actors move.
 
 ## Pi 0.84 compatibility decision
 
@@ -33,7 +33,7 @@ Fast mode is on at each session start. Use:
 /fast status
 ```
 
-When Fast mode is on for `openai-codex` GPT-5.6 Sol/Terra/Luna or GPT-6.1 Sol and GPT-6 Astra/Sol/Luna, the extension adds `service_tier: "priority"` to requests. The state is in memory only. It is not stored in session entries or settings. Fast mode uses more ChatGPT credits than Standard mode (OpenAI's Codex docs cite about 2.5x included usage). `response.completed` reports `service_tier: "default"` even when priority is applied, so do not use it as evidence; task-335-6 measured about 1.6-1.9x output throughput for GPT-6 Luna, 6.1 Sol and 6 Astra on 2026-10-02. GPT-6 models do not enter the GPT-5.6-only remote compaction/replay path.
+When Fast mode is on for `openai` or `openai-codex` GPT-5.6 Sol/Terra/Luna or GPT-6.1 Sol and GPT-6 Astra/Sol/Luna, the extension adds `service_tier: "priority"` to requests. The state is in memory only. It is not stored in session entries or settings. Fast mode uses more ChatGPT credits than Standard mode (OpenAI's Codex docs cite about 2.5x included usage). `response.completed` reports `service_tier: "default"` even when priority is applied, so do not use it as evidence; task-335-6 measured about 1.6-1.9x output throughput for GPT-6 Luna, 6.1 Sol and 6 Astra on 2026-10-02. GPT-6 models do not enter the GPT-5.6-only remote compaction/replay path.
 
 The same GPT-6.1 Sol and GPT-6 Astra/Sol/Luna models on Pi's `openai` provider are also eligible, but only when its stored credential is Sign in with ChatGPT (`auth.json` `openai.type` is `oauth`); with an API key, priority would be billed at the priority rate rather than drawing on the ChatGPT plan. OpenAI documents `service_tier` as unsupported on that route, yet on 2026-10-06 it accepted `priority` (about 55 vs 34 tok/s for GPT-6.1 Sol) and rejected `flex` (task-378). If OpenAI starts rejecting it, requests fail visibly; turn Fast off with `/fast off`.
 

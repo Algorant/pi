@@ -44,7 +44,7 @@ const DendraParameters = Type.Object({
   worktree: Type.Optional(Type.Boolean({ description: "Worker: default true, false explicitly skips isolation and uses this checkout." })),
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true delivers for Algorant judgement and forbids auto-finish." })),
   prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: optional temporary direction; durable scope stays in the Task." })),
-  benchmarkModel: Type.Optional(Type.Union([Type.Literal("openai-codex/gpt-6-luna"), Type.Literal("anthropic/claude-sonnet-5-5")], { description: "Worker only: explicit benchmark contender; high thinking is fixed, Luna uses Fast, and strict fresh quota preflight applies. No general model override." })),
+  benchmarkModel: Type.Optional(Type.Union([Type.Literal("openai/gpt-6-luna"), Type.Literal("anthropic/claude-sonnet-5-5")], { description: "Worker only: explicit benchmark contender; high thinking is fixed, Luna uses Fast, and strict fresh quota preflight applies. No general model override." })),
   from: From,
 }, { additionalProperties: false });
 
@@ -177,7 +177,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   // Rows rebuilt by /reload or resume before session_start registers the tools keep their cards.
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
 
-  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     if (params.kind === "worker") {
       requireContract(params);

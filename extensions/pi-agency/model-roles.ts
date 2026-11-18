@@ -12,7 +12,7 @@ import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_
  * The single source of default models (task-404). `agent/model-roles.json` holds
  * an ordered list per role; the first entry that is available wins. Explicit
  * model/thinking arguments from a caller still win over the file. An entry whose
- * provider (anthropic, openai-codex, openai) is at or above `quota.weeklyThreshold` or
+ * provider (anthropic, openai, plus legacy openai-codex decoding) is at or above `quota.weeklyThreshold` or
  * `quota.fiveHourThreshold` in the corresponding window counts as unavailable.
  * On a machine whose local settings set `"pi-agency": { "modelProviders": [...] }`,
  * entries from other providers count as unavailable too.
@@ -50,8 +50,10 @@ const BENCHMARK_QUOTA_THRESHOLD = 0.9;
 function limitsProviderOf(provider: string): string {
   return provider === "openai-codex" ? "openai" : provider;
 }
-export const BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
-export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number];
+export const BENCHMARK_WORKER_MODELS = ["openai/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
+/** Legacy benchmark id: decodes saved records and continues a live old contender only; never a new selection. */
+export const LEGACY_BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna"] as const;
+export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number] | (typeof LEGACY_BENCHMARK_WORKER_MODELS)[number];
 export type RoleRegistry = Pick<ExtensionContext["modelRegistry"], "find" | "hasConfiguredAuth">;
 type CatalogModel = NonNullable<ReturnType<RoleRegistry["find"]>>;
 
@@ -332,12 +334,12 @@ export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: R
  * provider exception while retaining the shared catalog/auth/quota check.
  */
 export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistry, path = modelRolesPath()): { model: BenchmarkWorkerModel; thinking: "high"; fast: boolean; providerExemption: "approved-benchmark-provider-exception"; providerExemptionModel: BenchmarkWorkerModel; quota: string; quotaCheckedAt: number } {
-  if (!(BENCHMARK_WORKER_MODELS as readonly string[]).includes(model)) {
-    throw new Error(`Benchmark Worker model must be exactly one of ${BENCHMARK_WORKER_MODELS.join(" or ")}.`);
+  if (!([...BENCHMARK_WORKER_MODELS, ...LEGACY_BENCHMARK_WORKER_MODELS] as readonly string[]).includes(model)) {
+    throw new Error(`Benchmark Worker model must be exactly one of ${BENCHMARK_WORKER_MODELS.join(" or ")}${LEGACY_BENCHMARK_WORKER_MODELS.length ? `, or the legacy ${LEGACY_BENCHMARK_WORKER_MODELS.join(" or ")} for an existing record` : ""}.`);
   }
   const selected = model as BenchmarkWorkerModel;
   const { quota } = loadModelRoles(path);
-  const fast = selected === "openai-codex/gpt-6-luna";
+  const fast = selected === "openai/gpt-6-luna" || selected === "openai-codex/gpt-6-luna";
   const entry: RoleEntry = { model: selected, thinking: "high", fast };
   const checked = checkEntry(entry, registry, quota, localAgencySettings().modelProviders, {
     providerException: selected,

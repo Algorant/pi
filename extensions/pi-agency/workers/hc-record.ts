@@ -31,10 +31,11 @@ export type HcWorkerIntegration = { repoKey: string; source: HcWorkerCheckout; t
 export type HcWorkerDirection = { request: string; ofDeliveryId: string; questionId?: string; approve?: true };
 export type HcWorkerControlState = "pending" | "failed" | "paused" | "discarding" | "discarded";
 export type HcWorkerBenchmarkSelection = {
-  requestedModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
-  selectedModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  /** New launches select `openai/…`; the legacy `openai-codex/…` value still decodes saved records. */
+  requestedModel: "openai/gpt-6-luna" | "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  selectedModel: "openai/gpt-6-luna" | "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
   providerExemption: "approved-benchmark-provider-exception";
-  providerExemptionModel: "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
+  providerExemptionModel: "openai/gpt-6-luna" | "openai-codex/gpt-6-luna" | "anthropic/claude-sonnet-5-5";
   fast: boolean;
   quota: string;
   quotaCheckedAt: number;
@@ -206,11 +207,11 @@ export function validateHcWorkerRecord(value: unknown): HcWorkerRecord {
   text(record.model, "model");
   if (record.benchmark !== undefined) {
     const benchmark = record.benchmark;
-    const contenders = ["openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"];
+    const contenders = ["openai/gpt-6-luna", "openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"];
     if (isManusRecord(record) || !benchmark || !contenders.includes(benchmark.requestedModel) ||
         benchmark.selectedModel !== benchmark.requestedModel || benchmark.providerExemption !== "approved-benchmark-provider-exception" || benchmark.providerExemptionModel !== benchmark.selectedModel ||
         typeof benchmark.quotaCheckedAt !== "number" || !Number.isFinite(benchmark.quotaCheckedAt) || benchmark.quotaCheckedAt < 0 ||
-        record.model !== `${benchmark.selectedModel}:high` || benchmark.fast !== (benchmark.selectedModel === "openai-codex/gpt-6-luna") ||
+        record.model !== `${benchmark.selectedModel}:high` || benchmark.fast !== (benchmark.selectedModel === "openai/gpt-6-luna" || benchmark.selectedModel === "openai-codex/gpt-6-luna") ||
         typeof benchmark.quota !== "string" || !benchmark.quota.trim()) {
       throw new Error("Invalid native Worker benchmark selection or provider exemption.");
     }
