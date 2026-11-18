@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { hasChatGPTSignIn } from "../openai/model.ts";
+import { MissingCodexLoginError, isCodexLoginNeeded, resolveCodexUsageToken } from "./codex-auth.ts";
 
 export type RateWindow = {
 	label: string;
@@ -32,17 +32,16 @@ export type BalanceInfo = { usedPercent: number; detail: string };
 /** Everything `/limits` renders for one provider. */
 export type ProviderLimits = { windows: RateWindow[]; money?: MoneyLine[]; balance?: BalanceInfo };
 
-export type UsageProvider = "openai-codex" | "anthropic" | "xai";
+export type UsageProvider = "openai" | "anthropic" | "xai";
 
 const CACHE_PATHS: Record<string, string> = {
-	"openai-codex": join(homedir(), ".pi", "cache", "powerbar-codex-usage.json"),
+	openai: join(homedir(), ".pi", "cache", "powerbar-openai-usage.json"),
 	anthropic: join(homedir(), ".pi", "cache", "powerbar-anthropic-usage.json"),
 	xai: join(homedir(), ".pi", "cache", "powerbar-xai-usage.json"),
 	"opencode-go": join(homedir(), ".pi", "cache", "limits-opencode-go-usage.json"),
 	openrouter: join(homedir(), ".pi", "cache", "limits-openrouter-usage.json"),
 	baseten: join(homedir(), ".pi", "cache", "limits-baseten-usage.json"),
 };
-const LEGACY_CACHE_PATH = join(homedir(), ".pi", "cache", "powerbar-lite-codex-usage.json");
 export const CACHE_TTL_MS = 60_000;
 const FAILURE_BACKOFF_MS = 5 * 60_000;
 const RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
@@ -50,21 +49,16 @@ const API_TIMEOUT_MS = 10_000;
 const execFileAsync = promisify(execFile);
 export const POWERBAR_METER_WIDTH = 12;
 
-/** Resolves a provider credential through Pi, refreshing expired OAuth tokens. */
-export type ProviderAuthSource = Pick<ExtensionContext["modelRegistry"], "getProviderAuth">;
-
+/** The plan meter for the active model's provider, or undefined when it has none. */
 export function getUsageProvider(ctx: Pick<ExtensionContext, "model">): UsageProvider | undefined {
+	// The one OpenAI inference route, legacy `openai-codex/*` or `openai/*`, draws
+	// on the same ChatGPT plan and shows the limits-owned Codex-plan meter.
 	if (
 		ctx.model?.provider === "openai-codex"
+		|| ctx.model?.provider === "openai"
 		|| ctx.model?.provider === "anthropic"
 	) {
-		return ctx.model.provider;
-	}
-	// Sign in with ChatGPT on `openai` draws on the same ChatGPT plan, but its
-	// token is rejected by wham/usage (401 no_matching_rule) and its responses
-	// carry no quota headers, so the plan meters come from the legacy login.
-	if (ctx.model?.provider === "openai" && hasChatGPTSignIn() && hasUsageCredentials("openai-codex")) {
-		return "openai-codex";
+		return ctx.model.provider === "anthropic" ? "anthropic" : "openai";
 	}
 	// xAI subscription meters exist only for Pi-managed OAuth. An account with
 	// just an `XAI_API_KEY` is not a plan provider and must not show meters.
@@ -164,36 +158,6 @@ function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
 
-type CodexUsageCredential = { envAccessToken?: string; accountId?: string };
-
-/**
- * An explicit env token overrides; otherwise the Pi-managed `openai-codex`
- * OAuth login is the credential. Its access token is resolved through Pi at
- * fetch time so an expired token is refreshed: with openai/* models in use,
- * inference no longer exercises (and refreshes) the legacy login.
- */
-function loadCodexCredentials(): CodexUsageCredential | undefined {
-	const envAccessToken = (
-		process.env.OPENAI_CODEX_OAUTH_TOKEN ||
-		process.env.OPENAI_CODEX_ACCESS_TOKEN ||
-		process.env.CODEX_OAUTH_TOKEN ||
-		process.env.CODEX_ACCESS_TOKEN
-	)?.trim();
-	const envAccountId = (process.env.OPENAI_CODEX_ACCOUNT_ID || process.env.CHATGPT_ACCOUNT_ID)?.trim();
-	if (envAccessToken) return { envAccessToken, accountId: envAccountId || undefined };
-
-	try {
-		const authPath = join(getAgentDir(), "auth.json");
-		if (!existsSync(authPath)) return undefined;
-		const entry = JSON.parse(readFileSync(authPath, "utf8"))["openai-codex"];
-		if (entry?.type !== "oauth") return undefined;
-		return { accountId: typeof entry.accountId === "string" ? entry.accountId : undefined };
-	} catch {
-		// Ignore malformed auth files; the UI will show no credentials/error state.
-		return undefined;
-	}
-}
-
 function loadAnthropicCredentials(): { accessToken?: string } {
 	const envAccessToken = (
 		process.env.ANTHROPIC_OAUTH_TOKEN ||
@@ -233,12 +197,13 @@ function loadXaiCredentials(): { accessToken?: string } {
 }
 
 /**
- * Configured-state detection must use the same credential source the provider's
- * fetch actually uses. Claude and Codex authenticate with OAuth access tokens,
- * so `getProviderAuth().apiKey` reports them as unconfigured.
+ * Pi-managed plan credentials, resolved from Pi as before; `getProviderAuth().apiKey`
+ * reports OAuth accounts as unconfigured, so each loader reads its own source.
+ * The OpenAI Codex-plan meter is not one of them: its limits-owned sign-in is
+ * checked asynchronously by the SDK (`hasCodexLimitsLogin`), so this reports
+ * false for `openai`.
  */
 export function hasUsageCredentials(provider: UsageProvider): boolean {
-	if (provider === "openai-codex") return !!loadCodexCredentials();
 	if (provider === "anthropic") return !!loadAnthropicCredentials().accessToken;
 	if (provider === "xai") return !!loadXaiCredentials().accessToken;
 	return false;
@@ -261,10 +226,7 @@ export function currentWindowUsage(windows: readonly RateWindow[], label: "Week"
 
 export function readCachedLimits(provider: string): (LimitState & Pick<ProviderLimits, "money" | "balance">) | undefined {
 	try {
-		const primaryPath = CACHE_PATHS[provider];
-		const cachePath = existsSync(primaryPath)
-			? primaryPath
-			: provider === "openai-codex" ? LEGACY_CACHE_PATH : undefined;
+		const cachePath = CACHE_PATHS[provider];
 		if (!cachePath || !existsSync(cachePath)) return undefined;
 		const parsed = JSON.parse(readFileSync(cachePath, "utf8"));
 		if (!Array.isArray(parsed.windows)) return undefined;
@@ -350,19 +312,41 @@ function createUsageHttpError(response: Response): UsageHttpError {
 }
 
 export function getUsageFailureRetryAt(error: unknown, failedAt = Date.now()): number | undefined {
-	if (error instanceof MissingUsageCredentialsError) return undefined;
+	// Missing or non-limits credentials resolve locally; a sign-in can appear at
+	// any later event, so it is retried rather than backed off.
+	if (error instanceof MissingUsageCredentialsError || error instanceof MissingCodexLoginError) return undefined;
 	if (error instanceof UsageHttpError && error.status === 429) {
 		return failedAt + Math.max(RATE_LIMIT_BACKOFF_MS, error.retryAfterMs ?? 0);
 	}
 	return failedAt + FAILURE_BACKOFF_MS;
 }
 
-export async function fetchCodexLimits(auth: ProviderAuthSource, signal?: AbortSignal): Promise<RateWindow[]> {
-	const credential = loadCodexCredentials();
-	if (!credential) throw new MissingUsageCredentialsError("openai-codex");
-	const accessToken = credential.envAccessToken ?? (await auth.getProviderAuth("openai-codex"))?.auth.apiKey;
-	if (!accessToken) throw new MissingUsageCredentialsError("openai-codex");
-	const { accountId } = credential;
+/**
+ * An auth-invalid OpenAI reading must not stay cached and keep gating launches:
+ * a failed sign-in or a 401/403 removes only the `openai` cache. Other providers
+ * keep their caches and stale-high policy.
+ */
+function clearCachedLimits(provider: string): void {
+	const cachePath = CACHE_PATHS[provider];
+	if (!cachePath) return;
+	try {
+		rmSync(cachePath, { force: true });
+	} catch {
+		// A cache that cannot be removed is still never treated as authority here.
+	}
+}
+
+export async function fetchCodexLimits(signal?: AbortSignal): Promise<RateWindow[]> {
+	try {
+		return await fetchCodexLimitsOnce(signal);
+	} catch (error) {
+		if (isCodexLoginNeeded(error)) clearCachedLimits("openai");
+		throw error;
+	}
+}
+
+async function fetchCodexLimitsOnce(signal?: AbortSignal): Promise<RateWindow[]> {
+	const accessToken = await resolveCodexUsageToken();
 	const controller = new AbortController();
 	const abort = () => controller.abort();
 	if (signal?.aborted) controller.abort();
@@ -373,11 +357,11 @@ export async function fetchCodexLimits(auth: ProviderAuthSource, signal?: AbortS
 			Authorization: `Bearer ${accessToken}`,
 			Accept: "application/json",
 		};
-		if (accountId) headers["ChatGPT-Account-Id"] = accountId;
 		const res = await fetch("https://chatgpt.com/backend-api/wham/usage", {
 			headers,
 			signal: controller.signal,
 		});
+		if (res.status === 401 || res.status === 403) throw new MissingCodexLoginError();
 		if (!res.ok) throw createUsageHttpError(res);
 		const data = await res.json() as {
 			rate_limit?: unknown;

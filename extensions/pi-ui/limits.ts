@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
-import { CACHE_TTL_MS, LABELS, LimitsController, buildFetchers, providerConfigured, type BalanceInfo, type LimitsProvider, type MoneyLine, type ProviderLimits, type ProviderView, type RateWindow } from "../pi-providers/quota/index.ts";
+import { CACHE_TTL_MS, LABELS, LIMITS_LOGIN_HINT, LimitsController, buildFetchers, providerConfigured, type BalanceInfo, type LimitsProvider, type MoneyLine, type ProviderLimits, type ProviderView, type RateWindow } from "../pi-providers/quota/index.ts";
 
 export { LimitsController } from "../pi-providers/quota/index.ts";
 
@@ -66,7 +66,7 @@ export function renderProviderSection(view: ProviderView, width: number, theme: 
     return lines;
   }
   if (!hasData) {
-    lines.push(theme.fg("warning", "  usage unavailable"));
+    lines.push(theme.fg("warning", `  ${view.loginNeeded ? LIMITS_LOGIN_HINT : "usage unavailable"}`));
     return lines;
   }
 
@@ -81,7 +81,9 @@ export function renderProviderSection(view: ProviderView, width: number, theme: 
     lines.push(moneyRow(money.label, money.text, labelWidth, theme, width));
   }
 
-  if (view.status === "loading") {
+  if (view.loginNeeded) {
+    lines.push(theme.fg("warning", `  ${LIMITS_LOGIN_HINT}`));
+  } else if (view.status === "loading") {
     lines.push(theme.fg("dim", "  refreshing…"));
   } else if (view.fetchedAt !== undefined) {
     const stale = view.status === "error" || now - view.fetchedAt > CACHE_TTL_MS;

@@ -1,11 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BalanceInfo, MoneyLine, ProviderLimits, RateWindow, UsageProvider } from "./quota-service.ts";
 import { CACHE_TTL_MS, fetchAnthropicLimits, fetchBasetenLimits, fetchCodexLimits, fetchOpenCodeGoLimits, fetchOpenRouterLimits, fetchXaiLimits, filterPowerbarWindows, hasUsageCredentials, readCachedLimits, writeCachedLimits } from "./quota-service.ts";
+import { isCodexLoginNeeded } from "./codex-auth.ts";
 
 export { CACHE_TTL_MS };
 export * from "./quota-service.ts";
+export { CodexLoginCancelledError, LIMITS_AUTH_PATH, LIMITS_LOGIN_HINT, LIMITS_LOGIN_PROVIDER, MissingCodexLoginError, hasCodexLimitsLogin, isCodexLoginCancelled, isCodexLoginNeeded, loginCodexLimits } from "./codex-auth.ts";
 
-export const PLAN_PROVIDERS = ["openai-codex", "xai", "anthropic"] as const;
+export const PLAN_PROVIDERS = ["openai", "xai", "anthropic"] as const;
 export const API_PROVIDERS = ["opencode-go", "openrouter", "baseten"] as const;
 export type LimitsProvider = (typeof PLAN_PROVIDERS)[number] | (typeof API_PROVIDERS)[number];
 export const LIMITS_PROVIDERS: readonly LimitsProvider[] = [...PLAN_PROVIDERS, ...API_PROVIDERS];
@@ -14,7 +16,7 @@ const planSet = new Set<string>(PLAN_PROVIDERS);
 
 export const LABELS: Record<LimitsProvider, string> = {
   anthropic: "Anthropic Claude",
-  "openai-codex": "OpenAI Codex",
+  openai: "OpenAI Codex plan",
   xai: "xAI Grok",
   "opencode-go": "OpenCode Go",
   openrouter: "OpenRouter",
@@ -29,10 +31,15 @@ export type ProviderView = {
   money?: MoneyLine[];
   balance?: BalanceInfo;
   fetchedAt?: number;
+  /** The fetch failed because the limits-owned OpenAI sign-in is missing. */
+  loginNeeded?: boolean;
 };
 
 /** The credential source differs by provider kind: plan tokens vs registry API keys. */
 export function providerConfigured(provider: LimitsProvider, ctx: ExtensionCommandContext): boolean {
+  // The OpenAI Codex-plan meter is the limits-owned sign-in: listed even before
+  // the operator signs in so its exact hint is shown instead of hunting for it.
+  if (provider === "openai") return true;
   return planSet.has(provider)
     ? hasUsageCredentials(provider as UsageProvider)
     : ctx.modelRegistry.getProviderAuthStatus(provider)?.configured === true;
@@ -41,7 +48,7 @@ export function providerConfigured(provider: LimitsProvider, ctx: ExtensionComma
 export function buildFetchers(ctx: ExtensionCommandContext): Partial<Record<LimitsProvider, (signal?: AbortSignal) => Promise<ProviderLimits | RateWindow[]>>> {
   return {
     anthropic: fetchAnthropicLimits,
-    "openai-codex": (signal) => fetchCodexLimits(ctx.modelRegistry, signal),
+    openai: (signal) => fetchCodexLimits(signal),
     xai: fetchXaiLimits,
     "opencode-go": (signal) => fetchOpenCodeGoLimits(ctx, signal),
     openrouter: (signal) => fetchOpenRouterLimits(ctx, signal),
@@ -68,7 +75,7 @@ export class LimitsController {
       now?: () => number;
     } = {},
   ) {
-    const hasCredentials = deps.hasCredentials ?? ((provider: LimitsProvider) => hasUsageCredentials(provider as UsageProvider));
+    const hasCredentials = deps.hasCredentials ?? ((provider: LimitsProvider) => provider === "openai" || hasUsageCredentials(provider as UsageProvider));
     const readCache = deps.readCache ?? readCachedLimits;
     this.configured = LIMITS_PROVIDERS.filter((provider) => hasCredentials(provider));
     for (const provider of this.configured) {
@@ -115,8 +122,15 @@ export class LimitsController {
         if (controller.signal.aborted) return;
         this.views.set(provider, { provider, status: "ready", windows, money, balance, fetchedAt: now() });
         writeCache(provider, { windows, money, balance });
-      } catch {
-        if (!controller.signal.aborted) this.views.set(provider, { ...previous, status: "error" });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          // An auth-invalid reading is unknown, not a stale reading: drop its numbers.
+          const loginNeeded = isCodexLoginNeeded(error);
+          const base = loginNeeded
+            ? { provider, windows: [], money: [], fetchedAt: undefined, balance: undefined }
+            : previous;
+          this.views.set(provider, { ...base, provider, status: "error", loginNeeded });
+        }
       } finally {
         this.controllers.delete(provider);
         this.onChange();

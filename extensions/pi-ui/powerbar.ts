@@ -5,7 +5,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import {
 	fetchAnthropicLimits, fetchCodexLimits, fetchXaiLimits, filterPowerbarWindows, getUsageFailureRetryAt,
-	getUsageProvider, mapAnthropicUsage, prioritizeWindowsForModel, resetClaudeCodeVersionForTests, resolveClaudeCodeVersion,
+	getUsageProvider, isCodexLoginNeeded, LIMITS_LOGIN_HINT, mapAnthropicUsage, prioritizeWindowsForModel, resetClaudeCodeVersionForTests, resolveClaudeCodeVersion,
 	readCachedLimits, writeCachedLimits, isTruthyEnvFlag, CACHE_TTL_MS, POWERBAR_METER_WIDTH,
 	type LimitState, type RateWindow, type UsageProvider,
 } from "../pi-providers/quota/index.ts";
@@ -14,7 +14,7 @@ export { POWERBAR_METER_WIDTH };
 
 const PLAN_FETCHERS: Record<UsageProvider, (ctx: ExtensionContext, signal?: AbortSignal) => Promise<RateWindow[]>> = {
 	anthropic: (_ctx, signal) => fetchAnthropicLimits(signal),
-	"openai-codex": (ctx, signal) => fetchCodexLimits(ctx.modelRegistry, signal),
+	openai: (_ctx, signal) => fetchCodexLimits(signal),
 	xai: (_ctx, signal) => fetchXaiLimits(signal),
 };
 
@@ -127,7 +127,7 @@ const MAX_POWERBAR_WINDOWS = 2;
 function formatLimits(provider: UsageProvider | undefined, ctx: ExtensionContext, theme: Theme, state: LimitState, tier: FooterTier, separator: string): string | undefined {
 	if (!provider) return undefined;
 	if (state.status === "loading" && state.windows.length === 0) return theme.fg("dim", "limits …");
-	if (state.status === "error" && state.windows.length === 0) return theme.fg("warning", "limits ?");
+	if (state.status === "error" && state.windows.length === 0) return theme.fg("warning", state.error === LIMITS_LOGIN_HINT ? LIMITS_LOGIN_HINT : "limits ?");
 	const windows = prioritizeWindowsForModel(filterPowerbarWindows(state.windows), ctx.model?.id).slice(0, MAX_POWERBAR_WINDOWS);
 	if (windows.length === 0) return undefined;
 
@@ -280,13 +280,16 @@ export function registerPowerbar(pi: ExtensionAPI) {
 			.catch((err) => {
 				const failureAt = Date.now();
 				const retryAt = getUsageFailureRetryAt(err, failureAt);
-				limitsByProvider.set(provider, {
-					...loadingState,
-					status: "error",
-					failureAt: retryAt === undefined ? undefined : failureAt,
-					retryAt,
-					error: "usage unavailable",
-				});
+				// An auth-invalid reading is unknown: do not keep painting its old numbers.
+				limitsByProvider.set(provider, isCodexLoginNeeded(err)
+					? { status: "error", windows: [], error: LIMITS_LOGIN_HINT }
+					: {
+						...loadingState,
+						status: "error",
+						failureAt: retryAt === undefined ? undefined : failureAt,
+						retryAt,
+						error: "usage unavailable",
+					});
 			})
 			.finally(() => {
 				refreshInFlight.delete(provider);

@@ -12,7 +12,7 @@ import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_
  * The single source of default models (task-404). `agent/model-roles.json` holds
  * an ordered list per role; the first entry that is available wins. Explicit
  * model/thinking arguments from a caller still win over the file. An entry whose
- * provider (anthropic, openai-codex) is at or above `quota.weeklyThreshold` or
+ * provider (anthropic, openai-codex, openai) is at or above `quota.weeklyThreshold` or
  * `quota.fiveHourThreshold` in the corresponding window counts as unavailable.
  * On a machine whose local settings set `"pi-agency": { "modelProviders": [...] }`,
  * entries from other providers count as unavailable too.
@@ -39,9 +39,17 @@ export type ModelRoles = {
   roles: Record<RoleName, readonly RoleEntry[]> & { review: { enabled: boolean; models: readonly RoleEntry[] } };
   sets?: Readonly<Record<string, ModelSet>>;
 };
-const QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex"]);
+const QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "openai"]);
 const BENCHMARK_QUOTA_MAX_AGE_MS = 30 * 60_000;
 const BENCHMARK_QUOTA_THRESHOLD = 0.9;
+/**
+ * Model provider to the limits meter key. Both OpenAI routes measure the one
+ * Codex-plan meter, published as `openai` by `agent/scripts/limits`; the
+ * legacy `openai-codex` model prefix keeps reading that same meter.
+ */
+function limitsProviderOf(provider: string): string {
+  return provider === "openai-codex" ? "openai" : provider;
+}
 export const BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
 export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number];
 export type RoleRegistry = Pick<ExtensionContext["modelRegistry"], "find" | "hasConfiguredAuth">;
@@ -142,7 +150,7 @@ function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold,
   if (!catalog) return { reason: "not in the model catalog" };
   if (!registry.hasConfiguredAuth(catalog)) return { reason: `no credentials for provider ${provider}` };
   if (QUOTA_PROVIDERS.has(provider)) {
-    const cached = readCachedLimits(provider);
+    const cached = readCachedLimits(limitsProviderOf(provider));
     if (policy.requireFreshQuota) {
       const age = cached?.fetchedAt === undefined ? undefined : Date.now() - cached.fetchedAt;
       if (age === undefined || age < 0 || age > BENCHMARK_QUOTA_MAX_AGE_MS) return { reason: "quota cache missing, future-dated, or older than 30 minutes" };
@@ -191,23 +199,24 @@ export type ResolvedRoleEntry = { entry: RoleEntry; catalog: CatalogModel; skipp
  * it is checked; anything else (no reading, older low reading, no current
  * window) is unknown and the entry proceeds with that notice. No fetch here.
  */
-const SET_QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "xai", "opencode-go"]);
+const SET_QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "openai", "xai", "opencode-go"]);
 const SET_QUOTA_LIMITS: Readonly<Record<string, number>> = Object.freeze({ "5h": 0.9, Day: 0.9, Week: 0.9, Month: 0.9 });
 const SET_QUOTA_RECENT_MS = 30 * 60_000;
 
 function setQuota(provider: string, now = Date.now()): { blocked: string } | { notice: string } {
   if (!SET_QUOTA_PROVIDERS.has(provider)) return { notice: `unknown: ${provider} has no quota reading` };
-  const cached = readCachedLimits(provider);
-  if (!cached) return { notice: `unknown: no ${provider} quota reading` };
+  const meter = limitsProviderOf(provider);
+  const cached = readCachedLimits(meter);
+  if (!cached) return { notice: `unknown: no ${meter} quota reading` };
   const age = cached.fetchedAt === undefined ? undefined : now - cached.fetchedAt;
   const read = age === undefined ? "reading time missing" : age < 0 ? "reading time in the future" : `read ${Math.round(age / 60_000)}m ago`;
   const current = cached.windows.filter((window) => Object.hasOwn(SET_QUOTA_LIMITS, window.label) && typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent) && !!window.resetAt && Date.parse(window.resetAt) > now);
   for (const window of current) {
     const limit = SET_QUOTA_LIMITS[window.label]!;
-    if (window.usedPercent / 100 >= limit) return { blocked: `${provider} ${window.label} ${Math.round(window.usedPercent)}% is at or above the ${Math.round(limit * 100)}% limit (${read}), resets ${window.resetAt}` };
+    if (window.usedPercent / 100 >= limit) return { blocked: `${meter} ${window.label} ${Math.round(window.usedPercent)}% is at or above the ${Math.round(limit * 100)}% limit (${read}), resets ${window.resetAt}` };
   }
-  const usage = `${provider} ${current.map((window) => `${window.label} ${Math.round(window.usedPercent)}%`).join(", ")} (${read})`;
-  if (!current.length) return { notice: `unknown: ${provider} has no current quota window (${read})` };
+  const usage = `${meter} ${current.map((window) => `${window.label} ${Math.round(window.usedPercent)}%`).join(", ")} (${read})`;
+  if (!current.length) return { notice: `unknown: ${meter} has no current quota window (${read})` };
   if (age === undefined || age < 0 || age > SET_QUOTA_RECENT_MS) return { notice: `unknown: ${usage}` };
   return { notice: `checked: ${usage}` };
 }
