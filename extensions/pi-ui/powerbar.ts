@@ -160,7 +160,7 @@ function buildLine(
 	const rightGutter = Math.min(3, width - 1);
 	const model = ctx.model;
 	const modelId = model?.id ?? "no-model";
-	const modelName = model && model.provider !== "anthropic" && model.provider !== "openai" && model.provider !== "openai-codex" ? `${model.provider}/${modelId}` : modelId;
+	const modelName = model && model.provider !== "anthropic" && model.provider !== "openai" ? `${model.provider}/${modelId}` : modelId;
 	const thinking = model?.reasoning ? ` · ${pi.getThinkingLevel()}` : "";
 	const fastIndicator = fast.enabled && fast.eligible ? " ⚡️" : "";
 

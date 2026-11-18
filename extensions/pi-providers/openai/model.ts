@@ -60,9 +60,11 @@ export function hasChatGPTSignIn(): boolean {
 // billed at the priority rate instead of drawing on the ChatGPT plan. The
 // subscription route accepted `service_tier: "priority"` on 2026-10-06 (about
 // 55 vs 34 tok/s for GPT-6.1 Sol, task-378) although OpenAI documents it as
-// unsupported; a rejection would surface as a request error.
+// unsupported; a rejection would surface as a request error. The `openai-codex`
+// branch below is retained only for a saved legacy benchmark record's
+// continuation; the provider is not an active inference route and the old
+// GPT-5.6 Fast path is gone.
 export function isOpenAICodexFastTarget(model: unknown): model is OpenAICodexModelLike {
-  if (isOpenAICodexTarget(model)) return true;
   if (!isRecord(model) || typeof model.id !== "string" || !OPENAI_CODEX_GPT_6_FAST_MODELS.has(model.id)) return false;
   if (model.provider === "openai-codex") return model.api === "openai-codex-responses";
   return model.provider === "openai"

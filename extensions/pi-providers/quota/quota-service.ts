@@ -51,13 +51,10 @@ export const POWERBAR_METER_WIDTH = 12;
 
 /** The plan meter for the active model's provider, or undefined when it has none. */
 export function getUsageProvider(ctx: Pick<ExtensionContext, "model">): UsageProvider | undefined {
-	// The one OpenAI inference route, legacy `openai-codex/*` or `openai/*`, draws
-	// on the same ChatGPT plan and shows the limits-owned Codex-plan meter.
-	if (
-		ctx.model?.provider === "openai-codex"
-		|| ctx.model?.provider === "openai"
-		|| ctx.model?.provider === "anthropic"
-	) {
+	// The active OpenAI route (`openai/*`) draws on the ChatGPT plan and shows the
+	// limits-owned Codex-plan meter. The dormant `openai-codex` built-in is no
+	// longer an inference route; saved legacy sessions simply show no meter.
+	if (ctx.model?.provider === "openai" || ctx.model?.provider === "anthropic") {
 		return ctx.model.provider === "anthropic" ? "anthropic" : "openai";
 	}
 	// xAI subscription meters exist only for Pi-managed OAuth. An account with

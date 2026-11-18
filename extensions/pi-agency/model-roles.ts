@@ -12,7 +12,7 @@ import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_
  * The single source of default models (task-404). `agent/model-roles.json` holds
  * an ordered list per role; the first entry that is available wins. Explicit
  * model/thinking arguments from a caller still win over the file. An entry whose
- * provider (anthropic, openai, plus legacy openai-codex decoding) is at or above `quota.weeklyThreshold` or
+ * provider (anthropic, openai, plus a saved legacy openai-codex benchmark record) is at or above `quota.weeklyThreshold` or
  * `quota.fiveHourThreshold` in the corresponding window counts as unavailable.
  * On a machine whose local settings set `"pi-agency": { "modelProviders": [...] }`,
  * entries from other providers count as unavailable too.
@@ -39,13 +39,15 @@ export type ModelRoles = {
   roles: Record<RoleName, readonly RoleEntry[]> & { review: { enabled: boolean; models: readonly RoleEntry[] } };
   sets?: Readonly<Record<string, ModelSet>>;
 };
+// `openai-codex` is retained only for a saved legacy benchmark record's
+// continuation (LEGACY_BENCHMARK_WORKER_MODELS); no active role or set uses it.
 const QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "openai"]);
 const BENCHMARK_QUOTA_MAX_AGE_MS = 30 * 60_000;
 const BENCHMARK_QUOTA_THRESHOLD = 0.9;
 /**
- * Model provider to the limits meter key. Both OpenAI routes measure the one
- * Codex-plan meter, published as `openai` by `agent/scripts/limits`; the
- * legacy `openai-codex` model prefix keeps reading that same meter.
+ * Model provider to the limits meter key. The active `openai` route measures the
+ * one Codex-plan meter published by `agent/scripts/limits`; the legacy
+ * `openai-codex` prefix is mapped only for a saved legacy benchmark record.
  */
 function limitsProviderOf(provider: string): string {
   return provider === "openai-codex" ? "openai" : provider;
@@ -201,7 +203,7 @@ export type ResolvedRoleEntry = { entry: RoleEntry; catalog: CatalogModel; skipp
  * it is checked; anything else (no reading, older low reading, no current
  * window) is unknown and the entry proceeds with that notice. No fetch here.
  */
-const SET_QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai-codex", "openai", "xai", "opencode-go"]);
+const SET_QUOTA_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai", "xai", "opencode-go"]);
 const SET_QUOTA_LIMITS: Readonly<Record<string, number>> = Object.freeze({ "5h": 0.9, Day: 0.9, Week: 0.9, Month: 0.9 });
 const SET_QUOTA_RECENT_MS = 30 * 60_000;
 
@@ -263,7 +265,6 @@ function resolveSetEntry(role: Exclude<ModelSetRole, "review">, registry: RoleRe
 export const PROVIDER_COMPANY: Readonly<Record<string, string>> = Object.freeze({
   anthropic: "anthropic",
   openai: "openai",
-  "openai-codex": "openai",
   // Approved 2026-11-13: review uses direct xai/grok-4.7 (xhigh), the verified selectable version; never Go unless Algorant explicitly asks.
   xai: "xai",
 });

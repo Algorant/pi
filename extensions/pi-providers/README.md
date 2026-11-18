@@ -6,6 +6,14 @@ all things related to various providers and my settings for them
 ## Dependencies
 None.
 
+## OpenAI route: active provider, dormant built-in, fresh meter sign-in
+
+- **Active inference provider:** `openai`, Pi's built-in Responses transport. Active roles, sets and the benchmark selector name the same model ids, thinking levels and Fast flags as before; `agent/models.json` context overrides are unchanged.
+- **Dormant built-in:** `openai-codex` is no longer selected by any role, set or new benchmark launch. It remains a Pi built-in provider for saved legacy benchmark records and existing session replay, and its stored Pi credential is removed locally per machine only at the LAST gate (owner-run, no grant revocation). Never copy or seed that credential between machines.
+- **Fresh limits sign-in:** the Codex-plan meter owns an independent sign-in at `~/.local/state/pi-limits/codex-auth.json` (see *The limits-owned OpenAI sign-in*). Its SDK auth id is still `openai-codex` inside that store; it is not Pi's legacy inference credential and must never be deleted with it.
+- **Per-machine rollout:** desktop actors and own resources are on `openai`; homelab-server still runs an old reader and x1 is pending, so the fleet is not complete. Credentials stay machine-local.
+- **Legacy cleanup:** the active legacy openai-codex quota/company/meter-prefix mappings and its inference Fast path are removed; only the saved-legacy-benchmark decoder/continuation path, the limits SDK auth id and historical session-replay handling remain.
+
 ## Image payloads and request measurements
 
 The existing pi-ui image owner publishes an in-process, session-bound admission projection. Apply it after the Anthropic/OpenAI payload transforms and before numeric measurement; a missing/failed policy never passes image originals through. The legacy GPT-5.6 custom compaction input is projected explicitly because it bypasses the normal context hook.
