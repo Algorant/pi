@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, inboxDir, inboxKey, localMachine, newId, steersWhileWorking, type Envelope } from "./envelope.ts";
+import { appendEvent, inboxDir, inboxKey, localMachine, newId, splitHeadline, steersWhileWorking, type Envelope } from "./envelope.ts";
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
 import { hcAddress } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
@@ -117,7 +117,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     v: 1, id: newId(), at: new Date().toISOString(), kind: params.kind, reply_to: params.reply_to ?? null,
     from: { machine, ...own, session: context.sessionManager.getSessionId(), ...(typeof percent === "number" ? { context: Math.round(percent) } : {}) },
     to: { machine, terminal: params.terminal, core: "", label: "" },
-    body: params.body,
+    body: splitHeadline(params.body),
     ...(params.control ? { control: params.control } : {}),
     ...(params.interrupt ? { interrupt: true } : {}),
     ...(task ? { task } : {}),

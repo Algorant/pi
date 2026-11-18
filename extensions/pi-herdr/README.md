@@ -107,9 +107,11 @@ through the same durable inbox path, with no extra model request. Explicit final
 unless native `keep` is true; `--rm` is native cleanup. Questions MUST use
 `report({text, question:true})`: plain text is always final, never a question.
 Call report alone after other tools finish. Line 1 of `text` is the answer: a
-first line over 160 characters is rejected with `put a one-line headline first,
-details below`, nothing is sent, the job does not end and report may be called
-again; an automatic plain final answer keeps its headline cut to 160 characters. One attempt is allowed per prompt;
+first line over 160 characters is split at its last word boundary within 160,
+and the overflow becomes the first line of the parent notice, before `Report:`
+and `Session:`; the whole text is still written to the report artifact, and
+a first token longer than 160 is cut at the limit rather than losing any
+characters (task-737). One attempt is allowed per prompt;
 question and failed attempts suppress duplicate sending/retry. Failures are
 recorded in the session and sent as an error outcome through the same durable
 parent inbox, then the child closes unless kept. This does not retry an ambiguous
@@ -120,8 +122,9 @@ Every outcome (final, question or error) goes through `sendAgentMessage`, the
 one durable inbox: the parent's Pi receives a labelled `result` agent message
 (`pi.sendMessage`, never its composer or `hc send`), so an unsent draft there is
 left alone. Final reports and questions are written in full to a private
-`/tmp/pi-herdr-report-*/report.md`; the message carries only the labelled headline
-(`Final report (<role>): …` / `Question (<role>): …`), that report path and the
+`/tmp/pi-herdr-report-*/report.md`; the message carries the labelled headline
+(`Final report (<role>): …` / `Question (<role>): …`), any headline overflow
+below it, that report path and the
 kept session path. An error carries its cause in the headline,
 `Error (<role>): <cause>`, plus the session (or a note that startup wrote none). The parent must be a Pi (its inbox receiver). The receipt is
 the queued envelope id; it proves the message was queued, not that the parent

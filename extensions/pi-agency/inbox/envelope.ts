@@ -151,12 +151,27 @@ export const headlineOf = (body: string) => body.trim().split("\n")[0]?.trim() ?
 
 /** An agent's own message or report opens with a one-line headline of at most this many characters (task-557). */
 export const HEADLINE_MAX = 160;
-/** Reject an overlong first line before anything is sent; nothing is queued or logged. Length is the only rule. */
-export function checkHeadline(text: string): void {
-  const length = headlineOf(text).length;
-  if (length > HEADLINE_MAX) {
-    throw new Error(`Nothing sent: the first line is ${length} characters, ${length - HEADLINE_MAX} over the ${HEADLINE_MAX}-character headline limit. Shorten line 1 (any punctuation is fine) or move the extra text to the lines below it, then resend.`);
+/**
+ * Normalize a message's headline (task-737): a headline longer than HEADLINE_MAX is split at its last
+ * word boundary within the limit, and the rest becomes the first detail line, before any existing ones.
+ * The headline is the one `headlineOf` reads (the first non-blank line, trimmed), wherever leading blank
+ * lines put it; only the split boundary changes, so the prefix, the remaining detail lines and any
+ * trailing blank lines stay byte-for-byte. Nothing is dropped — an unbroken first token is cut at the
+ * limit — and a body whose headline already fits is returned unchanged. Pure; shared by agent_send and report.
+ */
+export function splitHeadline(text: string): string {
+  if (headlineOf(text).length <= HEADLINE_MAX) return text;
+  const start = text.length - text.trimStart().length;
+  const newline = text.indexOf("\n", start);
+  const line = text.slice(start, newline < 0 ? text.length : newline);
+  const end = start + line.trimEnd().length;
+  let split = -1;
+  for (let at = Math.min(start + HEADLINE_MAX, end - 1); at > start; at--) {
+    if (/\s/.test(text[at]!)) { split = at; break; }
   }
+  const cut = split < 0 ? start + HEADLINE_MAX : split;
+  const next = split < 0 ? cut : cut + 1;
+  return `${text.slice(0, cut)}\n${text.slice(next)}`;
 }
 
 let machineName: string | undefined;

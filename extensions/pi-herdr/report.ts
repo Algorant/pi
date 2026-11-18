@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHcReportRenderer, type HcReportDetails } from "../pi-ui/tool-ui/custom-tools/hc-report.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
-import { checkHeadline, HEADLINE_MAX } from "../pi-agency/inbox/envelope.ts";
+import { HEADLINE_MAX, splitHeadline } from "../pi-agency/inbox/envelope.ts";
 import { peerText } from "../../scripts/whois.ts";
 import { AGENCY_PROFILE_FLAG } from "../pi-agency/subagents/profile.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
@@ -65,12 +65,13 @@ export function registerHcReport(pi: ExtensionAPI) {
     // agent message through the durable inbox (pi.sendMessage), never its composer.
     const file = join(await mkdtemp(join(tmpdir(), "pi-herdr-report-")), "report.md");
     await writeFile(file, text, { mode: 0o600 });
-    // A report call was checked in execute; only an automatic plain final answer can still be longer.
-    const first = text.split("\n")[0].trim();
-    const headline = first.length > HEADLINE_MAX ? `${first.slice(0, HEADLINE_MAX - 1)}…` : first;
+    // The whole text is the artifact; the parent's notice carries the same first line, normalized by the
+    // shared splitter so any overflow stays as the notice's first body line, before Report and Session.
+    const label = `${args.question ? "Question" : "Final report"} (${role}): `;
+    const notice = splitHeadline(`${label}${text.split("\n")[0]?.trim() ?? ""}`);
     // One attempt; an unconfirmed drop fails into the error outcome and is never resent.
     const { env } = await sendAgentMessage(ctx, { terminal: parent, kind: "result",
-      body: `${args.question ? "Question" : "Final report"} (${role}): ${headline}\nReport: ${file}\nSession: ${session}` });
+      body: `${notice}\nReport: ${file}\nSession: ${session}` });
     ended = true; // questions finish this job too; keep is the only retention opt-out
     return { content: [{ type: "text", text: `${args.question ? "Question" : "Final report"} queued as ${env.id} in the parent's inbox. This job is finished.` }],
       details: { parent: peerText(env.to, env.from.machine), terminal: peerText(env.from, env.from.machine), session, file, message: env.id, question: !!args.question, kept: self.keep }, terminate: true };
@@ -78,13 +79,11 @@ export function registerHcReport(pi: ExtensionAPI) {
 
   const tool = {
     name: "report", label: "Report",
-    description: `Queue the job's answer or question for its native parent's inbox, then end this job. Line 1 of text is the answer: one line of at most ${HEADLINE_MAX} characters, details below; a longer first line is rejected unsent and you may call report again. The child closes unless the parent/user explicitly kept it. Call alone after other tools finish.`,
+    description: `Queue the job's answer or question for its native parent's inbox, then end this job. Line 1 of text is the answer: one line of at most ${HEADLINE_MAX} characters, details below; a longer first line is split at its last word boundary within ${HEADLINE_MAX}, and its overflow becomes the first line of the parent notice (the whole text stays in the report artifact). The child closes unless the parent/user explicitly kept it. Call alone after other tools finish.`,
     parameters: Type.Object({ text: Type.String({ minLength: 1 }), question: Type.Optional(Type.Boolean()) }),
     ...createHcReportRenderer(),
     async execute(_id: string, args: ReportArgs, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
-      // An overlong headline is the model's to fix: nothing is sent, the job is not ended, and report may be called again.
-      try { checkHeadline(args.text); }
-      catch (error) { return { content: [{ type: "text" as const, text: (error as Error).message }], details: undefined, isError: true }; }
+      // An overlong headline is normalized by the shared splitter (task-737); it never blocks a report.
       try { return await deliver(args, ctx); }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error);
