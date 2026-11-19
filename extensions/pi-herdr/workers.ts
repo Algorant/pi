@@ -28,6 +28,7 @@ import {
   withCheckIn, workerModelArgument, benchmarkWorkerModelArgument, type WorkerProgressInput, type WorkerReportInput,
 } from "../pi-agency/workers/shared.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
+import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { CHILD_EXIT, hcFind, hcJson, hcText, isHc } from "./core.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, workerLabel } from "../../scripts/whois.ts";
 import { briefContract, hasWorktree, projectRules, requireContract, taskFreeChecks, workerBase, workerName } from "../pi-agency/workers/contract.ts";
@@ -754,8 +755,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const worktree = params.worktree ?? true;
     const needsAlgorant = params.needsAlgorant ?? false;
     const benchmark = params.benchmarkModel ? benchmarkWorkerModelArgument(ctx.modelRegistry, params.benchmarkModel) : undefined;
-    const ordinary = benchmark ? undefined : workerModelArgument(ctx.modelRegistry);
-    const model = benchmark?.argument ?? ordinary!.argument;
+    const model = benchmark?.argument;
     const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark ? {
       requestedModel: params.benchmarkModel!, selectedModel: benchmark.model, providerExemption: benchmark.providerExemption,
       providerExemptionModel: benchmark.providerExemptionModel, fast: benchmark.fast, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt,
@@ -786,6 +786,16 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (!label) throw new Error("Worker requires label (2-5 plain words).");
     const agent = await nameFor(label, worktree ? project.repoRoot : undefined);
     const branch = worktree ? agent : targetBranch;
+    // Every read-only precondition has passed: resolve the ordinary worker role now, cutting
+    // over only when quota alone blocks its set, before any checkout, record or terminal. The
+    // explicit benchmark selector above is a separate named path and keeps its own preflight.
+    const ordinaryResolution = benchmark ? undefined : await resolveRoleForSwitch("worker", ctx.modelRegistry, () => workerModelArgument(ctx.modelRegistry), { signal });
+    if (ordinaryResolution && "refusal" in ordinaryResolution) throw new Error(`${ordinaryResolution.refusal} Nothing was started.`);
+    const ordinary = ordinaryResolution && "value" in ordinaryResolution ? ordinaryResolution.value : undefined;
+    const workerModel = model ?? ordinary!.argument;
+    const workerSwitch = ordinaryResolution && "switched" in ordinaryResolution && ordinaryResolution.switched
+      ? ` Set ${ordinaryResolution.switched.from} → ${ordinaryResolution.switched.to} for worker (cutover ${ordinaryResolution.switched.operation ?? "none"}${ordinaryResolution.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+      : "";
     const deliveryId = createHcDeliveryId();
     let checkoutPath: string | undefined;
     let provisioningFailed = false;
@@ -822,7 +832,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       const now = Date.now();
       const record: HcWorkerRecord = {
         version: 8, deliveryId, invocationId: createHcInvocationId(), ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, from: params.from, ownerSessionId: owner.sessionId, owner: { core: owner.core, terminal: owner.terminal },
-        childAgent: agent, label, childSessionId: newId(), model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), createdAt: now, updatedAt: now, state: "pending", planRequired,
+        childAgent: agent, label, childSessionId: newId(), model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), createdAt: now, updatedAt: now, state: "pending", planRequired,
         direction: { request: params.prompt.trim(), ofDeliveryId: deliveryId },
         integration: { repoKey: project.repoKey, worktree, baseHead, source: { checkoutPath, branch }, target: { checkoutPath: project.repoRoot, branch: targetBranch } },
       };
@@ -838,15 +848,17 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       let started: any;
       try { started = await launchInvocation(record, prompt, ctx.modelRegistry); }
       catch (error) { launchUncertain = error instanceof LaunchError ? error.uncertain : true; throw error; }
-      if (ordinary?.set && ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${model}; set ${ordinary.set}, quota ${ordinary.quota}`, "info");
-      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${model} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
+      if (ordinary?.set && ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${workerModel}; set ${ordinary.set}, quota ${ordinary.quota}`, "info");
+      const switched = ordinaryResolution && "switched" in ordinaryResolution ? ordinaryResolution.switched : undefined;
+      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${workerModel} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${switched ? ` Set ${switched.from} → ${switched.to} for worker (cutover ${switched.operation ?? "none"}${switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
         { host: "hc", state: "starting", taskId: task?.id, title: task?.title, label, worktree, needsAlgorant, from: params.from, agent, terminal: started.address, core: owner.core, worktreePath: checkoutPath, branch, deliveryId, invocationId: record.invocationId,
-          integrationTarget: record.integration.target, sessionId: record.childSessionId, model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), outlivesParent: true });
+          integrationTarget: record.integration.target, sessionId: record.childSessionId, model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(switched ? { modelSwitched: switched } : {}), outlivesParent: true });
     } catch (error) {
+      const note = workerSwitch ? `${workerSwitch} That cutover stays applied.` : "";
       const identity = `${task ? `Task ${task.id}, ` : ""}Worker ${agent}, checkout ${checkoutPath ?? "(none)"}, branch ${branch}, delivery ${deliveryId}`;
-      if (provisioningFailed) throw new Error(`${diagnosticText(error)} Preserve ${identity} for inspection (wt -C ${JSON.stringify(checkoutPath)} config state logs). Resolve provisioning or dispose this checkout through Worktrunk before retrying; do not blindly rerun creation hooks.`);
+      if (provisioningFailed) throw new Error(`${diagnosticText(error)} Preserve ${identity} for inspection (wt -C ${JSON.stringify(checkoutPath)} config state logs). Resolve provisioning or dispose this checkout through Worktrunk before retrying; do not blindly rerun creation hooks.${note}`);
       if (claimed || written && launchAttempted) {
-        throw new Error(`${diagnosticText(error)} Captured Worker ${agent} is preserved. ${launchUncertain ? "The native launch outcome is unconfirmed: inspect hc ls and worker_status before anything else." : "No Worker invocation started."} The pending record remains the identity of ${identity}: continue it with worker_resume (same checkout and session) or dispose it with worker_discard. Do not rerun dendra_start or claim again.`);
+        throw new Error(`${diagnosticText(error)} Captured Worker ${agent} is preserved. ${launchUncertain ? "The native launch outcome is unconfirmed: inspect hc ls and worker_status before anything else." : "No Worker invocation started."} The pending record remains the identity of ${identity}: continue it with worker_resume (same checkout and session) or dispose it with worker_discard. Do not rerun dendra_start or claim again.${note}`);
       }
       if (checkoutPath && worktree) {
         try {
@@ -854,10 +866,10 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
           await removeNativeWorkerCheckout({ cwd: project.repoRoot }, branch, checkInNotifier(ctx));
           if (written) await rm(hcRecordPath(deliveryId), { force: true });
         } catch (cleanup) {
-          throw new Error(`${diagnosticText(error)} Automatic cleanup of the new unclaimed checkout failed; preserve ${identity} and dispose it through Worktrunk. ${diagnosticText(cleanup)}`);
+          throw new Error(`${diagnosticText(error)} Automatic cleanup of the new unclaimed checkout failed; preserve ${identity} and dispose it through Worktrunk. ${diagnosticText(cleanup)}${note}`);
         }
       }
-      throw error;
+      throw note ? new Error(`${diagnosticText(error)}${note}`) : error;
     }
   }
 

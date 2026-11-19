@@ -6,6 +6,8 @@ import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/cust
 import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } from "../pi-agency/inbox/envelope.ts";
 import { localSettingsPath, temporaryAgencySettings } from "../pi-agency/local-settings.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
+import { resolveReviewEntry, resolveRoleEntry } from "../pi-agency/model-roles.ts";
+import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
 import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, manusModelArgument, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
 import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
@@ -200,13 +202,32 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
     const name = await nameFor(label);
+    // Helpers resolve their own role inside the child; resolving it here — after every
+    // read-only precondition, before any terminal — refuses a blocked launch, cutting over
+    // first only when quota alone blocks it. A reviewer's author model is this Pi's own
+    // current model (the same fact it publishes as pi.model, which the child reads), so a
+    // session without one fails here instead of launching a reviewer that cannot route.
+    const callerModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+    if (params.kind === "reviewer" && callerModel === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
+    const helper = params.kind === "reviewer"
+      ? await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel })
+      : await resolveRoleForSwitch("subagent", ctx.modelRegistry, () => resolveRoleEntry("subagent", ctx.modelRegistry));
+    if ("refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
+    const helperSwitch = helper.switched
+      ? ` Set ${helper.switched.from} → ${helper.switched.to} for ${params.kind} (cutover ${helper.switched.operation ?? "none"}${helper.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+      : "";
     // The caller is the native parent: the report comes to its inbox, a reviewer reads its pi.model.
     // The task is Pi's first message on its command line; child-exit tells the parent if it ends unreported.
-    const started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${params.kind}`,
-      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--agency-profile", params.kind, "--", params.task.trim()], name);
+    let started: any;
+    try {
+      started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${params.kind}`,
+        "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--agency-profile", params.kind, "--", params.task.trim()], name);
+    } catch (error) {
+      throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
+    }
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started ${params.kind} ${label} (${name}, ${started.address}) in ${ctx.cwd}. Its report arrives in your inbox; do not wait or poll.`,
-      { kind: params.kind, label, name, terminal: started.address, cwd: ctx.cwd, route: self.route, ...closed });
+    return result(`Started ${params.kind} ${label} (${name}, ${started.address}) in ${ctx.cwd}. Its report arrives in your inbox; do not wait or poll.${helperSwitch}`,
+      { kind: params.kind, label, name, terminal: started.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...closed });
   }
 
   async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
@@ -219,7 +240,6 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     requireOpenRequest(params.from, self);
     // The manus role (its own entry, never the orchestrator or worker one) is resolved
     // before any worktree, record or terminal. A missing role or cell fails closed here.
-    const manusModel = manusModelArgument(ctx.modelRegistry);
     const repo = await nativeProjectIdentity(ctx.cwd);
     const project = basename(dirname(repo.repoKey));
     const task = params.taskId ? await tandemShow(params.taskId, repo.repoRoot) : undefined;
@@ -238,6 +258,15 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const branch = name;
     const baseHead = await nativeHead(repo.repoRoot, "Manus project");
     const targetBranch = await checkoutBranch(repo.repoRoot, "Manus project");
+    // Every read-only precondition has passed: resolve the manus role now, cutting over only
+    // when quota alone blocks its set, and before any checkout, record or terminal exists.
+    const manus = await resolveRoleForSwitch("manus", ctx.modelRegistry, () => manusModelArgument(ctx.modelRegistry), { signal });
+    if ("refusal" in manus) throw new Error(`${manus.refusal} Nothing was started.`);
+    const manusModel = manus.value;
+    const manusSwitch = manus.switched
+      ? ` Set ${manus.switched.from} → ${manus.switched.to} for manus (cutover ${manus.switched.operation ?? "none"}${manus.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+      : "";
+    try {
 
     let cwd = repo.repoRoot;
     const childSessionId = newId();
@@ -297,11 +326,15 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
+    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
+    } catch (error) {
+      // A switch that already happened stays applied; a later failure never hides it.
+      throw new Error(`${diagnosticText(error)}${manusSwitch ? `${manusSwitch} That cutover stays applied.` : ""}`);
+    }
   }
 
-  async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, _signal: AbortSignal | undefined, _ctx: ExtensionContext): Promise<Result> {
+  async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     // A Ceph's hc name is its project (its route and the duplicate check); its label names it for Algorant.
     const name = params.project;
@@ -327,6 +360,18 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const existing = candidates[0];
     if (existing && existing.folder !== folder) throw new Error(`App space ${existing.id} is named ${name} but its folder is ${existing.folder}, not ${folder}; clarify. Nothing was started.`);
     if (existing?.tabs?.some((tab: any) => tab.name === "main")) throw new Error(`App space ${existing.name} (${existing.id}) already has a main tab without a live Ceph named ${name}: a repair to clarify, not a second Ceph. Nothing was started.`);
+
+    // Only now — every read-only precondition has passed — is the Ceph's own role resolved,
+    // and, when this machine's set is blocked by quota alone, cut over by Herdra's same
+    // selector. The child then starts on this exact model, so its startup role hook skips
+    // and it can never refuse to consume the kickoff already on its command line.
+    const orchestrator = await resolveRoleForSwitch("orchestrator", ctx.modelRegistry, () => resolveRoleEntry("orchestrator", ctx.modelRegistry), { signal });
+    if ("refusal" in orchestrator) throw new Error(`${orchestrator.refusal} Nothing was started.`);
+    const cephModel = `${orchestrator.value.entry.model}:${orchestrator.value.entry.thinking}`;
+    const cephSwitch = orchestrator.switched
+      ? ` Set ${orchestrator.switched.from} → ${orchestrator.switched.to} for orchestrator (cutover ${orchestrator.switched.operation ?? "none"}${orchestrator.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+      : "";
+    try {
 
     let spaceId: string;
     let tandemTab: string;
@@ -362,32 +407,37 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", folder, "--label", `herdr.space=${spaceId}`,
-        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), kickoff], name);
+        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--model", cephModel, kickoff], name);
     } catch (error) { throw new Error(`${diagnosticText(error)} Space ${spaceId} is kept as it is; no automatic removal.`); }
     const tab = await nameTab(await localAppHost(), spaceId, started.address, "main");
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}.${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.`,
-      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, brief: kickoff, ...tab, ...closed });
+    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.`,
+      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, modelSet: orchestrator.value.set, modelQuota: orchestrator.value.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, ...tab, ...closed });
+    } catch (error) {
+      // A switch that already happened is a committed machine change: never hide it behind a
+      // later failure of the space, tab or launch.
+      throw new Error(`${diagnosticText(error)}${cephSwitch ? `${cephSwitch} That cutover stays applied.` : " Nothing else was changed."}`);
+    }
   }
 
   const tools = [
     {
       name: "dendra_start", label: "Dendra Start", executionMode: "sequential" as const,
-      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. A temporary machine policy can pause reviewer launches; nothing is started then. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
+      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. A temporary machine policy can pause reviewer launches; nothing is started then. It resolves the child's own role after the read-only checks and, when quota alone blocks that set, cuts it over first. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); optional benchmarkModel is Worker-only and selects a fixed approved contender; outcomes arrive in your inbox.",
       parameters: DendraParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => dendraStart(params, signal, ctx),
     },
     {
       name: "manus_start", label: "Manus Start",
-      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. It resolves the native manus role (or the selected model set's manus cell) before any side effect and passes that exact model; there is no orchestrator or worker fallback. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
+      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. It resolves the native manus role (or the selected model set's manus cell) before any worktree, record or terminal, cutting that role over first when quota alone blocks its set, and passes that exact model; there is no orchestrator or worker fallback. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
       promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement; reports through your inbox.",
       parameters: ManusParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => manusStart(params, signal, ctx),
     },
     {
       name: "ceph_start", label: "Ceph Start",
-      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created and shown; an existing one is reused without switching), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. The kickoff ends with your return route.",
+      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created and shown; an existing one is reused without switching), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. After those read-only checks it resolves the orchestrator role, cutting it over first when quota alone blocks the set, and launches the Pi with that exact model so its kickoff is consumed. The kickoff ends with your return route.",
       promptSnippet: "Start a named Ceph for a prepared project (projectify first); it reports back to you when ready.",
       parameters: CephParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => cephStart(params, signal, ctx),

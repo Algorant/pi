@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "./events.ts";
+import { OPENAI_FAST_SET_EVENT, OPENAI_FAST_STATE_EVENT, type OpenAIFastRequest, type OpenAIFastState } from "./events.ts";
 import { CONTEXT_PREFIX_EVENT, type ContextPrefix } from "../../lib/context-prefix.ts";
 import { applyOpenAIFastRequestPolicy } from "./fast-request.ts";
 import type { ProjectImages } from "../image-projection.ts";
@@ -106,20 +106,28 @@ export default function piOpenAI(pi: ExtensionAPI, projectImages: ProjectImages)
   pi.on("agent_start", () => { contextPrefixes.clear(); });
 
   const publishFastState = () => pi.events.emit(OPENAI_FAST_STATE_EVENT, fastState(fastEnabled, currentModel));
+  /** The one setter for the session-local Fast state: the /fast command and the role quota gate both use it. */
+  const setFast = (enabled: boolean) => {
+    fastEnabled = enabled;
+    publishFastState();
+  };
+  pi.events.on(OPENAI_FAST_SET_EVENT, (value) => {
+    const request = value as OpenAIFastRequest | undefined;
+    if (request && typeof request.enabled === "boolean") setFast(request.enabled);
+  });
 
   pi.registerCommand("fast", {
     description: "Control session-local OpenAI Fast mode: /fast on|off|toggle|status.",
     handler: async (args, ctx) => {
       currentModel = ctx.model;
       const action = args.trim().toLowerCase() || "status";
-      if (action === "on") fastEnabled = true;
-      else if (action === "off") fastEnabled = false;
-      else if (action === "toggle") fastEnabled = !fastEnabled;
+      if (action === "on") setFast(true);
+      else if (action === "off") setFast(false);
+      else if (action === "toggle") setFast(!fastEnabled);
       else if (action !== "status") {
         ctx.ui.notify("Usage: /fast on|off|toggle|status", "warning");
         return;
-      }
-      publishFastState();
+      } else publishFastState();
       ctx.ui.notify(formatFastStatus(fastState(fastEnabled, currentModel)), "info");
     },
   });

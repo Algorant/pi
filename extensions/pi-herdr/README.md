@@ -272,8 +272,16 @@ checkout or space) and names it; nothing is removed automatically.
   `hc run --bg --rm --no-notify --json --name <slug> --cwd <cwd> --label label=<label>
   --label kind=<kind> -- child-exit pi <owner's -e set> --agency-profile <kind> -- "<task>"`
   and requires a live terminal with that name. The report arrives as before;
-  an end without one arrives from `child-exit`.
-- `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?, benchmarkModel?}` is the one Worker start. Exactly taskId OR brief, label required Task-free. A Task-free Worker is small self-contained work; larger work gets a Task or manus. No fabricated Task, `change` shortcut or alternate launcher.
+  an end without one arrives from `child-exit`. After every unrelated read-only
+  precondition and before that launch it resolves the child's own role with the
+  resolver the child will use — `subagent` for scout and researcher, `review`
+  (opposite-company, with the pause, and this Pi's own current model as the author)
+  for a reviewer — so a catalog, credential, Fast, pause or missing-author-model
+  refusal happens before a terminal exists. A role whose selected set is blocked by
+  quota alone asks Herdra's `herdra-cutover role` for a column with room first
+  (`agent/extensions/pi-agency/herdra-role.ts`), and only then launches; the child
+  re-resolves the committed map itself.
+- `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?, benchmarkModel?}` is the one Worker start. Exactly taskId OR brief, label required Task-free. A Task-free Worker is small self-contained work; larger work gets a Task or manus. No fabricated Task, `change` shortcut or alternate launcher. Its ordinary `worker` role is resolved after the read-only dispatch preconditions and before the checkout, record and terminal, and a quota-only block is answered by Herdra's selector first; the explicit `benchmarkModel` path below keeps its own separate preflight.
 - `benchmarkModel` is the explicitly approved, Worker-only selector for `openai/gpt-6-luna` or `anthropic/claude-sonnet-5-5`; a saved record or continuation that still names the legacy `openai-codex/gpt-6-luna` is decoded, never offered as a new selection. Thinking is fixed to `high`; Luna's existing pi-providers session default keeps Fast on. The launch records the exact requested/selected model and named provider exemption. Only this explicit selection bypasses provider filtering, and only for that exact contender; catalog and configured auth remain mandatory. Both selected providers require a fresh (at most 30 minutes old) usage cache, a current Week below 90%, and every reported Week/5h window below 90%; the gate is repeated before each new Worker invocation, including continuations to kept sessions. Missing Week or stale/malformed readings fail before checkout, record, claim or terminal creation. Missing 5h is recorded as `not reported`, never zero. No automatic contender/default fallback. Ordinary Worker/helper/manus/reviewer selection and defaults are unchanged; no `model-roles.json` or settings edit.
 - `manus_start {taskId?, brief?, label?, worktree?, needsAlgorant?, direction?}` resolves the unique app host whose native space ID matches the caller's `herdr.space` label and whose tab contains the caller terminal; when `herdr.tab` exists it must match too. This also supports existing local callers that have no `herdr.tab` label, while still requiring unique actual terminal membership. It checks the app space's native machine alias against the caller's permanent HC core id using that app host's `hc machine ls`; it discovers only the local app and currently connected peers. Missing app binaries are skipped; no membership, multiple memberships, or unresolved identity refuses before side effects. The HC launch, worktree, starter and inbox return route remain on the caller's core. With default worktree:true it creates the checkout through Worktrunk, `wt switch --create <branch> --base @ --no-cd`, so a manus branches from its starter's HEAD exactly as a Worker does, then writes a manus record (below) before launching, so a created checkout always has an owner. It resolves the `manus` role (its own entry, or the selected named set's `manus` cell) before any worktree or record and passes that exact `--model provider/model:thinking` to the child; there is no orchestrator or worker fallback, and a missing role or cell refuses before side effects. Its record's `model` states that selection (historical records may still say `pi-default`). Native `--rm --no-parent` under `child-exit` (its `starter=` hears an unreported end), optional task=, starter=, label= and needsAlgorant= labels. The child receives the unqualified native `herdr.space` id and uses the resolved host for its one app rename; it never merges or closes itself. A failed launch keeps the checkout and names the record, so the starter can finish or discard it. No focus/wait/poll.
 - Task-free brief strings preserve the request verbatim with nonempty Outcome / Scope / Exclusions / Check / Done sections (Markdown headings accepted). Scope lists repo-relative files/directories, directories ending in `/`; Check uses runnable `$ ` lines plus manual observations. Managed context adds label, owner/return route, project/checkout and needsAlgorant. Git and originating inbox thread are the record, alongside existing Worker lifecycle/receipts.
@@ -286,6 +294,15 @@ checkout or space) and names it; nothing is removed automatically.
   `main` tab is a repair to clarify) or creates the new space with
   `space.new --tab tandem`, then starts `pi` named `<project>` (labels
   `label=<label or "<project> Ceph">`, `kind=ceph`) in it and renames its tab `main`.
+  Only after every read-only precondition (folder, checkout root, Tandem workspace,
+  duplicate terminals, app spaces) does it resolve the orchestrator role and, when
+  quota alone blocks that set, ask `herdra-cutover role orchestrator` for the next
+  column with room; it then launches with that exact `--model
+  provider/model:thinking`, so the new Ceph skips the startup role hook, never refuses
+  its kickoff, and starts on the committed choice. A blocked, stale or unusable
+  outcome refuses before the space, tab or terminal is touched, and an invalid
+  dispatch never changes the machine's role. The card shows the cutover and any
+  partial outcome; a later failure says the cutover stays applied.
 
 Raw `pi "<brief>"` launches have no hc first message: their start proof is the
 live terminal with the requested name, and the real proof is the child's own

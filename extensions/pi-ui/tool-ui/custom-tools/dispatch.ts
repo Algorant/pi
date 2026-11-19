@@ -32,6 +32,24 @@ function idsOf(d: Details): string {
   return ids.length ? ` (${ids.join(", ")})` : "";
 }
 
+/** A quota cutover this launch made before its side effects (task-745): never buried. */
+function switchMove(s: Record<string, any>): string {
+  const from = text(s.from) || "unset";
+  const to = text(s.to);
+  if (text(s.status) === "switched") return `${from} → ${to || "?"}`;
+  return `${from} (${text(s.status) || "unchanged"})`;
+}
+function switchShort(d: Details): string {
+  const s = d.modelSwitched && typeof d.modelSwitched === "object" ? d.modelSwitched : undefined;
+  if (!s) return "";
+  return `role set ${switchMove(s)}${s.partial ? " · partial" : ""}`;
+}
+function switchLong(d: Details): string {
+  const s = d.modelSwitched && typeof d.modelSwitched === "object" ? d.modelSwitched : undefined;
+  if (!s) return "";
+  return `quota-switched ${switchMove(s)}${text(s.operation) ? ` · cutover ${text(s.operation)}` : ""}${s.partial ? " · partial: some typed requests failed or a Pi was skipped" : ""}`;
+}
+
 function benchmarkText(args: Args, d: Details): string {
   const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : {};
   const selected = text(benchmark.selectedModel) || text(args.benchmarkModel);
@@ -60,6 +78,8 @@ function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: The
     if (where) parts.push(theme.fg("muted", ` · ${where}`));
     if (details.requestClosed) parts.push(theme.fg("dim", ` · closed ${text(details.requestClosed)}`));
     if (details.requestCloseError || details.tabError || details.notChecked?.length) parts.push(theme.fg("warning", " · see details"));
+    const move = switchShort(details);
+    if (move) parts.push(theme.fg("warning", ` · ${move}`));
     const benchmark = benchmarkText(args, details);
     if (benchmark) parts.push(theme.fg("warning", benchmark));
   }
@@ -74,6 +94,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
   const sections = error
     ? [section("Error", [
       theme.fg("error", truncatePlain(output, expanded ? 4000 : 500)),
+      switchLong(d) ? fieldLine(theme, "role set", switchLong(d), "warning") : undefined,
       text(args.benchmarkModel) ? fieldLine(theme, "benchmark", `${text(args.benchmarkModel)} · approved-benchmark-provider-exception for selected contender`, "warning") : undefined,
     ])]
     : pending ? [] : [section("Started", [
@@ -83,6 +104,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
       text(d.taskId) ? fieldLine(theme, "task", joinTitleParts([text(d.taskId), text(d.title) ? truncatePlain(text(d.title), expanded ? 200 : 80) : undefined]), "toolOutput") : undefined,
       d.benchmark ? fieldLine(theme, "benchmark", `${text(d.benchmark.requestedModel)} → ${text(d.benchmark.selectedModel)} · ${text(d.benchmark.providerExemption)} for ${text(d.benchmark.providerExemptionModel)} · high thinking · ${text(d.benchmark.quota)} · Fast ${d.benchmark.fast ? "on" : "off"}`, "warning") : undefined,
       text(d.model) && tool === "manus_start" ? fieldLine(theme, "model", joinTitleParts([text(d.model), text(d.modelSet) ? `set ${text(d.modelSet)}` : undefined, text(d.modelQuota) ? truncatePlain(text(d.modelQuota), expanded ? 300 : 120) : undefined]), "muted") : undefined,
+      switchLong(d) ? fieldLine(theme, "role set", switchLong(d), "warning") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "needsAlgorant", String(d.needsAlgorant ?? false), d.needsAlgorant ? "warning" : "muted") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "isolation", d.worktree === false ? "shared checkout · retained on finish" : "Worktrunk worktree", "muted") : undefined,
       text(d.cwd) ? fieldLine(theme, "cwd", truncatePlain(text(d.cwd), 200), "muted") : undefined,

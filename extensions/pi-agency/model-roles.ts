@@ -237,23 +237,48 @@ function selectedCell<R extends ModelSetRole>(sets: ModelRoles["sets"], selectio
   return { set: selection[role], cell: sets[selection[role]]![role]! };
 }
 
-/** Catalog, auth, Fast tier and the set quota rule for one entry of a selected set. */
-function checkSetEntry(entry: RoleEntry, registry: RoleRegistry, where: string): { reason: string } | { catalog: CatalogModel; quota: string } {
+/**
+ * Why a selected set's cell cannot be used right now, structurally: `quota` is the
+ * provider-wide limit rule (the only kind a caller may answer by cutting over to
+ * another set), `unavailable` is catalog or credentials, `fast` is an ineligible
+ * Fast entry (a configuration error, never availability).
+ */
+export type ModelSetFailureKind = "quota" | "unavailable" | "fast";
+
+/** A selected set cannot serve its role now; `kind` says whether quota alone is the reason. */
+export class ModelSetUnavailableError extends Error {
+  /**
+   * `set` is the row that was checked (for review, the effective routed row); `configuredSet`
+   * is the key actually stored in `"pi-agency".modelSets`, which is what `herdra-cutover role
+   * --expect` compares. They differ only when review routes a claude/openai key to another row.
+   */
+  constructor(message: string, readonly kind: ModelSetFailureKind, readonly role: string, readonly set: string, readonly model: string, readonly configuredSet: string = set) {
+    super(message);
+    this.name = "ModelSetUnavailableError";
+  }
+}
+
+/** Catalog, auth, Fast tier and the set quota rule for one entry of a selected set; `quota: false` skips only the quota rule. */
+function checkSetEntry(entry: RoleEntry, registry: RoleRegistry, where: string, policy: { quota?: boolean } = {}): { failure: { kind: ModelSetFailureKind; reason: string } } | { catalog: CatalogModel; quota?: string } {
   const separator = entry.model.indexOf("/");
   const provider = entry.model.slice(0, separator);
   const catalog = registry.find(provider, entry.model.slice(separator + 1));
-  if (!catalog) return { reason: "not in the model catalog" };
-  if (!registry.hasConfiguredAuth(catalog)) return { reason: `no credentials for provider ${provider}` };
-  if (entry.fast && !isOpenAICodexFastTarget(catalog)) throw new Error(`${where} entry ${entry.model} sets fast:true but is not eligible for the Fast priority tier`);
+  if (!catalog) return { failure: { kind: "unavailable", reason: "not in the model catalog" } };
+  if (!registry.hasConfiguredAuth(catalog)) return { failure: { kind: "unavailable", reason: `no credentials for provider ${provider}` } };
+  if (entry.fast && !isOpenAICodexFastTarget(catalog)) return { failure: { kind: "fast", reason: "not eligible for the Fast priority tier" } };
+  if (policy.quota === false) return { catalog };
   const quota = setQuota(provider);
-  return "blocked" in quota ? { reason: quota.blocked } : { catalog, quota: quota.notice };
+  return "blocked" in quota ? { failure: { kind: "quota", reason: quota.blocked } } : { catalog, quota: quota.notice };
 }
 
 function resolveSetEntry(role: Exclude<ModelSetRole, "review">, registry: RoleRegistry, sets: ModelRoles["sets"], selection: ModelSetSelection, path: string): ResolvedRoleEntry {
   const { set, cell } = selectedCell(sets, selection, role, path);
   const checked = checkSetEntry(cell, registry, `${path}: sets.${set}.${role}`);
-  if ("reason" in checked) throw new Error(`Model set "${set}" ${role} target ${cell.model} is unavailable: ${checked.reason}. No fallback to other sets.`);
-  return { entry: cell, catalog: checked.catalog, skipped: [], set, quota: checked.quota };
+  if ("failure" in checked) {
+    if (checked.failure.kind === "fast") throw new Error(`${path}: sets.${set}.${role} entry ${cell.model} sets fast:true but is not eligible for the Fast priority tier`);
+    throw new ModelSetUnavailableError(`Model set "${set}" ${role} target ${cell.model} is unavailable: ${checked.failure.reason}. No fallback to other sets.`, checked.failure.kind, role, set, cell.model);
+  }
+  return { entry: cell, catalog: checked.catalog, skipped: [], set, ...(checked.quota ? { quota: checked.quota } : {}) };
 }
 
 /**
@@ -378,19 +403,28 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
       ? callerCompany === "anthropic" ? "claude" : callerCompany === "openai" ? "openai" : set
       : set;
     if (routed !== set) ({ set, cell } = selectedCell(sets, { ...settings.modelSets, review: routed }, "review", path));
+    // Quota is the only failure a caller may answer by cutting the review role over to another set.
+    const kinds: ModelSetFailureKind[] = [];
     for (const entry of cell) {
       if (modelCompany(entry.model, `${path}: sets.${set}.review entry ${entry.model}`) === callerCompany) {
         rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);
         continue;
       }
       const checked = checkSetEntry(entry, registry, `${path}: sets.${set}.review`);
-      if ("reason" in checked) {
-        rejected.push(`${entry.model} (${checked.reason})`);
+      if ("failure" in checked) {
+        // A Fast-ineligible entry is a configuration error, exactly as before: it aborts the
+        // list instead of being skipped.
+        if (checked.failure.kind === "fast") throw new Error(`${path}: sets.${set}.review entry ${entry.model} sets fast:true but is not eligible for the Fast priority tier`);
+        kinds.push(checked.failure.kind);
+        rejected.push(`${entry.model} (${checked.failure.reason})`);
         continue;
       }
-      return { entry, catalog: checked.catalog, skipped: rejected, set, quota: checked.quota };
+      return { entry, catalog: checked.catalog, skipped: rejected, set, ...(checked.quota ? { quota: checked.quota } : {}) };
     }
-    throw new Error(`No available opposite-company review model in set "${set}" for caller "${callerModel}": ${rejected.join("; ")}. No fallback to other sets.`);
+    const message = `No available opposite-company review model in set "${set}" for caller "${callerModel}": ${rejected.join("; ")}. No fallback to other sets.`;
+    // The configured key is what --expect compares; the routed row only names the cell.
+    if (kinds.length > 0 && kinds.every((kind) => kind === "quota")) throw new ModelSetUnavailableError(message, "quota", "review", set, "", settings.modelSets.review);
+    throw new Error(message);
   }
   const allowed = settings.modelProviders;
   for (const entry of review.models) {
@@ -409,4 +443,71 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
     return { entry, catalog: checked.catalog, skipped: rejected };
   }
   throw new Error(`No available opposite-company review model for caller "${callerModel}" in ${path}: ${rejected.join("; ")}`);
+}
+
+/**
+ * The candidate set names a caller supplies to `herdra-cutover role <role> --eligible`
+ * (task-745): every set that fills the role and whose cell passes the real catalog,
+ * credential and Fast-tier checks. Quota is deliberately NOT evaluated here: the
+ * cutover command owns the column walk and its quota rule under its lock.
+ */
+export function eligibleSetNames(role: Exclude<ModelSetRole, "review">, registry: RoleRegistry, path = modelRolesPath()): string[] {
+  const { sets } = loadModelRoles(path);
+  if (!sets) return [];
+  return Object.keys(sets).filter((name) => {
+    const cell = sets[name]![role];
+    return cell !== undefined && !("failure" in checkSetEntry(cell, registry, `${path}: sets.${name}.${role}`, { quota: false }));
+  });
+}
+
+/**
+ * One review candidate for `herdra-cutover role review --eligible` (task-745, Herdra 4f80fe7):
+ * the configured set key plus the providers whose entries this caller could actually use,
+ * in the cell's own row order, so Herdra judges that row's quota instead of a spare entry.
+ */
+export type ReviewCandidate = { set: string; providers: string[] };
+
+export function eligibleReviewSetNames(callerModel: string, registry: RoleRegistry, path = modelRolesPath()): ReviewCandidate[] {
+  const { sets } = loadModelRoles(path);
+  if (!sets) return [];
+  const callerCompany = modelCompany(callerModel, "Review caller");
+  const effective = (name: string): string => {
+    if (name !== "claude" && name !== "openai") return name;
+    return callerCompany === "anthropic" ? "claude" : callerCompany === "openai" ? "openai" : name;
+  };
+  return Object.keys(sets).flatMap((name) => {
+    // The name handed to the command must be the name whose row is actually resolved: a
+    // `claude`/`openai` name that routing would resolve to another set's row is not offered,
+    // because committing it would make Herdra test quota on a cell no reviewer would use.
+    const routed = effective(name);
+    if (routed !== name) return [];
+    const cell = sets[name]!.review;
+    if (cell === undefined) return [];
+    // Only a provider with an opposite-company entry that passes catalog, credentials and the
+    // Fast tier may be named: no same-company and no unavailable provider is ever included.
+    const providers: string[] = [];
+    for (const entry of cell) {
+      if (modelCompany(entry.model, `${path}: sets.${name}.review entry ${entry.model}`) === callerCompany) continue;
+      if ("failure" in checkSetEntry(entry, registry, `${path}: sets.${name}.review`, { quota: false })) continue;
+      const provider = entry.model.slice(0, entry.model.indexOf("/"));
+      if (!providers.includes(provider)) providers.push(provider);
+    }
+    return providers.length ? [{ set: name, providers }] : [];
+  });
+}
+
+/**
+ * The model a role's committed set names, read WITHOUT any availability check, so a caller
+ * can tell a policy-set model from a deliberate in-session choice (task-745). Undefined when
+ * no named sets are in force or the committed set has no cell for the role. Review is a list,
+ * so it is reported by each entry's model in order; callers that need one model use a single
+ * cell role.
+ */
+export function committedCellModels(role: ModelSetRole, path = modelRolesPath()): string[] {
+  const { sets } = loadModelRoles(path);
+  const name = localAgencySettings().modelSets?.[role];
+  if (!sets || name === undefined) return [];
+  const cell = sets[name]?.[role];
+  if (cell === undefined) return [];
+  return Array.isArray(cell) ? cell.map((entry) => entry.model) : [cell.model];
 }
