@@ -104,8 +104,6 @@ that.
   homelab-agents`. All three are operator actions.
 - No further agent identities, grants or PAT copies without Algorant.
 
-Consumer: `agent/scripts/browse-signin` uses existing Amazon item IDs and `email`/`password` fields mapped to the script's username/password keys in `~/.config/fnox/manifests/amazon.toml`, read through Algorant's personal `pass-cli` session, then adds short-lived browse secrets (see the `browsing` skill, [browse-signin-amazon](../browsing/docs/browse-signin-amazon.md)). It does not read credentials from the `fnox` vault or use `pass-agent-exec`; the personal-session reference grants no standing permission to discover or remap accounts.
-
 ### Ownership
 
 A project-owned application keeps its `fnox.toml` in its repository. An

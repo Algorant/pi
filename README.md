@@ -48,7 +48,7 @@ It's a showroom, not an installer.
 - **[agency](skills/agency/SKILL.md)** — companion skill to pi-agency
 - **[ask-me](skills/ask-me/SKILL.md)** — companion skill to pi-ask-me
 - **[audit](skills/audit/SKILL.md)** — WIP, what I reference when I want to review something or give it another pass
-- **[browsing](skills/browsing/SKILL.md)** — the browser an agent uses, obscura by default, browse on request
+- **[browsing](skills/browsing/SKILL.md)** — the browser an agent uses: my real Chromium through browse
 - **[herdr](skills/herdr/SKILL.md)** — companion skill to pi-herdr
 - **[memory](skills/memory/SKILL.md)** — companion skill to pi-memory
 - **[projectify](skills/projectify/SKILL.md)** — skill to bootstrap a new project
