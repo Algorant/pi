@@ -32,6 +32,8 @@ export function isOpenAICodexTarget(model: unknown): model is OpenAICodexModelLi
 
 /** GPT-6 Codex models measured faster with `service_tier: "priority"` (task-335-6). */
 export const OPENAI_CODEX_GPT_6_FAST_MODELS = new Set([
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
   "gpt-6.1-sol",
   "gpt-6-astra",
   "gpt-6-sol",
