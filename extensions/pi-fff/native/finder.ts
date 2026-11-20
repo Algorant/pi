@@ -9,6 +9,15 @@ type GrepMode = "plain" | "regex" | "fuzzy";
 const DISPOSED = "FFF finder was disposed";
 const HOST_SCRIPT = fileURLToPath(new URL("./host.ts", import.meta.url));
 
+// The child must run on the same Bun runtime that is running Pi. Pi is a
+// compiled Bun executable installed by mise, which unlinks it on update while
+// the running process keeps going: process.execPath then names a file that no
+// longer exists and the spawn fails with ENOENT. On Linux the kernel executable
+// link names the running executable itself, so it stays valid after the unlink.
+function bunRuntimePath(): string {
+  return process.platform === "linux" ? `/proc/${process.pid}/exe` : process.execPath;
+}
+
 function agentDir(): string {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
@@ -34,7 +43,7 @@ class FffHost {
 
   constructor(entry: string, onExit: (host: FffHost) => void) {
     this.proc = Bun.spawn({
-      cmd: [process.execPath, HOST_SCRIPT, entry],
+      cmd: [bunRuntimePath(), HOST_SCRIPT, entry],
       // Pi is a compiled Bun executable; BUN_BE_BUN makes it run the host
       // script with Pi's own Bun runtime.
       env: { ...process.env, BUN_BE_BUN: "1" },
