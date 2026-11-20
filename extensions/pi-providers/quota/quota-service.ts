@@ -144,11 +144,17 @@ function prioritizeModelWindows(windows: RateWindow[], modelId?: string): RateWi
 	return matched.length === 0 || matched.length === windows.length ? windows : [...matched, ...rest];
 }
 
-/** Provider-wide 5h and Week always lead, then any per-model window. */
+/** Provider-wide 5h and Week lead, except a Fable pane prioritizes its own meter. */
 export function prioritizeWindowsForModel(windows: RateWindow[], modelId?: string): RateWindow[] {
 	const ordered = prioritizeModelWindows(windows, modelId);
+	const fable = normalizeTokens(modelId ?? "").includes("fable")
+		? ordered.filter((window) => window.label === "Fable")
+		: [];
 	const core = (["5h", "Week"] as const).flatMap((label) => ordered.filter((window) => window.label === label));
-	return [...core, ...ordered.filter((window) => !core.includes(window))];
+	const prioritized = fable.length > 0
+		? [...ordered.filter((window) => window.label === "5h"), ...fable, ...core.filter((window) => window.label !== "5h")]
+		: core;
+	return [...prioritized, ...ordered.filter((window) => !prioritized.includes(window))];
 }
 
 function getAgentDir(): string {
@@ -388,11 +394,19 @@ type AnthropicUsageWindow = {
 	resets_at?: string;
 };
 
+type AnthropicUsageLimit = {
+	percent?: number;
+	resets_at?: string;
+	is_active?: boolean;
+	scope?: { model?: { display_name?: string | null } };
+};
+
 export type AnthropicUsageResponse = {
 	five_hour?: AnthropicUsageWindow | null;
 	seven_day?: AnthropicUsageWindow | null;
 	seven_day_opus?: AnthropicUsageWindow | null;
 	seven_day_sonnet?: AnthropicUsageWindow | null;
+	limits?: AnthropicUsageLimit[];
 };
 
 function addAnthropicWindow(windows: RateWindow[], label: string, value: AnthropicUsageWindow | null | undefined): void {
@@ -413,6 +427,20 @@ export function mapAnthropicUsage(data: AnthropicUsageResponse): RateWindow[] {
 	addAnthropicWindow(windows, "Week", data.seven_day);
 	addAnthropicWindow(windows, "Opus", data.seven_day_opus);
 	addAnthropicWindow(windows, "Sonnet", data.seven_day_sonnet);
+	if (Array.isArray(data.limits)) {
+		for (const limit of data.limits) {
+			if (limit?.scope?.model?.display_name !== "Fable" || typeof limit.percent !== "number" || !Number.isFinite(limit.percent)) continue;
+			const resetDate = typeof limit.resets_at === "string" ? new Date(limit.resets_at) : undefined;
+			const hasReset = resetDate !== undefined && Number.isFinite(resetDate.getTime());
+			windows.push({
+				label: "Fable",
+				usedPercent: limit.percent,
+				resetDescription: hasReset ? formatReset(resetDate) : undefined,
+				resetAt: hasReset ? resetDate.toISOString() : undefined,
+			});
+			break;
+		}
+	}
 	return windows;
 }
 
