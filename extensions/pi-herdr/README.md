@@ -469,7 +469,14 @@ per check on a real Pi); all three triggers compare against it and never write i
   turn shows no `pi-self-reload` entry until it ends.
 
 One self-reload per turn, never mid-turn or mid-reply, never with a handoff or message pending, and
-never a second time for the same stamp. It says it once in the Pi's own labels: `pi.fingerprint=<16>`
+never a second time for the same stamp. The flag that guards a dispatch is the id of the entry that
+dispatch sent, and a settled boundary clears it: an entry still open there has no dispatch in flight,
+so it is closed as abandoned and its recorded prompt rides into the fresh attempt (or is handed back to
+run on the loaded code when there is nothing to reload). That keeps a failed or lost dispatch from
+latching the trigger — earlier silent stalls ran every later turn on stale code until a restart — and
+it drops nothing: a prompt held by an abandoned attempt, and a message kept for one, each arrive
+exactly once. Attempts for one source change are capped at three; after that the runtime says so once
+and later turns run on the loaded code with nothing held. It says it once in the Pi's own labels: `pi.fingerprint=<16>`
 records what this runtime loaded, and the turn that reloaded carries `pi.reloaded=<fp8>` and
 `pi.say=reloaded to <fp8>`, cleared when that turn ends (the `pi-herdr:self-reload` event, consumed by
 `turn-label.ts`). If it cannot reload at that moment — the Pi started working, queued messages are

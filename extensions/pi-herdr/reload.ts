@@ -36,7 +36,11 @@ type SelfRequest = {
   /** The prompt this trigger point consumed; empty at the idle boundary, where no turn was waiting. */
   text: string;
   images?: { type: "image"; data: string; mimeType: string }[];
+  /** This attempt's number for its target fingerprint; a fresh fingerprint starts again at 1. */
+  attempts?: number;
 };
+/** Attempts allowed for one target fingerprint before the runtime stops trying and says so once. */
+const SELF_ATTEMPTS = 3;
 const MODEL_REQUEST = "pi-model-request";
 const MODEL_OUTCOME = "pi-model-outcome";
 /** One cutover operation's card, per-target acks, and its at-most-one alert and completion. */
@@ -79,8 +83,14 @@ export function registerPiReload(pi: ExtensionAPI): {
   let loaded: string | null = null;
   /** The one fingerprint of the sources this Pi loaded at its last session_start; both triggers compare against it. */
   let sources = "";
-  /** One self-reload at a time: a second trigger inside the same window is dropped, never stacked. */
-  let selfReloading = false;
+  /**
+   * The id of the self-reload entry whose `/pi-reload --internal-self` this runtime sent. The dispatch
+   * runs synchronously, so an unresolved entry whose id is not this one has no dispatch in flight any
+   * more: it will never complete, and leaving it open would latch every trigger (task-757).
+   */
+  let selfDispatch: string | null = null;
+  /** One visible notice per target fingerprint when its attempts are exhausted. */
+  let selfExhausted = "";
   let localChanges = false;
   let own: Owner | undefined;
   let supported = false;
@@ -328,13 +338,62 @@ export function registerPiReload(pi: ExtensionAPI): {
     const done = new Set(branch.filter((e) => e.type === "custom" && e.customType === SELF_DONE).map((e) => e.data?.id));
     return branch.filter((e) => e.type === "custom" && e.customType === SELF && !done.has(e.data?.id)).map((e) => e.data as SelfRequest).at(-1);
   };
-  /** Hand a consumed prompt back to Pi exactly once; the turn then starts on the code just loaded. */
-  const replaySelf = (self: SelfRequest) => {
-    pi.appendEntry(SELF_DONE, { id: self.id });
+  /** Hand a consumed prompt back to Pi; the entry that recorded it is already closed. */
+  const handBack = (self: SelfRequest) => {
     if (!self.text) return;
     // A prompt Pi itself cannot start (no model) surfaces as its own send error; the entry keeps the text.
     pi.sendUserMessage(self.images?.length ? [{ type: "text" as const, text: self.text }, ...self.images] : self.text,
       { expandPromptTemplates: true });
+  };
+  /** Close an attempt and hand its prompt back exactly once; the turn then starts on the code just loaded. */
+  const replaySelf = (self: SelfRequest) => {
+    pi.appendEntry(SELF_DONE, { id: self.id });
+    handBack(self);
+  };
+  /**
+   * Close an attempt left open by a dispatch that is no longer in flight: it will never complete, and an
+   * open entry latches every later trigger (task-757). Its recorded prompt is not dropped here; callers
+   * carry it into the next attempt, or hand it back with `replaySelf` when there is no next attempt.
+   */
+  const abandonSelf = (ctx: ExtensionContext): SelfRequest | undefined => {
+    const self = pendingSelf(ctx);
+    if (!self) return undefined;
+    pi.appendEntry(SELF_DONE, { id: self.id });
+    return self;
+  };
+  /** One prompt made of the abandoned attempt's recorded prompt and the one this trigger consumes; each arrives once. */
+  const carried = (self: SelfRequest | undefined, text: string, images?: SelfRequest["images"]) => ({
+    text: [self?.text ?? "", text].filter(Boolean).join("\n\n"),
+    images: [...(self?.images ?? []), ...(images ?? [])],
+  });
+  /** This attempt's number: an abandoned attempt's count carries over only when it targeted the same fingerprint. */
+  const attemptNumber = (abandoned: SelfRequest | undefined, expected: string) => abandoned?.expected === expected ? (abandoned.attempts ?? 0) + 1 : 1;
+  /** Record and dispatch one attempt; a dispatch that throws leaves nothing open. */
+  const dispatchSelf = (ctx: ExtensionContext, expected: string, text: string, images: SelfRequest["images"], attempts: number): boolean => {
+    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected, text, ...(images.length ? { images } : {}), attempts };
+    pi.appendEntry<SelfRequest>(SELF, self);
+    selfDispatch = self.id;
+    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
+    catch (error) {
+      selfDispatch = null;
+      pi.appendEntry(SELF_DONE, { id: self.id });
+      ctx.ui.notify(`Self-reload could not start: ${reason(error)}`, "warning");
+      return false;
+    }
+    return true;
+  };
+  /**
+   * The attempts for one source change are exhausted: the runtime stops dispatching and says so once, so
+   * a failure that will not clear is visible instead of an endless dispatch loop. Turns then run on the
+   * code that is loaded, with nothing held.
+   */
+  const stopSelf = (ctx: ExtensionContext, expected: string, abandoned: SelfRequest | undefined) => {
+    // Nothing is held: the abandoned prompt is handed back once now, and runs on the loaded code.
+    if (abandoned) handBack(abandoned);
+    if (selfExhausted === expected) return;
+    selfExhausted = expected;
+    summarize([`Self-reload stopped for sources ${short(sources)} → ${short(expected)} after ${SELF_ATTEMPTS} attempts.`],
+      ["Each attempt was dispatched and its recorded prompt was handed back once; later turns run on the code that is loaded until the sources change again."]);
   };
   /**
    * Both trigger points end here: one fingerprint, one reload, and the prompt (if a turn was waiting for
@@ -342,7 +401,7 @@ export function registerPiReload(pi: ExtensionAPI): {
    * said once as `reload pending`, and that turn runs on what is loaded with nothing dropped.
    */
   const applySelf = async (ctx: ExtensionContext) => {
-    selfReloading = false;
+    selfDispatch = null;
     if (!supported || ctx.mode !== "tui") return;
     const self = pendingSelf(ctx);
     if (!self) return;
@@ -371,20 +430,22 @@ export function registerPiReload(pi: ExtensionAPI): {
    * messages (which emit no input event) still notices, and no turn is ever reloaded underneath itself.
    */
   const selfCheck = async (ctx: ExtensionContext) => {
-    if (!own || !supported || ctx.mode !== "tui" || selfReloading || sweeping) return;
+    if (!own || !supported || ctx.mode !== "tui" || selfDispatch !== null || sweeping) return;
     if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+    // A typed inbox request reloads through its own path.
+    if (pending(ctx).length) return;
+    // No dispatch is in flight at this boundary, so an entry still open was abandoned by a lost dispatch.
+    const abandoned = abandonSelf(ctx);
     const now = fingerprintOf(ctx);
-    // A typed inbox request reloads through its own path, and a waiting prompt is handed back already.
-    if (now.fingerprint === sources || pendingSelf(ctx) || pending(ctx).length) return;
-    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: "" };
-    pi.appendEntry<SelfRequest>(SELF, self);
-    selfReloading = true;
-    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
-    catch (error) {
-      selfReloading = false;
-      pi.appendEntry(SELF_DONE, { id: self.id });
-      ctx.ui.notify(`Self-reload could not start: ${reason(error)}`, "warning");
-    }
+    // Nothing to reload: the abandoned prompt still runs, now, on the code that is loaded.
+    if (now.fingerprint === sources) { if (abandoned) handBack(abandoned); return; }
+    // A new source change starts counting again.
+    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    const attempts = attemptNumber(abandoned, now.fingerprint);
+    if (attempts > SELF_ATTEMPTS) { stopSelf(ctx, now.fingerprint, abandoned); return; }
+    // The abandoned attempt's prompt rides into this one, so the new runtime hands it back exactly once.
+    const { text, images } = carried(abandoned, "");
+    dispatchSelf(ctx, now.fingerprint, text, images, attempts);
   };
 
   pi.registerEntryRenderer<Summary>(SUMMARY, (entry, options, theme) => ({
@@ -458,7 +519,7 @@ export function registerPiReload(pi: ExtensionAPI): {
     } catch (error) { ctx.ui.notify(`Cannot identify loaded resources: ${reason(error)}`, "warning"); }
     // One fingerprint of every source this Pi loads; both self-reload trigger points compare against it.
     sources = supported ? fingerprintOf(ctx).fingerprint : "";
-    selfReloading = false;
+    selfDispatch = null;
     // pi.pgid lets a sweep or sender see from hc's foreground whether this Pi still owns its terminal; pi.session is its restart hint.
     await hcJson(["label", own.terminal, `pi.resources=${loaded ?? "unknown"}`, `pi.fingerprint=${sources}`, `pi.reload=${supported ? "1" : ""}`, `pi.model-control=${supported ? "1" : ""}`, `pi.cutover=${supported ? "1" : ""}`,
       `pi.pgid=${ttyGroups().pgid}`, `pi.session=${ctx.sessionManager.getSessionFile() ?? ""}`]);
@@ -500,6 +561,7 @@ export function registerPiReload(pi: ExtensionAPI): {
   });
   pi.on("agent_settled", (_event, ctx) => {
     dispatched = ""; // a fresh idle boundary: retry anything a lost or bailed dispatch left recorded
+    selfDispatch = null; // and no self-reload dispatch is in flight at a settled boundary any more
     applyModel(ctx);
     void applyNow(ctx);
     // The second trigger point for the same fingerprint: between turns, never during one.
@@ -508,23 +570,29 @@ export function registerPiReload(pi: ExtensionAPI): {
   // A turn start: the prompt was typed for code that is no longer on disk. Consume it (so the turn never starts
   // on stale code), reload, and hand it back from the new runtime as the turn that continues.
   pi.on("input", (event, ctx) => {
-    if (!own || !supported || ctx.mode !== "tui" || selfReloading) return;
+    if (!own || !supported || ctx.mode !== "tui" || selfDispatch !== null) return;
     // A person's prompt before it is expanded; never a queued steer/follow-up and never a replay.
     if (event.source !== "interactive" || event.streamingBehavior) return;
     if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+    // An entry still open here was abandoned by a lost dispatch; its prompt rides along, never dropped.
+    const abandoned = abandonSelf(ctx);
     const now = fingerprintOf(ctx);
-    // A stale prompt is consumed below instead; a self-reload already waiting is handed back by its own pass.
-    if (now.fingerprint === sources || pendingSelf(ctx)) return;
-    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: event.text, images: event.images };
-    pi.appendEntry<SelfRequest>(SELF, self);
-    selfReloading = true;
-    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
-    catch (error) {
-      selfReloading = false;
-      pi.appendEntry(SELF_DONE, { id: self.id });
-      return; // the prompt runs now on the loaded code; the idle check reloads after it
+    // Nothing to reload: the abandoned prompt runs in this turn, ahead of the one just typed.
+    if (now.fingerprint === sources) {
+      if (!abandoned) return;
+      const { text, images } = carried(abandoned, event.text, event.images);
+      return { action: "transform" as const, text, ...(images.length ? { images } : {}) };
     }
-    return { action: "handled" };
+    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    const attempts = attemptNumber(abandoned, now.fingerprint);
+    const { text, images } = carried(abandoned, event.text, event.images);
+    if (attempts > SELF_ATTEMPTS) {
+      stopSelf(ctx, now.fingerprint, undefined);
+      // Nothing is consumed and nothing is held: this turn runs now on the loaded code.
+      return { action: "transform" as const, text, ...(images.length ? { images } : {}) };
+    }
+    if (!dispatchSelf(ctx, now.fingerprint, text, images, attempts)) return; // the prompt runs now on the loaded code
+    return { action: "handled" as const };
   });
 
   /** Reload this Pi for its recorded typed inbox requests (the private /pi-reload mode). */
@@ -664,27 +732,24 @@ export function registerPiReload(pi: ExtensionAPI): {
     // Typed controls start no model turn, and a steer belongs to the turn already running.
     if (env.control || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
     // A self-reload already in flight delivers this message from its own session_start scan.
-    if (selfReloading) return true;
+    if (selfDispatch !== null) return true;
     // A Pi that cannot reload — a background job of its shell, as the typed request path already says —
     // delivers on the loaded code: keeping the message there would leave no event to rescan it.
     const groups = ttyGroups();
     if (groups.pgid !== groups.foreground) return false;
-    // An attempt that never landed is not repeated here; the message starts its turn on what is loaded.
-    if (pendingSelf(ctx)) return false;
     const now = fingerprintOf(ctx);
     if (now.fingerprint === sources) return false;
-    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: "" };
-    pi.appendEntry<SelfRequest>(SELF, self);
-    selfReloading = true;
-    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
-    catch (error) {
-      // No reload is coming, so the message is not held for one: it starts its turn now.
-      selfReloading = false;
-      pi.appendEntry(SELF_DONE, { id: self.id });
-      ctx.ui.notify(`Self-reload could not start: ${reason(error)}`, "warning");
-      return false;
+    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    // An entry still open here was abandoned by a lost dispatch: its prompt rides along into this attempt,
+    // so it is not held and not dropped. The message kept below is delivered by the new runtime once.
+    const abandoned = abandonSelf(ctx);
+    const attempts = attemptNumber(abandoned, now.fingerprint);
+    if (attempts > SELF_ATTEMPTS) {
+      stopSelf(ctx, now.fingerprint, abandoned);
+      return false; // the message starts its turn on the loaded code
     }
-    return true;
+    const { text, images } = carried(abandoned, "");
+    return dispatchSelf(ctx, now.fingerprint, text, images, attempts);
   };
 
   const deliver = async (env: Envelope, ctx: ExtensionContext): Promise<null | undefined> => {
