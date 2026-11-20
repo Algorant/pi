@@ -54,17 +54,17 @@ function kindText(kind: string, theme: Theme): string {
 }
 
 /**
- * One collapsed line for either direction: `✉ <kind> <arrow> <peer> · <first line>  +N lines`; the
- * arrow tells direction (→ sent, ← received). ✉ renders double-width in some terminals, so a second
- * space keeps it off the kind word. ✉ is ochre when the message needs Algorant (blocked, or a
- * request to Herdra, which is how agents ask for his choice), fern otherwise.
+ * One collapsed line for either direction: `\uf003 <kind> <arrow> <peer> · <first line>  +N lines`; the
+ * arrow tells direction (→ sent, ← received). The Nerd Font envelope occupies one cell, so it is
+ * followed by one space. It is ochre when the message needs Algorant (blocked, or a request to
+ * Herdra, which is how agents ask for his choice), fern otherwise.
  */
 function messageLine(needsAlgorant: boolean, kind: string, arrow: string, peer: string, body: string, theme: Theme, status?: string, context?: unknown, ids?: string, interrupt?: boolean): string {
-  const glyph = theme.fg(needsAlgorant ? "warning" : "accent", "✉");
+  const glyph = theme.fg(needsAlgorant ? "warning" : "accent", "\uf003");
   const percent = typeof context === "number" ? theme.fg("muted", ` · ${context}%`) : "";
   const idPart = ids ? theme.fg("dim", ` · ${ids}`) : "";
   const flag = interrupt ? theme.fg("warning", " · interrupt") : "";
-  return ` ${glyph}  ${kindText(kind, theme)}${flag}${theme.fg("muted", ` ${arrow} `)}${theme.fg("text", peer)}${percent}${idPart}${status ? theme.fg("muted", ` · ${status}`) : ""}${gist(body, theme)}`;
+  return ` ${glyph} ${kindText(kind, theme)}${flag}${theme.fg("muted", ` ${arrow} `)}${theme.fg("text", peer)}${percent}${idPart}${status ? theme.fg("muted", ` · ${status}`) : ""}${gist(body, theme)}`;
 }
 
 type AgentSendState = BoxedToolRendererState<AgentSendDetails> & { line?: string; compact?: boolean };
@@ -84,7 +84,7 @@ class AgentSendSlot implements Component {
 }
 
 /**
- * `agent_send` card: one line (`✉ kind → recipient · <first line>  +N lines`)
+ * `agent_send` card: one line (`\uf003 kind → recipient · <first line>  +N lines`)
  * when collapsed and successful; the boxed card when expanded or failed.
  */
 export function createAgentSendRenderer() {
@@ -148,7 +148,7 @@ function buildAgentSendBox(
 
 /**
  * Transcript card for a delivered `pi-agent-message`: one line
- * (`✉ kind ← sender · <first line>  +N lines`) by default, the full box when
+ * (`\uf003 kind ← sender · <first line>  +N lines`) by default, the full box when
  * expanded. The model always receives the full message content.
  */
 export function renderAgentMessage(message: { content: unknown; details?: unknown }, options: { expanded?: boolean }, theme: Theme): Component {
