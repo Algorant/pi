@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import registerInbox from "../pi-agency/inbox/index.ts";
 import { isHc } from "./core.ts";
 import { registerHcIdleCompaction } from "./compaction.ts";
-import { registerAgencyProfile } from "./profile.ts";
+import { registerAgencyProfile, registerAgencyProfileRecovery } from "./profile.ts";
 import { registerHcModelLabel } from "./model.ts";
 import { registerHcReport } from "./report.ts";
 import { registerScriptify } from "./scriptify.ts";
@@ -20,10 +20,9 @@ export default function piHc(pi: ExtensionAPI): void {
   const inherited = process.env.PI_HC_INBOX_OWNER;
   if (inherited?.startsWith(prefix) && inherited !== owner) return;
   process.env.PI_HC_INBOX_OWNER = owner;
-  let startupFailed: (ctx: ExtensionContext, message: string) => Promise<void> = async () => {};
-  registerAgencyProfile(pi, (ctx, message) => startupFailed(ctx, message));
+  registerAgencyProfileRecovery(pi);
   const child = registerHcReport(pi);
-  startupFailed = child.startupFailed;
+  registerAgencyProfile(pi, child.startupFailed);
   registerHcModelLabel(pi);
   registerHcTurnLabels(pi);
   registerScriptify(pi);

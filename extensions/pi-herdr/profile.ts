@@ -4,13 +4,23 @@ import { resolveRoleEntry, resolveReviewEntry } from "../pi-agency/model-roles.t
 import { registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { hcJson } from "./core.ts";
 
+let activeProfile: PiSubagentProfileDefinition | undefined;
+let activeReviewerCallerModel: string | undefined;
+
+/** Register before report so provider recovery runs before report settlement. */
+export function registerAgencyProfileRecovery(pi: ExtensionAPI): void {
+  registerProvider429Recovery(pi, async () => activeProfile ? {
+    role: activeProfile.name === "reviewer" ? "review" : "subagent",
+    ...(activeReviewerCallerModel ? { callerModel: activeReviewerCallerModel } : {}),
+  } : undefined);
+}
+
 /** Native profile policy only. No launch/placement/observation/retention runtime. */
 export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: ExtensionContext, message: string) => Promise<void>): void {
   pi.registerFlag(AGENCY_PROFILE_FLAG, { type: "string", description: "Native HC read-only child profile: scout, researcher or reviewer." });
   if (!hcProfileRequested()) return;
   let profile: PiSubagentProfileDefinition | undefined;
   let reviewerCallerModel: string | undefined;
-  registerProvider429Recovery(pi, async () => profile ? { role: profile.name === "reviewer" ? "review" : "subagent", ...(reviewerCallerModel ? { callerModel: reviewerCallerModel } : {}) } : undefined);
   let allowed = new Set<string>();
   let failure: string | undefined;
 
@@ -18,6 +28,8 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
     const name = pi.getFlag(AGENCY_PROFILE_FLAG);
     profile = undefined;
     reviewerCallerModel = undefined;
+    activeProfile = undefined;
+    activeReviewerCallerModel = undefined;
     allowed = new Set();
     failure = undefined;
     pi.setActiveTools([]); // fail closed before any async selection
@@ -28,11 +40,13 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
       if (!self.parent) throw new Error("HC profiles must be launched as native children with hc run.");
       const selected = resolveSubagentProfile(name as SubagentProfileName, loadSubagentProfiles(BUNDLED_SUBAGENT_PROFILES_DIRECTORY));
       profile = selected;
+      activeProfile = selected;
       let callerModel: string | undefined;
       if (name === "reviewer") {
         callerModel = (await hcJson(["get", self.parent])).labels?.["pi.model"];
         if (!callerModel) throw new Error("Reviewer requires the native parent's pi.model label; reload that parent Pi before launching a reviewer.");
         reviewerCallerModel = callerModel;
+        activeReviewerCallerModel = callerModel;
       }
       const entry = name === "reviewer"
         ? resolveReviewEntry(callerModel!, ctx.modelRegistry)
@@ -47,6 +61,8 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
       ctx.ui.notify(`HC ${name}: ${entry.entry.model}${entry.set ? `; set ${entry.set}, quota ${entry.quota}` : ""}${entry.skipped?.length ? `; skipped ${entry.skipped.join("; ")}` : ""}`, "info");
     } catch (error) {
       profile = undefined;
+      activeProfile = undefined;
+      activeReviewerCallerModel = undefined;
       allowed.clear();
       failure = `HC profile startup failed: ${error instanceof Error ? error.message : String(error)}`;
       pi.setActiveTools([]);
