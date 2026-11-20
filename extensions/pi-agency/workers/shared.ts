@@ -238,7 +238,7 @@ export async function approvedHookTypes(checkoutPath: string, types: string[], s
 export async function removeNativeWorkerCheckout(project: { cwd: string }, branch: string, checkIn: CheckIn, discard = false): Promise<string> {
   return withCheckIn(checkIn, `Worktrunk removal of ${branch}`, () => command("wt", [
     "-C", project.cwd, "remove", branch,
-    ...(discard ? ["--force", "--force-delete"] : []),
+    ...(discard ? ["--force-delete"] : []),
     "--foreground", "--format", "json",
   ], undefined, 0));
 }
@@ -295,6 +295,9 @@ export function validateNativeRemovalResult(output: string, integration: { sourc
   }
   if (removed.path !== integration.source.checkoutPath) {
     throw new Error(`Worktrunk removal reported checkout ${removed.path}, not captured Worker checkout ${integration.source.checkoutPath}; no other checkout was accepted.`);
+  }
+  if (removed.branch_outcome !== "deleted") {
+    throw new Error(`Worktrunk removed checkout ${integration.source.checkoutPath} but reported branch outcome ${removed.branch_outcome ?? "missing"}, not deleted; the discard receipt remains incomplete.`);
   }
   return output.trim().slice(0, 4_000);
 }

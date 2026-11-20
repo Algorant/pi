@@ -1044,7 +1044,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     },
     {
       name: "worker_discard", label: "Discard Worker",
-      description: "Discard an unintegrated owned attempt (Worker or manus) with resumable receipt: close captured child, release any linked Task this attempt holds, remove only captured worktree/branch. Task-free never writes Tandem; worktree:false preserves shared checkout/branch and changes. Integrated work is refused.",
+      description: "Discard an unintegrated owned attempt (Worker or manus) with resumable receipt: close captured child, release any linked Task this attempt holds, remove only captured worktree/branch. Worktrunk refuses dirty or untracked changes. Task-free never writes Tandem; worktree:false preserves shared checkout/branch and changes. Integrated work is refused.",
       promptSnippet: "Discard only a disposable Worker attempt; the receipt retries only unfinished steps.",
       parameters: DiscardParameters,
       ...createWorkerToolRenderer("discard"),
@@ -1260,7 +1260,9 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if ((await listHcWorkerOutcomes()).some((outcome) => chainIds.has(outcome.deliveryId))) throw new Error(`${kindName} ${params.agent} has an integrated outcome; finish it instead of discarding integrated work.`);
     const integration = current.integration;
     const base = { host: "hc", agent: params.agent, kind: current.kind ?? "worker", taskId: current.taskId, deliveryId: current.deliveryId, disposition: "discarded", branch: integration.source.branch, worktreePath: integration.source.checkoutPath };
-    if (current.state === "discarded") return text(`${kindName} ${params.agent} was already discarded; receipt ${current.deliveryId} made no changes.`, { ...base, state: "closed", removed: hasWorktree(current), branchDeleted: hasWorktree(current), checkoutRetained: !hasWorktree(current), alreadyDiscarded: true });
+    const branchDeleted = (record: HcWorkerRecord) => hasWorktree(record) && Boolean(record.discardRemovalCompletedAt) &&
+      (/\"branch_outcome\"\s*:\s*\"deleted\"/.test(record.discardRemovalResult ?? "") || /branch no longer exist/i.test(record.discardRemovalResult ?? ""));
+    if (current.state === "discarded") return text(`${kindName} ${params.agent} was already discarded; receipt ${current.deliveryId} made no changes.`, { ...base, state: "closed", removed: hasWorktree(current), branchDeleted: branchDeleted(current), checkoutRetained: !hasWorktree(current), alreadyDiscarded: true });
     await validateCapturedCheckout(integration.target, integration.repoKey, "Captured Worker target");
     if (!current.discardRemovalRequestedAt) await validateCapturedCheckout(integration.source, integration.repoKey, "Worker source");
     const deliveryId = current.deliveryId;
@@ -1305,6 +1307,9 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
           if (record.discardRemovalRequestedAt === undefined) throw new Error(`Captured checkout ${integration.source.checkoutPath} and branch ${integration.source.branch} are already gone, but this discard never requested their removal; it records no removal.`);
           await save({ discardRemovalResult: "Requested Worktrunk removal observed complete: the captured checkout and branch no longer exist.", discardRemovalCompletedAt: Date.now() });
         } else {
+          await validateCapturedCheckout(integration.source, integration.repoKey, "Worker source before discard removal");
+          const mappedPath = await nativeWorktreeForBranch(cwd, integration.source.branch);
+          if (mappedPath !== integration.source.checkoutPath) throw new Error(`Captured branch ${integration.source.branch} now maps to ${mappedPath ?? "no registered checkout"}, not ${integration.source.checkoutPath}; no removal was attempted.`);
           await save({ discardRemovalRequestedAt: record.discardRemovalRequestedAt ?? Date.now() });
           const removal = validateNativeRemovalResult(await removeNativeWorkerCheckout({ cwd }, integration.source.branch, checkInNotifier(ctx), true), integration);
           await save({ discardRemovalResult: removal || undefined, discardRemovalCompletedAt: Date.now() });
@@ -1316,7 +1321,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       throw new Error(`${kindName} ${record.taskId} discard receipt ${deliveryId} was preserved; retry resumes only unfinished steps. ${diagnosticText(error)}`);
     }
     return text(`Discarded ${kindName} ${workerName(record)}: ${tandemOutcome}, ${closedTerminal ? `closed its terminal ${closedTerminal}` : closedEarlier ? "its invocation was already closed" : "no invocation was running"}, and ${hasWorktree(record) ? `removed captured checkout ${integration.source.branch} through Worktrunk` : "retained shared checkout/branch and changes (no removal)"}.`,
-      { ...base, state: "closed", terminal: closedTerminal, removed: hasWorktree(record), branchDeleted: hasWorktree(record), checkoutRetained: !hasWorktree(record), worktree: hasWorktree(record), presentationClosed: true, integration });
+      { ...base, state: "closed", terminal: closedTerminal, removed: hasWorktree(record), branchDeleted: branchDeleted(record), checkoutRetained: !hasWorktree(record), worktree: hasWorktree(record), presentationClosed: true, integration });
   }
 
   /**

@@ -685,7 +685,11 @@ Files left by the retired legacy Worker runtime are not read.
   Tandem write (`tandem complete --note` naming the merge) accepts the already
   delivered outcome,
   then only the captured terminal is ended and only the captured checkout is
-  removed with foreground `wt remove`. A retry resumes unfinished steps only.
+  removed with foreground `wt remove`; Worktrunk refuses dirty source checkouts.
+  Before each attempt discard revalidates the captured branch-to-checkout mapping.
+  The receipt accepts completion only when Worktrunk reports
+  `branch_outcome: deleted`.
+  A retry resumes unfinished steps only.
   Task completion, release and removal stamp their intent first; a retry after
   a lost marker accepts the step only from that intent plus observed Tandem
   (archived `completed` for this Worker / released with a higher discard count)
