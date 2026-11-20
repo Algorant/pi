@@ -117,6 +117,9 @@ function readLine(secret: boolean, signal?: AbortSignal): Promise<string> {
     stdin.setRawMode(true);
     stdin.resume();
     let value = "";
+    // A trailing escape sequence that this chunk did not finish, carried into
+    // the next one so a split bracketed-paste marker is still removed.
+    let pending = "";
     let settled = false;
     const finish = (settle: () => void) => {
       if (settled) return;
@@ -132,8 +135,16 @@ function readLine(secret: boolean, signal?: AbortSignal): Promise<string> {
     const onAbort = () => finish(() => reject(new Error(LOGIN_CANCELLED)));
     const onEnd = () => finish(() => reject(new Error(LOGIN_CANCELLED)));
     const onData = (chunk: Buffer) => {
-      // Pasted text can carry bracketed-paste/CSI markers around the value.
-      const text = chunk.toString("utf8").replace(/\u001b\[[0-9;]*[A-Za-z~]/g, "");
+      // Pasted text can carry bracketed-paste/CSI markers around the value, and
+      // the terminal may deliver one marker across several chunks, so an
+      // unterminated escape sequence at the end is held for the next chunk
+      // instead of being stripped only where it happens to be complete.
+      const data = pending + chunk.toString("utf8");
+      pending = "";
+      const partial = /\u001b(?:\[[0-9;]*)?$/.exec(data);
+      if (partial) pending = partial[0];
+      const complete = partial ? data.slice(0, partial.index) : data;
+      const text = complete.replace(/\u001b\[[0-9;]*[A-Za-z~]/g, "");
       for (const character of text) {
         if (character === "\u0003" || character === "\u0004") {
           finish(() => reject(new Error(LOGIN_CANCELLED)));

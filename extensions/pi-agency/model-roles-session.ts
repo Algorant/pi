@@ -1,10 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { hcJson } from "../pi-herdr/core.ts";
 import { OPENAI_FAST_SET_EVENT, OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
-import { KIND_KEY } from "../../scripts/whois.ts";
+import { KIND_KEY, terminalWho } from "../../scripts/whois.ts";
 import { LocalAgencySettingsError, localAgencySettings } from "./local-settings.ts";
-import { ModelSetUnavailableError, committedCellModels, resolveRoleEntry } from "./model-roles.ts";
-import { resolveRoleForSwitch } from "./herdra-role.ts";
+import { ModelSetUnavailableError, committedCellModels, resolveRoleEntry, type ResolvedRoleEntry } from "./model-roles.ts";
+import { resolveRoleForSwitch, type RoleResolution } from "./herdra-role.ts";
 import { workerContextRequested } from "./workers/context.ts";
 import { hcProfileRequested } from "./subagents/profile.ts";
 
@@ -26,22 +26,36 @@ import { hcProfileRequested } from "./subagents/profile.ts";
  * cutover request), which fires model_select. The legacy orchestrator path
  * keeps its notify-only behavior.
  *
- * Quota gate (task-745), independent of that startup application: every managed
+ * Session start vs an ordinary turn (task-745). A session start — `startup`, `new`,
+ * `resume`, `reload`, `fork` — is the moment this module re-reads the role and the
+ * starting model, and it arms exactly one healthy reconciliation. That reconciliation
+ * is consumed by the session's first policy-owned turn: a loaded session whose start
+ * carried another model (a resume on a stale one, a fresh session that never got its
+ * role model) catches up to the committed model, thinking and Fast once, in process.
+ * Every ordinary turn after it leaves a healthy row alone, so an ordinary later change
+ * of the committed map never self-applies here — it arrives only through the existing
+ * typed cutover, which sets the model, thinking and Fast itself, and which this gate
+ * recognises as the policy's own model rather than as a human choice. A `/reload` is a
+ * session start, so it re-arms the one reconciliation from the model the reload carried;
+ * that is the same reset the in-memory provenance rule already documents.
+ *
+ * Pre-turn gate (task-745), independent of that startup application: every managed
  * long-lived session (herdra, Ceph, manus) — including one resumed, reloaded or
- * started with an explicit `--model` — checks its own role before each run. When
- * the selected set is blocked by quota ALONE and the session is still on that
- * cell's model, it asks Herdra's `herdra-cutover role` (the same selector and
- * apply the machine-wide watch uses) for a column with room, re-resolves the
- * committed map once, and applies the differing model, thinking and Fast
- * in-process at `before_agent_start` — before that run builds its provider
- * request. The already-delivered kickoff or inbox input is the run's own input,
- * so nothing is replayed, queued or awaited. A model that differs from the
- * blocked cell (a human /model, or another deliberate pin) is left alone, and a
- * change of the committed map alone always arrives through the one typed cutover,
- * never as a second self-applied workflow. When no column has room, or the
- * command fails or answers stale, the session shows ONE notice and the run
- * continues normally on its current model — never an abort, an in-turn retry, or
- * permission for a new launch on a blocked selection.
+ * started with an explicit `--model` — checks its own role before each run. One
+ * resolution answers both cases. A usable set never writes the map. When the selected
+ * set is blocked by quota ALONE and the session is still on that cell's model, the gate
+ * asks Herdra's `herdra-cutover role` (the same selector and apply the machine-wide
+ * watch uses) for a column with room, re-resolves the committed map once, and applies
+ * the differing model, thinking and Fast in-process at `before_agent_start` — before
+ * that run builds its provider request. A quota move is decided by that selector, not by
+ * this in-memory debt, so it is never bounded to one turn. A session already on its
+ * committed model is left exactly as it is, so an in-session thinking or Fast change on
+ * a normal turn stands. The already-delivered kickoff or inbox input is the run's own
+ * input, so nothing is replayed, queued or awaited. A model that differs from the cell
+ * it started on (a human /model, or another deliberate pin) is left alone. When no
+ * column has room, or the command fails or answers stale, the session shows ONE notice
+ * and the run continues normally on its current model — never an abort, an in-turn retry,
+ * or permission for a new launch on a blocked selection.
  */
 const EXPLICIT_MODEL_ARGS = /^--(model|models|provider|thinking)(=|$)/;
 type Role = "herdra" | "manus" | "orchestrator";
@@ -49,14 +63,18 @@ const modelId = (ctx: ExtensionContext): string | undefined => (ctx.model ? `${c
 
 /**
  * The session's role and whether this machine's model policy manages it. Only a native
- * long-lived actor does — Herdra, a Ceph (`kind=ceph`) or a manus (`kind=manus`) — so a
- * plain interactive Pi, a short-lived child, a Worker or a hand-started `pi --model`
- * session is never chased, while it keeps the startup row it always had.
+ * long-lived actor does — Herdra, a Ceph or a manus — so a plain interactive Pi, a
+ * short-lived child, a Worker or a hand-started `pi --model` session is never chased, while
+ * it keeps the startup row it always had. The role is whois's terminal rule, the one naming
+ * system: an explicit `kind` (or label) wins, and a Pi with neither that sits in its space's
+ * main tab is that space's Ceph. That location is the terminal's own label written when the
+ * space/tab was created, so it is already readable when a resume or revive evaluates identity,
+ * and no durable marker is needed for a Ceph started without its creation labels.
  */
 async function identity(named: boolean): Promise<{ role: Role; managed: boolean }> {
   if (!process.env.HC_TERMINAL_ID) return { role: "orchestrator", managed: false };
   const terminal = await hcJson(["get", process.env.HC_TERMINAL_ID]);
-  const kind = terminal.labels?.[KIND_KEY];
+  const kind = terminal.labels?.[KIND_KEY] ?? terminalWho(terminal).kind;
   if (kind === "manus") return { role: "manus", managed: true };
   // The herdra row exists only in named sets; legacy Herdra keeps the declared orchestrator list.
   if (terminal.name === "herdra" && named) return { role: "herdra", managed: true };
@@ -75,6 +93,13 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
    * role model) is the policy's to move. No durable marker is written.
    */
   let baseline: string | undefined;
+  /**
+   * Whether this session's one healthy reconciliation is still owed, in memory only. Armed on every
+   * session start and consumed by the first policy-owned turn that finds a healthy row; after that
+   * an ordinary turn never moves a healthy row again, so a later change of the committed map arrives
+   * only through the typed cutover. A quota switch never consults it. No durable marker is written.
+   */
+  let reconciliationOwed = false;
   /** One notice per distinct reason per session; a repeated block says nothing new. */
   const notices = new Set<string>();
   let fast: OpenAIFastState | undefined;
@@ -90,6 +115,7 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
     refusal = undefined;
     actor = undefined;
     baseline = undefined;
+    reconciliationOwed = false;
     notices.clear();
     if (ctx.mode !== "tui") return;
     if (workerContextRequested()) return;
@@ -107,6 +133,9 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
     }
     // The model this session starts on: a launch default or a resumed model, never an in-session choice.
     baseline = modelId(ctx);
+    // A managed session owes its first policy-owned turn one catch-up to the committed model; the
+    // gate below consumes it there, on this start's model, and never again until the next start.
+    reconciliationOwed = actor !== undefined;
     // The role's default selection is applied only to a fresh session with no messages and no
     // explicit model on the command line; the gate above is independent of this.
     if (event.reason !== "startup" && event.reason !== "new") return;
@@ -140,7 +169,7 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
     refusal = undefined;
   });
 
-  /** The quota gate, before this run builds its provider request (task-745). */
+  /** The pre-turn role gate, before this run builds its provider request (task-745). */
   pi.on("before_agent_start", async (_event, ctx) => {
     const current = actor;
     if (!current) return;
@@ -154,21 +183,33 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
         if (model !== undefined && committedCellModels(current.role).includes(model)) baseline = model;
         else return;
       }
-      try {
-        resolveRoleEntry(current.role, ctx.modelRegistry);
-        return; // the selected set is usable: nothing to do here
-      } catch (error) {
-        if (!(error instanceof ModelSetUnavailableError) || error.kind !== "quota") return;
-      }
       // The model is the policy's (unchanged since the session started, or set to the committed
-      // cell): a quota-only block on the role is answered by a cutover, not by standing still.
-      const resolution = await resolveRoleForSwitch(current.role, ctx.modelRegistry, () => resolveRoleEntry(current.role, ctx.modelRegistry), { excludeCaller: true });
+      // cell): resolve it once here. Only a quota-only block consults Herdra's selector. A usable
+      // set is handed to the one reconciliation a session start armed, and an ordinary turn after
+      // that leaves the healthy row exactly as it is instead of applying the map again.
+      let resolution: RoleResolution<ResolvedRoleEntry>;
+      try {
+        resolution = await resolveRoleForSwitch(current.role, ctx.modelRegistry, () => resolveRoleEntry(current.role, ctx.modelRegistry), { excludeCaller: true });
+      } catch (error) {
+        if (error instanceof ModelSetUnavailableError && error.kind !== "quota") return;
+        throw error; // unexpected resolver/selector failure reaches the one actionable notice
+      }
       if ("refusal" in resolution) {
         tell(ctx, resolution.refusal, `${current.role}:${resolution.outcome?.status ?? "error"}`);
         return;
       }
       const { entry, catalog, set, quota } = resolution.value;
       const switched = resolution.switched;
+      // Healthy row: only the one reconciliation a session start armed may move it. Once consumed,
+      // an ordinary turn returns here, so a later change of the committed map applies only through
+      // the existing typed cutover, never as a second self-applied path.
+      if (switched === undefined) {
+        if (!reconciliationOwed) return;
+        reconciliationOwed = false;
+        // Already on the committed model: the consuming turn itself changes nothing, so it never
+        // re-pins thinking or Fast over an in-session change.
+        if (model === entry.model) return;
+      }
       const wanted = entry.fast === true;
       const apply = model !== entry.model || pi.getThinkingLevel() !== entry.thinking || (fast?.enabled === true) !== wanted;
       if (apply) {
@@ -176,8 +217,9 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
         pi.setThinkingLevel(entry.thinking);
         if ((fast?.enabled === true) !== wanted) pi.events.emit(OPENAI_FAST_SET_EVENT, { enabled: wanted });
       }
+      reconciliationOwed = false;
       baseline = entry.model;
-      const move = switched === undefined        ? `set ${set ?? "unknown"}`
+      const move = switched === undefined        ? `set ${set ?? "unknown"}, session was on ${model ?? "no model"}`
         : switched.status === "switched"
           ? `set ${switched.from ?? "unset"} → ${switched.to ?? "unset"} (quota-switched${switched.partial ? ", partially: some typed requests failed or a Pi was skipped" : ""})`
           : `committed set ${switched.from ?? "unset"} → ${switched.to ?? "unchanged"} (${switched.status}; re-resolved once, no retry)`;
