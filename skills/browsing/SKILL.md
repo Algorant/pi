@@ -35,7 +35,7 @@ its id; pass that id as `tab` next time. If more than one browser is connected, 
    …).
 3. Take a fresh `snapshot()` when the page changed or the refs you need went stale — not after every
    keystroke.
-4. When you need network or console evidence, start capture before the action being checked and stop it afterward. Console capture is detectable by bot checks; stop it when done. Verify from page state: fresh snapshot text, a bounded `evaluate`, the resulting URL and title, `network` for the request, the console for errors. A call reporting "dispatched" is not a result.
+4. When you need network or console evidence, start capture before the action being checked (`browse.network({tab, action: "start"})` or `browse.console({tab, action: "start"})`) and end it afterward (`action: "stop"` returns the network exchanges; console uses `read`, then `stop`). Console capture is detectable by bot checks; stop it when done. Verify from page state: fresh snapshot text, a bounded `evaluate`, the resulting URL and title, `network` for the request, the console for errors. A call reporting "dispatched" is not a result.
 5. `page.screenshot()` when layout or visuals are the question; wait for text, URL or a selector instead
    of guessing a delay.
 
