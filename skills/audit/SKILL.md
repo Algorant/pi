@@ -1,25 +1,26 @@
 ---
 name: audit
-description: "Review a project's code for problems and improvement opportunities using the checks below. Use when asked to audit, review for cleanup, or find implicit state machines. Read-only; report findings, don't change code."
+description: "Review a project's code for problems and improvement opportunities using the checks below; a full audit runs all checks. Use when asked to audit, review for cleanup, or find implicit state machines. Read-only; report findings, don't change code."
 ---
 
 # audit
 
-A read-only review of a project for the checks below.
-Scope it first: project, files, which checks. Read the project's instructions.
-Report findings; don't change code.
+Scope it first: which project and files. Run every check below unless Algorant names specific ones.
+Read the project's instructions. Report findings; don't change code.
 
 Each finding:
 - `file:line` and the supporting code.
 - What's wrong, why it matters, and the smallest fix.
 - What is confirmed, inferred, or still unknown; don't call a static trace a runtime failure.
 
-Deliver one Sideshow post or a short Markdown report.
-Fixes become the project's own papercuts only if its owner agrees.
+Deliver one Sideshow post or a short Markdown report, with one section per check, including "nothing found".
+Fixes become the project's own papercuts only if its owner agrees (see `../tandem/SKILL.md`, *Filing a papercut*).
 
 ## Checks
 
 ### Implicit state machines
+
+Applies to code and scripts.
 
 Look for: flags or fields that change together, branches that depend on earlier
 events, timers/retries, restart recovery.
@@ -34,6 +35,8 @@ Fix: name the states or add a small transition function; don't require a library
 
 ### Poka-yoke (mistake-proofing)
 
+Applies to code, scripts, and skills or runbooks with risky steps.
+
 Look for: destructive or hard-to-undo actions whose safety depends on someone remembering (right environment, right target, right order, a flag).
 Show: the mistake → its harmful effect, the current guard and how it can be bypassed, with source lines.
 Test the reasoning: missing setup, wrong target, skipped step, retry; trace it, never trigger the harm.
@@ -41,11 +44,14 @@ Fix: the smallest guard, type or safe default that makes the wrong case impossib
 
 ### Cold read
 
+Applies to any text read cold.
+
 Read the text as someone who saw none of the conversation and report only three
 gaps: context only the conversation explains, references that do not resolve,
 and no clear definition of done.
 
 Apply `cold-read.md` beside this file: the three gaps, how to verify every
 reference against the repository root, and the finding format. It is the same
-definition the dispatch cold read uses. Report the findings; never rewrite the
-skill.
+definition the dispatch cold read uses: the advisory `scout` helper `pi-herdr`
+starts after a Task-free brief or Ceph kickoff (`../../extensions/pi-herdr/README.md`).
+Report the findings; never rewrite the skill.

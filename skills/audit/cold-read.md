@@ -4,6 +4,8 @@ A cold read answers one question: could someone who saw none of this conversatio
 do the work? The reader gets only the text under review and a repository root
 (stated in the text, otherwise supplied with it).
 
+Terms defined in the global `~/.pi/agent/AGENTS.md` (Ceph, manus, starter, Accord, Tandem, Algorant and similar) are known context, not findings.
+
 Report exactly three kinds of gap, and nothing else:
 
 1. **Context only the conversation explains.** A term, name, decision or
