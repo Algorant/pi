@@ -439,8 +439,10 @@ export function registerPiReload(pi: ExtensionAPI): {
     const now = fingerprintOf(ctx);
     // Nothing to reload: the abandoned prompt still runs, now, on the code that is loaded.
     if (now.fingerprint === sources) { if (abandoned) handBack(abandoned); return; }
+    // Exhaustion is a gate for every trigger at this fingerprint, not just the notice latch.
+    if (selfExhausted === now.fingerprint) { if (abandoned) handBack(abandoned); return; }
     // A new source change starts counting again.
-    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    selfExhausted = "";
     const attempts = attemptNumber(abandoned, now.fingerprint);
     if (attempts > SELF_ATTEMPTS) { stopSelf(ctx, now.fingerprint, abandoned); return; }
     // The abandoned attempt's prompt rides into this one, so the new runtime hands it back exactly once.
@@ -583,7 +585,11 @@ export function registerPiReload(pi: ExtensionAPI): {
       const { text, images } = carried(abandoned, event.text, event.images);
       return { action: "transform" as const, text, ...(images.length ? { images } : {}) };
     }
-    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    if (selfExhausted === now.fingerprint) {
+      const { text, images } = carried(abandoned, event.text, event.images);
+      return { action: "transform" as const, text, ...(images.length ? { images } : {}) };
+    }
+    selfExhausted = "";
     const attempts = attemptNumber(abandoned, now.fingerprint);
     const { text, images } = carried(abandoned, event.text, event.images);
     if (attempts > SELF_ATTEMPTS) {
@@ -739,7 +745,8 @@ export function registerPiReload(pi: ExtensionAPI): {
     if (groups.pgid !== groups.foreground) return false;
     const now = fingerprintOf(ctx);
     if (now.fingerprint === sources) return false;
-    if (selfExhausted !== now.fingerprint) selfExhausted = "";
+    if (selfExhausted === now.fingerprint) return false;
+    selfExhausted = "";
     // An entry still open here was abandoned by a lost dispatch: its prompt rides along into this attempt,
     // so it is not held and not dropped. The message kept below is delivered by the new runtime once.
     const abandoned = abandonSelf(ctx);
