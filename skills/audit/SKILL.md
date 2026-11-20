@@ -8,8 +8,17 @@ description: "Review a project's code for problems and improvement opportunities
 Scope it first: which project and files. Run every check below unless Algorant names specific ones.
 Read the project's instructions. Report findings; don't change code.
 
+Before recommending a finding, triage it with exactly one label:
+- **Broken** — provably wrong now; fix it.
+- **Outdated** — was right, now wrong; update it.
+- **Deprecated** — nothing uses it; remove it, don't guard it.
+- **Unproven** — no evidence; prove it with a real check or observed failure, or drop it. No recommendation without proof.
+- **Out of scope** — assumes an attacker or situation absent from Algorant's one-user, own-machines setup; drop it with one line why.
+
+A fix must remove at least as much as it adds; prefer deleting a risky step over guarding it.
+
 Each finding:
-- `file:line` and the supporting code.
+- Its one triage label, `file:line`, and the supporting code.
 - What's wrong, why it matters, and the smallest fix.
 - What is confirmed, inferred, or still unknown; don't call a static trace a runtime failure.
 
