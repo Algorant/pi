@@ -123,6 +123,7 @@ A manus is a full interactive Pi in its own app tab, not a scoped helper invocat
 
 Give each child a self-contained assignment; it has no prior conversation:
 
+- **Visible windows:** a child never opens a visible window or GUI app (terminal, browser, viewer) unless the brief carries Algorant's OK for that specific run; one OK covers one window for one run and never carries over. Render offscreen (an isolated PTY, headless conversion) by default.
 - **Question:** one answerable independent question.
 - **Context:** relevant facts, paths/URLs, decisions, and what is already known.
 - **Scope:** allowed investigation and exclusions; do not duplicate the parent's work.
