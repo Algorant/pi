@@ -22,6 +22,7 @@
  */
 import { hcJson, hcText, isHc } from "../extensions/pi-herdr/core.ts";
 import { hcAddress, peerText } from "./whois.ts";
+import { isManusRecord, listHcWorkerOutcomes, listHcWorkerRecords } from "../extensions/pi-agency/workers/hc-record.ts";
 import { dropHcEnvelope, dropLocalEnvelope, statusText, targetStatus, type TargetStatus } from "../extensions/pi-agency/inbox/send.ts";
 import {
   ageText, appendEvent, closeMessage, deliveryState, ID_PATTERN, KINDS, localActor, localMachine, messages, messageView, newId,
@@ -80,20 +81,46 @@ if (command === "result") {
   await sendResult(rest[0], rest[1]);
 }
 
-// A child's end reaches its owner even when it never reported (it died before Pi loaded, crashed,
-// or is a plain program). Only the durable log decides "reported": any message this terminal sent
-// since it started. Its screen tail is evidence for the owner, never the decision.
+// A child's end reaches its owner even when it never reported (it died before Pi loaded,
+// crashed, or is a plain program). For a manus, only its starter's native finish/discard
+// receipt decides whether the starter has already acted; ordinary inbox traffic is not final.
+// Other child kinds retain the original any-message behavior.
+async function manusExitWasHandled(self: any, core: string): Promise<boolean> {
+  if (self.labels?.kind !== "manus" || typeof self.labels?.starter !== "string") return false;
+  try {
+    const [starter, records, outcomes] = await Promise.all([
+      hcAddress(self.labels.starter), listHcWorkerRecords(), listHcWorkerOutcomes(),
+    ]);
+    const matches = records.filter((record) => isManusRecord(record) && record.childAgent === self.name
+      && record.owner.core === core && record.owner.terminal === starter.terminal
+      && record.child?.core === core && record.child.terminal === self.address);
+    if (matches.length !== 1) return false;
+    const record = matches[0]!;
+    if (record.state === "discarding" || record.state === "discarded") return true;
+    return outcomes.some((outcome) => outcome.deliveryId === record.deliveryId && outcome.childAgent === record.childAgent
+      && outcome.owner.core === record.owner.core && outcome.owner.terminal === record.owner.terminal
+      && outcome.acceptedAt !== undefined);
+  } catch (error) {
+    console.error(`inbox: could not verify ${self.name ?? self.address} manus finish/discard receipt; sending exit notice (${error instanceof Error ? error.message : error})`);
+    return false;
+  }
+}
+
 if (command === "exited") {
   const [since, exit] = rest;
   if (!isHc() || !since || !exit) fail("exited needs the child's start time and its exit");
   const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
   const core = (await hcJson(["server", "status"])).core?.id;
-  // A send whose drop failed is a send event plus a fail event: it did not reach its owner.
-  const events = readEvents();
-  const failed = new Set(events.flatMap((event) => (event.op === "fail" ? [event.id] : [])));
-  const reported = events.some((event) => event.op === "send" && !failed.has(event.env.id) && event.env.from.terminal === self.address
-    && event.env.from.core === core && event.env.at >= since);
-  if (reported) process.exit(0);
+  if (self.labels?.kind === "manus") {
+    if (await manusExitWasHandled(self, core)) process.exit(0);
+  } else {
+    // A send whose drop failed is a send event plus a fail event: it did not reach its owner.
+    const events = readEvents();
+    const failed = new Set(events.flatMap((event) => (event.op === "fail" ? [event.id] : [])));
+    const reported = events.some((event) => event.op === "send" && !failed.has(event.env.id) && event.env.from.terminal === self.address
+      && event.env.from.core === core && event.env.at >= since);
+    if (reported) process.exit(0);
+  }
   const owner = self.parent ?? self.labels?.starter;
   if (!owner) fail(`${self.name ?? self.address} ended (${exit}) with no inbox report, and has no hc parent or starter label to tell`);
   let tail: string;
@@ -104,7 +131,8 @@ if (command === "exited") {
   const who = `${self.labels?.label ?? self.name ?? self.address} (${[self.name, self.address].filter(Boolean).join(", ")})`;
   const rateLimit = tail.replace(/\s+/g, " ").match(/.{0,80}\b429\b.{0,120}(?:rate[ _-]?limit|too many requests)|.{0,80}(?:rate[ _-]?limit|too many requests).{0,120}\b429\b/i)?.[0]?.trim();
   const cause = rateLimit ? `provider 429 rate limit (${rateLimit})` : exit;
-  await sendResult(owner, `Child ${who} ended: ${cause}${rateLimit ? `; exit ${exit}` : ""}, without any inbox report from it\n`
+  const ending = self.labels?.kind === "manus" ? "before its starter finished or discarded it" : "without any inbox report from it";
+  await sendResult(owner, `Child ${who} ended: ${cause}${rateLimit ? `; exit ${exit}` : ""}, ${ending}\n`
     + `It ran in ${self.cwd} on ${local}; a --rm terminal is gone now. Last screen lines:\n${tail}`);
 }
 
