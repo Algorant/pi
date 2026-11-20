@@ -21,6 +21,17 @@ export const inboxGate = {
   held: false,
   /** The inbox delivered a message to an idle session and a turn will follow. */
   turnPending: false,
+  /**
+   * Ask every registered path to scan now, with no timer: a hold that ended without an event of its
+   * own (a reload that was refused or found nothing to load) must not leave its message queued.
+   */
+  rescan(): void {
+    if (this.held) return;
+    for (const owner of owners.values()) {
+      const ctx = owner.context();
+      if (ctx?.isIdle()) owner.scan();
+    }
+  },
   /** Register (or, after a reload, replace) a delivery path to rescan after each release. */
   register(name: string, owner: Owner): void { owners.set(name, owner); },
   hold(): void { this.held = true; },

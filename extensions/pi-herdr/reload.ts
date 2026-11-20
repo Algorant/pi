@@ -6,6 +6,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { livePis, pullBehind, reloadOwner, resourceRevision } from "../../scripts/live-pis.ts";
 import { terminalWho } from "../../scripts/whois.ts";
 import { ackError, messages, modelControlError, operationError, readEvents, type CutoverOperation, type Envelope, type ModelAck, type ModelControl, type ReloadAck } from "../pi-agency/inbox/envelope.ts";
+import { inboxGate } from "../pi-agency/inbox/gate.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import { hcEndpoint, hcJson, hcMachines } from "./core.ts";
@@ -69,7 +70,12 @@ const ttyGroups = () => {
 };
 
 /** Existing inbox interception + documented target-owned command dispatch; never terminal keys. */
-export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: ExtensionContext) => Promise<null | undefined> {
+export function registerPiReload(pi: ExtensionAPI): {
+  /** The inbox transform: typed control envelopes, and the model turns nothing else claims. */
+  deliver: (env: Envelope, ctx: ExtensionContext) => Promise<null | undefined>;
+  /** Keeps an inbox message queued when its turn would otherwise start on sources this Pi no longer matches. */
+  keep: (env: Envelope, ctx: ExtensionContext) => boolean;
+} {
   let loaded: string | null = null;
   /** The one fingerprint of the sources this Pi loaded at its last session_start; both triggers compare against it. */
   let sources = "";
@@ -342,7 +348,7 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     if (!self) return;
     const now = fingerprintOf(ctx);
     // Someone (a /pi-reload request, a person typing /reload) already loaded these exact sources.
-    if (now.fingerprint === sources) { replaySelf(self); return; }
+    if (now.fingerprint === sources) { replaySelf(self); inboxGate.rescan(); return; }
     const groups = ttyGroups();
     const blocked = !ctx.isIdle() ? "this Pi started working"
       : ctx.hasPendingMessages() ? "queued messages are waiting"
@@ -352,6 +358,8 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
       const state: SelfReloadState = { from: short(self.from), to: short(now.fingerprint), pending: blocked };
       pi.events.emit(SELF_RELOAD_EVENT, state);
       replaySelf(self);
+      // Nothing more will reload: a message kept for this reload is delivered on the loaded code now.
+      inboxGate.rescan();
       return;
     }
     summarize([`Reloading ${own!.label} before the turn: sources ${short(self.from)} → ${short(now.fingerprint)}.`],
@@ -644,7 +652,42 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     },
   });
 
-  return async (env, ctx) => {
+  /**
+   * A message an idle Pi is about to turn into a turn, while the sources it loaded no longer match:
+   * keep it in its folder for the runtime that loads them (task-751). An idle Pi's next turn is the
+   * only turn it gets, so the same self-reload it already runs between turns is started here instead,
+   * and the new runtime's own inbox scan delivers that message as its turn. Nothing is unlinked,
+   * delivered or recorded by this runtime, so the message is never lost, duplicated or consumed first.
+   */
+  const keepForReload = (env: Envelope, ctx: ExtensionContext): boolean => {
+    if (!own || !supported || ctx.mode !== "tui") return false;
+    // Typed controls start no model turn, and a steer belongs to the turn already running.
+    if (env.control || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
+    // A self-reload already in flight delivers this message from its own session_start scan.
+    if (selfReloading) return true;
+    // A Pi that cannot reload — a background job of its shell, as the typed request path already says —
+    // delivers on the loaded code: keeping the message there would leave no event to rescan it.
+    const groups = ttyGroups();
+    if (groups.pgid !== groups.foreground) return false;
+    // An attempt that never landed is not repeated here; the message starts its turn on what is loaded.
+    if (pendingSelf(ctx)) return false;
+    const now = fingerprintOf(ctx);
+    if (now.fingerprint === sources) return false;
+    const self: SelfRequest = { id: newId("self-"), at: new Date().toISOString(), from: sources, expected: now.fingerprint, text: "" };
+    pi.appendEntry<SelfRequest>(SELF, self);
+    selfReloading = true;
+    try { pi.sendUserMessage(`/pi-reload ${SELF_ARG}`, { expandPromptTemplates: true }); }
+    catch (error) {
+      // No reload is coming, so the message is not held for one: it starts its turn now.
+      selfReloading = false;
+      pi.appendEntry(SELF_DONE, { id: self.id });
+      ctx.ui.notify(`Self-reload could not start: ${reason(error)}`, "warning");
+      return false;
+    }
+    return true;
+  };
+
+  const deliver = async (env: Envelope, ctx: ExtensionContext): Promise<null | undefined> => {
     const control = env.control;
     if (control?.type === "pi-model-operation") {
       // The producer's own self-notice: it opens this caller's card before any acknowledgement. Only this
@@ -714,4 +757,6 @@ export function registerPiReload(pi: ExtensionAPI): (env: Envelope, ctx: Extensi
     await applyNow(ctx);
     return null;
   };
+
+  return { deliver, keep: keepForReload };
 }

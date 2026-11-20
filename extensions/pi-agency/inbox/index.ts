@@ -50,7 +50,14 @@ function header(env: Envelope, routes?: Routes): string {
 /** Replace an envelope (Worker notices), leave it unchanged (undefined), or explicitly consume it (null, no model turn). */
 export type InboxTransform = (env: Envelope, ctx: ExtensionContext) => Promise<Envelope | undefined | null>;
 
-export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransform): void {
+/**
+ * Decide, before an envelope is claimed from its folder, that this runtime must not deliver it yet
+ * (a reload has to land first): `true` leaves the file exactly where it is — never unlinked,
+ * delivered or recorded — and a later scan delivers it on the code that is loaded then.
+ */
+export type InboxKeep = (env: Envelope, ctx: ExtensionContext) => boolean;
+
+export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransform, keep?: InboxKeep): void {
   let ctx: ExtensionContext | undefined;
   let endpoint: Endpoint | undefined;
   let watcher: FSWatcher | undefined;
@@ -94,6 +101,9 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       // A typed control is different: its receiver consumes it without a model turn, so it is delivered
       // while the Pi is working too. The target records it as pending and applies it at its own idle boundary.
       if (!steersWhileWorking(env) && !env.control && !ctx.isIdle()) continue;
+      // A delivery path that cannot deliver on the loaded code keeps the message queued instead:
+      // claiming it now would consume it for a turn that code no longer matches.
+      if (keep?.(env, ctx)) continue;
       try {
         unlinkSync(path);
       } catch (error) {

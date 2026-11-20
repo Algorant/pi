@@ -29,9 +29,9 @@ export default function piHc(pi: ExtensionAPI): void {
   registerDispatch(pi, workers.startWorker);
   const reload = registerPiReload(pi);
   registerInbox(pi, async (env, ctx) => {
-    if (await reload(env, ctx) === null) return null;
+    if (await reload.deliver(env, ctx) === null) return null;
     return workers.readyNotice(env, ctx);
-  });
+  }, reload.keep);
   // Inbox settlement scanning is registered first, preserving the existing gate.
   registerHcIdleCompaction(pi);
 }

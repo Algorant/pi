@@ -424,9 +424,9 @@ Native children/Workers are reported unsupported and never requested: their
 owner controls their job lifetime. Any target can exit before acknowledging;
 a requested result is never counted as verified. Rerun is explicit, not a watcher.
 
-### Self-reload at a turn boundary (one fingerprint, two trigger points)
+### Self-reload at a turn boundary (one fingerprint, three trigger points)
 
-One fingerprint and one mechanism, reached from two places in a Pi's own lifecycle. `fingerprint.ts`
+One fingerprint and one mechanism, reached from three places in a Pi's own lifecycle. `fingerprint.ts`
 hashes the sources this Pi actually loads by path, mtime and size, never by reading a file: the agent
 dir's `extensions`, `skills`, `prompts` and `themes` (under `PI_CODING_AGENT_DIR`, else `~/.pi/agent`)
 plus `settings.json`, `config-manifest.json`, `model-roles.json`, `models.json` and `keybindings.json`,
@@ -434,8 +434,17 @@ and the current project's `.pi` `extensions`, `skills`, `prompts` and `themes` p
 `SYSTEM.md` and `APPEND_SYSTEM.md`. The project half is what `/pi-reload` never covered: a project's
 own extension, or a change outside `~/.pi`'s history. `session_start` records the stamp once
 (about 1-2 ms and no child process, no timer, no watcher for ~220 entries; re-measured 1.65-2.17 ms
-per check on a real Pi); both triggers compare against it and never write it back unless a reload lands.
+per check on a real Pi); all three triggers compare against it and never write it back unless a reload lands.
 
+- **Before an inbox-delivered turn** (the inbox's own per-message delivery decision: idle, nothing
+  queued or pending, not a typed control). A message that starts the next turn is delivered as a custom
+  message, which emits no `input` event, so a changed stamp keeps that message exactly where it is — the
+  file is neither unlinked, nor delivered, nor recorded as delivered — and dispatches the same
+  `/pi-reload --internal-self`. The new runtime's own `session_start` inbox scan then delivers that one
+  message as its turn: no duplicate, no second replay, nothing marked consumed first. Holding happens
+  only where a rescan is certain; a Pi that cannot reload at all (a background job of its shell) and an
+  attempt that never landed deliver on the loaded code instead, and a self-reload refused at that
+  moment releases the kept message with `inboxGate.rescan()`. A steer into a running turn is never held.
 - **Turn start** (`input`, before skill and template expansion, from a person, idle, nothing queued or
   pending). A changed stamp appends a hidden `pi-self-reload` entry holding that prompt, answers
   `handled` so no turn starts on stale code, and dispatches `/pi-reload --internal-self`. The reload's
