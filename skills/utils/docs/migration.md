@@ -39,7 +39,7 @@ value is non-sensitive and appropriate for the repository.
 | Existing SecretSpec behavior | fnox target | Important difference |
 |---|---|---|
 | `secretspec run -- cmd` | `fnox exec -- cmd` | Keep injection process-scoped |
-| `secretspec check` | `fnox check --all` | No general fnox local audit log |
+| `secretspec check` | `fnox check --all` | `fnox audit` can show the local access log when audit recording is enabled; it is user-writable, not tamper-proof, and distinct from Proton's identity audit |
 | Proton `set` | Temporary operator Scriptify write | fnox Proton provider is read-only |
 | Default profile | Top-level `[secrets]` | Use `default` only in the item title |
 | Named profile | `[profiles.NAME.secrets]` | Profile is not a vault |

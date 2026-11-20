@@ -212,7 +212,7 @@ Run from the project root, through fnox so `PGPASSWORD` is injected. Exit 0 ok, 
 | Command | Does |
 | --- | --- |
 | `dbs bootstrap` | Checks `dbs.toml`, the duckdb CLI and extensions, the database and role (`postgres.py list` over ssh), the `fnox.toml` reference; prints what to do for anything missing. Never reads a password. |
-| `fnox exec -- dbs mirror [--source N] [--via-ssh] [--dry-run]` | One transaction: replace every table, add primary keys, drop vanished tables, record `_mirror_runs`. A failure rolls back and leaves the previous mirror intact. `--dry-run` writes nothing; without `PGPASSWORD` it checks only the source side (tables, row counts, CLI version) and says the Postgres check was skipped. |
+| `fnox exec -- dbs mirror [--source N] [--via-ssh] [--dry-run]` | One transaction per source: replace every table, add primary keys, drop vanished tables, record `_mirror_runs`. A nonempty schema is accepted only when its schema comment exactly matches the source path comment written by `dbs mirror`; otherwise it is refused as unowned or owned by a different source. A failure rolls back that source's transaction and leaves its previous mirror intact. `--dry-run` writes nothing; without `PGPASSWORD` it checks only the source side (tables, row counts, CLI version) and says the Postgres check was skipped. Positional arguments are rejected; select a source with `--source N`. |
 | `fnox exec -- dbs status` | Last run, per-table counts, fresh or stale. |
 | `fnox exec -- dbs verify [--deep]` | Row counts; `--deep` adds a two-way `EXCEPT ALL` per table. |
 | `fnox exec -- dbs sql [--local] "<select>"` | Read-only query on the mirror (or the source with `--local`). It prints query results by design. |
@@ -364,8 +364,8 @@ avoiding zsh startup banners, aliases and mangled long pasted command lines.
 No new Pi tool, terminal framework, or persistent service is needed.
 
 - Under HC, start each side with `hc run --bg --rm --name <xfer-send|xfer-recv>
-  -- bash --noprofile --norc -c '<transfer command>'`, adding `--on <machine>`
-  for a remote side. Do not wait: start the transfer, end the turn, and check
+  -- bash --noprofile --norc -c '<transfer command>'`, adding HC's `--on <machine>`
+  option for a remote side (it is not a croc flag). Do not wait: start the transfer, end the turn, and check
   the terminal's output once afterwards with `hc read <t> --json --lines 0`,
   or act when Algorant or the inbox reports. Never sleep or poll.
 - Print a short colored header with the exact source/destination, count/size

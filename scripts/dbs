@@ -278,6 +278,8 @@ fail_run() {  # fail_run PHASE
 # Introspect one source and its mirror schema. Fills:
 #   TABLES   mirrored table names (source base tables minus exclude)
 #   PGT      table names currently in the mirror schema (including _mirror_*)
+#   PGO      count of relations in the target schema
+#   MIRROR_COMMENT_HEX existing schema comment encoded as hex, if present
 #   PK[t]    comma-separated primary-key columns
 introspect() {  # introspect IDX
   local i=$1 tag a b t ex
@@ -288,14 +290,19 @@ introspect() {  # introspect IDX
 SELECT 'T|' || table_name FROM duckdb_tables() WHERE database_name = 'src' AND schema_name = 'main' AND NOT starts_with(table_name, 'sqlite_') ORDER BY 1;
 SELECT 'K|' || table_name || '|' || array_to_string(constraint_column_names, ',') FROM duckdb_constraints() WHERE database_name = 'src' AND schema_name = 'main' AND constraint_type = 'PRIMARY KEY' ORDER BY 1;
 EOF
-    ((NOPG)) || echo "SELECT 'P|' || table_name FROM duckdb_tables() WHERE database_name = 'pg' AND schema_name = '${S_SCHEMA[i]}' ORDER BY 1;"
+    if ((!NOPG)); then
+      echo "SELECT 'P|' || table_name FROM duckdb_tables() WHERE database_name = 'pg' AND schema_name = '${S_SCHEMA[i]}' ORDER BY 1;"
+      printf "SELECT 'O|' || n FROM postgres_query('pg', '%s');\n" "$(sq "SELECT count(*)::text AS n FROM pg_class c JOIN pg_namespace nsp ON nsp.oid = c.relnamespace WHERE nsp.nspname = '${S_SCHEMA[i]}' AND c.relkind IN ('r','p','v','m','S','f')")"
+      printf "SELECT 'C|' || comment_hex FROM postgres_query('pg', '%s');\n" "$(sq "SELECT encode(convert_to(COALESCE(obj_description(oid, 'pg_namespace'), ''), 'UTF8'), 'hex') AS comment_hex FROM pg_namespace WHERE nspname = '${S_SCHEMA[i]}'")"
+    fi
   } >"$WORK/introspect.sql"
   duck "$WORK/introspect.sql" || fail_run introspection
-  TABLES=() PGT=(); PK=()
+  TABLES=() PGT=(); PK=(); PGO=0 MIRROR_COMMENT_HEX=
   local -a all=()
   while IFS='|' read -r tag a b; do
     case $tag in
       T) all+=("$a") ;; K) PK[$a]=$b ;; P) PGT+=("$a") ;;
+      O) PGO=$a ;; C) MIRROR_COMMENT_HEX=$a ;;
     esac
   done <"$WORK/out"
   for t in "${all[@]}"; do
@@ -350,6 +357,7 @@ EOF
 # ── commands ──────────────────────────────────────────────────────────────────
 cmd_mirror() {
   allow_opts DRY VIA SRC
+  ((${#POS[@]} == 0)) || die "dbs mirror does not accept positional arguments" "use --source <name> to select one source"
   select_sources; need_cli
   # A dry run writes nothing, so without PGPASSWORD it checks the source side only.
   if ((DRY)) && [[ -z ${PGPASSWORD:-} ]]; then NOPG=1; else pg_route; fi
@@ -357,6 +365,13 @@ cmd_mirror() {
   for i in "${SEL[@]}"; do
     introspect "$i"
     local s=${S_SCHEMA[i]} dropped=()
+    local expected_comment="one-way mirror of ${S_PATH[i]}; overwritten by dbs mirror"
+    local expected_comment_hex
+    expected_comment_hex=$(printf '%s' "$expected_comment" | od -An -tx1 | tr -d '[:space:]')
+    if ((!NOPG)) && ((PGO > 0)); then
+      [[ -n $MIRROR_COMMENT_HEX ]] || die "mirror schema $s is nonempty and has no dbs ownership comment" "choose an empty schema; dbs will record ownership on first use"
+      [[ $MIRROR_COMMENT_HEX == "$expected_comment_hex" ]] || die "mirror schema $s belongs to a different source" "use the original dbs.toml source or choose an empty schema"
+    fi
     for t in "${PGT[@]}"; do
       [[ $t == _mirror_* ]] && continue
       in_list "$t" "${TABLES[@]}" || dropped+=("$t")

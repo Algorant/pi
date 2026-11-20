@@ -50,7 +50,7 @@ Agents never see the value. Rotation is homelab-server's `postgres.py rotate <pr
 
 ## The mirror (`dbs mirror`)
 
-One `duckdb` CLI run per source: the source is attached `READ_ONLY` (the local file is never written), the Postgres database is attached through the `postgres` extension (plus `sqlite` for a SQLite source; both are `INSTALL`ed on first use and again after a CLI upgrade, which needs internet once). In **one Postgres transaction**:
+One `duckdb` CLI run per source: the source is attached `READ_ONLY` (the local file is never written), the Postgres database is attached through the `postgres` extension (plus `sqlite` for a SQLite source; both are `INSTALL`ed on first use and again after a CLI upgrade, which needs internet once). In **one Postgres transaction per source**:
 
 1. `CREATE SCHEMA IF NOT EXISTS` (non-`public` schemas).
 2. For each source base table: `CREATE OR REPLACE TABLE pg.<schema>.<t> AS SELECT * FROM src.main.<t>`, then `ALTER TABLE ... ADD PRIMARY KEY (...)` from the source's `PRIMARY KEY` constraints (both engines).
@@ -58,7 +58,7 @@ One `duckdb` CLI run per source: the source is attached `READ_ONLY` (the local f
 4. Insert one `<schema>._mirror_runs` row (`finished_at` is the start of the run by the local clock, so `status` compares like clocks with the file's mtime; `seconds`; `source` engine; `tables` jsonb of Postgres-side row counts) and `COMMENT ON SCHEMA` ("one-way mirror of <path>; overwritten by dbs mirror").
 5. `COMMIT`.
 
-A failed or interrupted run never reaches `COMMIT`, so the previous mirror stays intact (observed: a later table failing its primary key rolled back an earlier table's replacement). Everything in a mirror schema except `_mirror_*` belongs to `dbs`.
+A failed or interrupted run never reaches `COMMIT`, so the previous mirror stays intact (observed: a later table failing its primary key rolled back an earlier table's replacement). Everything in a mirror schema except `_mirror_*` belongs to `dbs`. A nonempty schema is accepted only when its schema comment exactly matches the source path comment written by `dbs mirror`; otherwise it is refused as unowned or owned by a different source. `dbs mirror` rejects positional arguments; use `--source <name>` to select one source.
 
 Not mirrored: views, foreign keys, secondary indexes, defaults, sequences, CHECK constraints. Add indexes in Postgres only when a reader needs them. Keep views and any object that depends on a mirrored table in a different schema: `CREATE OR REPLACE`/`DROP` of a table that something depends on (or a non-table object in the mirror schema) fails the run, which rolls back, and `dbs` says so. Replacing holds locks until `COMMIT`, so readers of a table being replaced wait.
 

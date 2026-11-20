@@ -42,7 +42,7 @@ if [[ -t 0 && -t 1 ]] && [[ ${TERM:-dumb} != dumb ]] && [[ -z ${CI+x} ]] \
 fi
 UI=plain; [[ $TTY_OK == 1 ]] && command -v gum >/dev/null 2>&1 && UI=gum
 
-# ── Verdigris theme for gum (copy of ~/.config/theme_colors/verdigris-gum.sh) ─
+# ── Verdigris theme constants for gum ─
 V_FG='#ebdbb2' V_MUTED='#928374' V_PANEL='#2c2f30' V_BG='#1d2021'
 V_FERN='#8ec07c' V_PATINA='#689d6a' V_AQUA='#83a598'
 V_OCHRE='#e6bf86' V_MOSS='#70764a' V_ERR='#e36f63'
