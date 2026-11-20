@@ -153,8 +153,7 @@ pass_view_state() {
   ((rc == 0)) && return 0
   if grep -q 'No item found' "$ERRF"; then STORED=; return 1; fi
   fail "pass-cli could not read the item: $(head -c 200 "$ERRF" | tr '\n' ' ')"
-  summary fail "Could not check Proton Pass" "Run: pass-cli login, then rerun this script."
-  exit 1
+  return 2
 }
 
 # ── 1 Preconditions ───────────────────────────────────────────────────────────
@@ -195,6 +194,11 @@ if pass_view_state; then
   fi
   info "item exists with a different value (or dry run)"
 else
+  rc=$?
+  if ((rc != 1)); then
+    summary fail "Could not check Proton Pass" "Run: pass-cli login, then rerun this script."
+    exit 1
+  fi
   info "item does not exist yet"
 fi
 STORED=
