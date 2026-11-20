@@ -42,7 +42,7 @@ fframes only for motion or a rendered video.
 ### Verdigris palette
 
 Everything uses Algorant's Verdigris palette (`~/Projects/verdigris`;
-canonical data in `css/palette.json`), dark by default.
+canonical data in `palette/verdigris.json`), dark by default.
 
 | Core | Hex | Role |
 | --- | --- | --- |

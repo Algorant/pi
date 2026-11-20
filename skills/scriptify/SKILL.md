@@ -67,7 +67,7 @@ GH_TOKEN=$(ask_secret "GitHub token") || on_prompt_rc $?
 
 Start from [`sample.sh`](sample.sh) in this skill directory. It is a runnable template: the gate, the Verdigris gum theme, output helpers with plain twins, prompt helpers, exit-status handling, and a harmless demo flow. Copy the blocks the handoff needs into the script and delete the rest. The script stays self-contained: never `source` the template or a dotfile from a handoff script. A reviewed template for one recurring operator handoff, storing a project's Postgres role password as a Proton item, lives in the `utils` skill's Databases section (`agent/skills/utils/scripts/store-pg-password.sh`).
 
-Gum is optional decoration, never a requirement. When a real terminal is in front of a person, gum makes banners, confirmations, menus, spinners, and status lines pleasant. Otherwise every helper falls back to `echo` / `read`. Never install gum from the script: global mise (the machine environment, see global AGENTS.md) declares `"aqua:charmbracelet/gum" = "latest"`. Do not add glow, a `%` progress bar (gum has no progress command; measurable progress stays plain bash), or a compiled Charm helper.
+Gum is optional decoration, never a requirement. When a real terminal is in front of a person, gum makes banners, confirmations, menus, spinners, and status lines pleasant. Otherwise every helper falls back to `echo` / `read`. Never install gum from the script: it comes with Omarchy as a system package (`/usr/bin/gum`, not a mise tool), so `command -v gum` is the whole check. Do not add glow, a `%` progress bar (gum has no progress command; measurable progress stays plain bash), or a compiled Charm helper.
 
 ### Gate
 

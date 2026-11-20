@@ -33,7 +33,7 @@ There is one tool: `ask_me`. One call carries 1-4 independent blocking questions
 - Pi's inline custom screen temporarily replaces the editor while the dialog is open and restores the draft afterward. The dialog only restates the current question and lists choices. There is no separate summary or question-description field. It uses at most 30% of the terminal and is never padded to that height. The question stays fixed; Shift+Up/Down scrolls choices/input. PgUp/PgDn scrolls the conversation in fullscreen mode; regular mode uses terminal scrollback.
 - Typing or pasting starts a custom answer immediately. `Other…` is also available when freeform is allowed. Esc returns from custom input to choices, preserving the draft.
 - Enter saves the current answer and advances. The last answer submits automatically, with no review step. Tab/Shift+Tab move between questions and preserve drafts and saved answers.
-- Do not use multi-select phrasing for v1. If many details are needed, ask for a precise custom answer instead.
+- The tool has no multi-select: each question takes one answer. When many details are needed, ask for a precise custom answer instead.
 
 ## Before asking
 
