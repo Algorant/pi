@@ -50,6 +50,23 @@ function switchLong(d: Details): string {
   return `quota-switched ${switchMove(s)}${text(s.operation) ? ` · cutover ${text(s.operation)}` : ""}${s.partial ? " · partial: some typed requests failed or a Pi was skipped" : ""}`;
 }
 
+/** The advisory cold read a brief or kickoff launch started (task-755): started, or why not. */
+function coldReadOf(d: Details): Details | undefined {
+  return d.coldRead && typeof d.coldRead === "object" ? d.coldRead : undefined;
+}
+function coldReadShort(d: Details): string {
+  const cold = coldReadOf(d);
+  if (!cold) return "";
+  return cold.status === "started" ? `cold read ${text(cold.name) || "started"}` : "no cold read";
+}
+function coldReadLong(d: Details): string {
+  const cold = coldReadOf(d);
+  if (!cold) return "";
+  return cold.status === "started"
+    ? `started ${text(cold.label)}${text(cold.name) ? ` (${text(cold.name)})` : ""} · its findings arrive in your inbox`
+    : `not started · ${text(cold.error) || "refused"} · the launch stands`;
+}
+
 function benchmarkText(args: Args, d: Details): string {
   const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : {};
   const selected = text(benchmark.selectedModel) || text(args.benchmarkModel);
@@ -80,6 +97,8 @@ function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: The
     if (details.requestCloseError || details.tabError || details.notChecked?.length) parts.push(theme.fg("warning", " · see details"));
     const move = switchShort(details);
     if (move) parts.push(theme.fg("warning", ` · ${move}`));
+    const cold = coldReadShort(details);
+    if (cold) parts.push(theme.fg(coldReadOf(details)!.status === "started" ? "dim" : "warning", ` · ${cold}`));
     const benchmark = benchmarkText(args, details);
     if (benchmark) parts.push(theme.fg("warning", benchmark));
   }
@@ -88,7 +107,8 @@ function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: The
 
 function build(tool: DispatchTool, { args, result, options, theme, pending, error, context, text: output }: BoxedToolRenderInput<Args, Details>): ToolUiBoxModel {
   const d = (result?.details ?? {}) as Details;
-  const tone: ToolUiTone = pending ? "pending" : error ? "error" : d.requestCloseError || d.tabError ? "warning" : "success";
+  const cold = coldReadOf(d);
+  const tone: ToolUiTone = pending ? "pending" : error ? "error" : d.requestCloseError || d.tabError || (cold && cold.status !== "started") ? "warning" : "success";
   const expanded = Boolean(options.expanded);
   const status = pending ? (context.executionStarted ? "starting" : "queued") : error ? "refused" : "launched";
   const sections = error
@@ -118,6 +138,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
       text(d.route) ? fieldLine(theme, "reports to", text(d.route), "muted") : undefined,
       text(d.requestClosed) ? fieldLine(theme, "request", `${text(d.requestClosed)} closed: dispatched to ${labelOf(tool, args, d)}${idsOf({ name: d.name })}`, "muted") : undefined,
       text(d.requestCloseError) ? fieldLine(theme, "request close", text(d.requestCloseError), "warning") : undefined,
+      cold ? fieldLine(theme, "cold read", coldReadLong(d), cold.status === "started" ? "muted" : "warning") : undefined,
       Array.isArray(d.notChecked) && d.notChecked.length ? fieldLine(theme, "not checked", d.notChecked.join(", "), "warning") : undefined,
       expanded && d.labels ? fieldLine(theme, "labels", Object.entries(d.labels).map(([k, v]) => `${k}=${v}`).join(" "), "dim") : undefined,
       expanded && text(d.deliveryId) ? fieldLine(theme, "delivery", text(d.deliveryId), "dim") : undefined,

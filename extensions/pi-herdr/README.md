@@ -268,6 +268,18 @@ checkout or space) and names it; nothing is removed automatically.
   this machine's inbox log; after a confirmed launch it is closed through the
   shared inbox close (`closeMessage`) with the note `dispatched to <label> (<name>)`. A failed close is reported, the
   launch stands.
+- Cold read (task-755): after a confirmed Task-free Worker or manus `brief`, or a
+  Ceph `kickoff`, the launch starts one read-only `scout` helper through the same
+  `launchHelper` path a `dendra_start` helper uses. Its task holds
+  `agent/skills/audit/cold-read.md` inline (not a path, so the helper never
+  depends on which agent directory it loaded), then the brief or kickoff verbatim
+  and the repository root. It reports only three gaps — context only the
+  conversation explains, references that do not resolve, and no clear definition
+  of done — and never rewrites. It is advisory: the launch is never delayed,
+  blocked or retried, a refused or failed cold read leaves the launch standing,
+  and one line in the tool details and card says it started or why it did not.
+  Task-backed and helper launches skip it, and it costs one extra read-only child
+  per brief or kickoff launch.
 - `dendra_start {kind, task, label?}` for `scout`/`researcher`/`reviewer` runs
   `hc run --bg --rm --no-notify --json --name <slug> --cwd <cwd> --label label=<label>
   --label kind=<kind> -- child-exit pi <owner's -e set> --agency-profile <kind> -- "<task>"`

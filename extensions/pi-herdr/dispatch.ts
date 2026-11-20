@@ -1,5 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/custom-tools/dispatch.ts";
@@ -166,6 +167,78 @@ async function launchRaw(args: string[], name: string): Promise<any> {
   return started;
 }
 
+/** The one cold-read definition, the same file the audit skill's Cold read check applies (task-755). */
+const COLD_READ = fileURLToPath(new URL("../../skills/audit/cold-read.md", import.meta.url));
+
+/**
+ * The one read-only helper launch: `dendra_start` scout/researcher/reviewer, and the cold read after a
+ * brief or kickoff. Preconditions are settled by the caller; this names the terminal, resolves the
+ * child's own role (cutting over only when quota alone blocks it) and runs one hc child. It never
+ * selects, waits, polls or retries.
+ */
+async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: string, task: string, ctx: ExtensionContext): Promise<{ name: string; address: string; switched?: Record<string, unknown>; helperSwitch: string }> {
+  const name = await nameFor(label);
+  // Helpers resolve their own role inside the child; resolving it here — after every
+  // read-only precondition, before any terminal — refuses a blocked launch, cutting over
+  // first only when quota alone blocks it. A reviewer's author model is this Pi's own
+  // current model (the same fact it publishes as pi.model, which the child reads), so a
+  // session without one fails here instead of launching a reviewer that cannot route.
+  const callerModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+  if (kind === "reviewer" && callerModel === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
+  const helper = kind === "reviewer"
+    ? await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel })
+    : await resolveRoleForSwitch("subagent", ctx.modelRegistry, () => resolveRoleEntry("subagent", ctx.modelRegistry));
+  if ("refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
+  const helperSwitch = helper.switched
+    ? ` Set ${helper.switched.from} → ${helper.switched.to} for ${kind} (cutover ${helper.switched.operation ?? "none"}${helper.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+    : "";
+  // The caller is the native parent: the report comes to its inbox, a reviewer reads its pi.model.
+  // The task is Pi's first message on its command line; child-exit tells the parent if it ends unreported.
+  let started: any;
+  try {
+    started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${kind}`,
+      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--agency-profile", kind, "--", task.trim()], name);
+  } catch (error) {
+    throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
+  }
+  return { name, address: started.address, ...(helper.switched ? { switched: helper.switched } : {}), helperSwitch };
+}
+
+/**
+ * One advisory cold read after a confirmed Task-free brief or a Ceph kickoff. The definition is inline
+ * in the helper's task with the text and the repository root, so the helper never depends on which
+ * agent directory it loaded. It never delays, blocks or retries the launch: a refusal or launch error
+ * leaves the launch standing and returns one reported line for the card.
+ */
+async function coldRead(what: "brief" | "kickoff", label: string, text: string, root: string, ctx: ExtensionContext): Promise<Record<string, unknown>> {
+  let definition: string;
+  try { definition = readFileSync(COLD_READ, "utf8").trim(); }
+  catch (error) { return { status: "not started", error: `${COLD_READ} is unreadable: ${diagnosticText(error)}` }; }
+  const helperLabel = `Cold read ${label.trim().split(/\s+/).slice(0, 3).join(" ")}`;
+  const task = [
+    "You are a cold reader, not an editor. Apply exactly the checks in this definition:",
+    definition,
+    `The ${what} under review is "${label}", verbatim:`,
+    text.trim(),
+    `Repository root for every path and command you check: ${root}`,
+    "Report only the three gaps the definition names, in its format. Never rewrite the text, and do not judge its description, triggers or ambition.",
+  ].join("\n\n");
+  try {
+    const helper = await launchHelper("scout", helperLabel, task, ctx);
+    return { status: "started", label: helperLabel, name: helper.name, terminal: helper.address };
+  } catch (error) {
+    return { status: "not started", label: helperLabel, error: diagnosticText(error) };
+  }
+}
+
+/** What the launch says about its cold read, or nothing when it had none to start. */
+function coldReadNote(facts: Record<string, unknown> | undefined): string {
+  if (!facts) return "";
+  return facts.status === "started"
+    ? ` Advisory cold read ${facts.label} (${facts.name}) started; its findings arrive in your inbox.`
+    : ` No cold read: ${facts.error}`;
+}
+
 const appRoute = (host: AppHost) => host.machine ? `hc exec --on ${host.machine} -- herdr-app` : "herdr-app";
 const rules = (route: string, name: string, tabName: string, host: AppHost) => [
   `Report results, questions and blockers only to ${route} with agent_send terminal=${route}: line 1 is the answer (one line, at most 160 characters), detail below or in an artifact.`,
@@ -189,8 +262,10 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, benchmarkModel: params.benchmarkModel, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
       const d = started.details as Record<string, any>;
       const closed = closeRequest(params.from, `${d.label} (${d.agent})`, self);
-      return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}`,
-        { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...closed });
+      // Task-free briefs only: a Task-backed Worker's scope is the Task, not a starter's prose.
+      const cold = params.brief === undefined ? undefined : await coldRead("brief", d.label ?? params.label ?? "", params.brief, ctx.cwd, ctx);
+      return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}${coldReadNote(cold)}`,
+        { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...(cold ? { coldRead: cold } : {}), ...closed });
     }
     if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant, params.benchmarkModel].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
@@ -201,33 +276,10 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
-    const name = await nameFor(label);
-    // Helpers resolve their own role inside the child; resolving it here — after every
-    // read-only precondition, before any terminal — refuses a blocked launch, cutting over
-    // first only when quota alone blocks it. A reviewer's author model is this Pi's own
-    // current model (the same fact it publishes as pi.model, which the child reads), so a
-    // session without one fails here instead of launching a reviewer that cannot route.
-    const callerModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-    if (params.kind === "reviewer" && callerModel === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
-    const helper = params.kind === "reviewer"
-      ? await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel })
-      : await resolveRoleForSwitch("subagent", ctx.modelRegistry, () => resolveRoleEntry("subagent", ctx.modelRegistry));
-    if ("refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
-    const helperSwitch = helper.switched
-      ? ` Set ${helper.switched.from} → ${helper.switched.to} for ${params.kind} (cutover ${helper.switched.operation ?? "none"}${helper.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
-      : "";
-    // The caller is the native parent: the report comes to its inbox, a reviewer reads its pi.model.
-    // The task is Pi's first message on its command line; child-exit tells the parent if it ends unreported.
-    let started: any;
-    try {
-      started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${params.kind}`,
-        "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--agency-profile", params.kind, "--", params.task.trim()], name);
-    } catch (error) {
-      throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
-    }
-    const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started ${params.kind} ${label} (${name}, ${started.address}) in ${ctx.cwd}. Its report arrives in your inbox; do not wait or poll.${helperSwitch}`,
-      { kind: params.kind, label, name, terminal: started.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...closed });
+    const helper = await launchHelper(params.kind as "scout" | "researcher" | "reviewer", label, params.task, ctx);
+    const closed = closeRequest(params.from, `${label} (${helper.name})`, self);
+    return result(`Started ${params.kind} ${label} (${helper.name}, ${helper.address}) in ${ctx.cwd}. Its report arrives in your inbox; do not wait or poll.${helper.helperSwitch}`,
+      { kind: params.kind, label, name: helper.name, terminal: helper.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...closed });
   }
 
   async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
@@ -326,8 +378,10 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed });
+    // Task-free briefs only: a Task-backed manus reads its contract from the Task.
+    const cold = params.brief === undefined ? undefined : await coldRead("brief", label, params.brief, repo.repoRoot, ctx);
+    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed });
     } catch (error) {
       // A switch that already happened stays applied; a later failure never hides it.
       throw new Error(`${diagnosticText(error)}${manusSwitch ? `${manusSwitch} That cutover stays applied.` : ""}`);
@@ -411,8 +465,9 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     } catch (error) { throw new Error(`${diagnosticText(error)} Space ${spaceId} is kept as it is; no automatic removal.`); }
     const tab = await nameTab(await localAppHost(), spaceId, started.address, "main");
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.`,
-      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, modelSet: orchestrator.value.set, modelQuota: orchestrator.value.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, ...tab, ...closed });
+    const cold = await coldRead("kickoff", label, params.kickoff, folder, ctx);
+    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.${coldReadNote(cold)}`,
+      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, modelSet: orchestrator.value.set, modelQuota: orchestrator.value.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, coldRead: cold, ...tab, ...closed });
     } catch (error) {
       // A switch that already happened is a committed machine change: never hide it behind a
       // later failure of the space, tab or launch.

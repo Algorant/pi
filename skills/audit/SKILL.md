@@ -39,6 +39,13 @@ Show: the mistake → its harmful effect, the current guard and how it can be by
 Test the reasoning: missing setup, wrong target, skipped step, retry; trace it, never trigger the harm.
 Fix: the smallest guard, type or safe default that makes the wrong case impossible or refused at the boundary.
 
-### (your next check)
+### Cold read
 
-Add the next check here. Move a check to its own file only if it grows.
+Read the text as someone who saw none of the conversation and report only three
+gaps: context only the conversation explains, references that do not resolve,
+and no clear definition of done.
+
+Apply `cold-read.md` beside this file: the three gaps, how to verify every
+reference against the repository root, and the finding format. It is the same
+definition the dispatch cold read uses. Report the findings; never rewrite the
+skill.
