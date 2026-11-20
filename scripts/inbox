@@ -102,7 +102,9 @@ if (command === "exited") {
     tail = lines.slice(-15).map((line) => `    ${line.slice(0, 200)}`).join("\n") || "    (empty)";
   } catch (error) { tail = `    (not readable: ${error instanceof Error ? error.message : error})`; }
   const who = `${self.labels?.label ?? self.name ?? self.address} (${[self.name, self.address].filter(Boolean).join(", ")})`;
-  await sendResult(owner, `Child ${who} ended: ${exit}, without any inbox report from it\n`
+  const rateLimit = tail.replace(/\s+/g, " ").match(/.{0,80}\b429\b.{0,120}(?:rate[ _-]?limit|too many requests)|.{0,80}(?:rate[ _-]?limit|too many requests).{0,120}\b429\b/i)?.[0]?.trim();
+  const cause = rateLimit ? `provider 429 rate limit (${rateLimit})` : exit;
+  await sendResult(owner, `Child ${who} ended: ${cause}${rateLimit ? `; exit ${exit}` : ""}, without any inbox report from it\n`
     + `It ran in ${self.cwd} on ${local}; a --rm terminal is gone now. Last screen lines:\n${tail}`);
 }
 

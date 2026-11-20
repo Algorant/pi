@@ -9,6 +9,7 @@ import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { HEADLINE_MAX, splitHeadline } from "../pi-agency/inbox/envelope.ts";
 import { peerText } from "../../scripts/whois.ts";
 import { AGENCY_PROFILE_FLAG } from "../pi-agency/subagents/profile.ts";
+import { provider429 } from "../pi-agency/provider-rate-limit.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
 import { hcJson } from "./core.ts";
 
@@ -108,8 +109,25 @@ export function registerHcReport(pi: ExtensionAPI) {
       ? message.content.filter(block => block.type === "text").map(block => block.text).join("\n").trim() || undefined : undefined;
     lastStop = message.stopReason;
   });
-  pi.on("agent_before_settle", async (_event, ctx) => {
+  pi.on("agent_before_settle", async (event, ctx) => {
     if (!parent || attempted || !lastStop) return; // startup idle is not a job ending
+    if (lastStop === "error") {
+      const branch = ctx.sessionManager.getBranch().filter((entry: any) => entry?.type === "message");
+      const errorMessage = branch.at(-1)?.message?.errorMessage;
+      if (provider429(errorMessage)) {
+        const userMessageId = [...branch].reverse().find((entry: any) => entry.message?.role === "user")?.id;
+        const marker = event.entries.find((entry: any) => entry.type === "custom" && entry.customType === "pi-agency-provider-rate-limit-retry" && entry.data?.userMessageId === userMessageId);
+        if (marker) return; // earlier profile hook committed the one retry; same user input continues
+        const refused = event.entries.findLast((entry: any) => entry.type === "custom" && entry.customType === "pi-agency-provider-rate-limit-refused" && entry.data?.userMessageId === userMessageId)?.data;
+        const alreadyRetried = branch.some((entry: any) => entry.type === "custom" && entry.customType === "pi-agency-provider-rate-limit-retry" && entry.data?.userMessageId === userMessageId);
+        const provider = refused?.provider ?? ctx.model?.provider ?? "unknown";
+        const outcome = alreadyRetried
+          ? `switched retry failed: ${refused?.reason ?? "the provider returned another 429"}`
+          : `no switch: ${refused?.reason ?? "role recovery did not take over"}`;
+        await fail(ctx, `provider 429 rate limit from ${provider}; ${outcome}`);
+        return;
+      }
+    }
     if (["error", "aborted", "length"].includes(lastStop)) { await fail(ctx, `Child ended on ${lastStop}; see its saved session.`); return; }
     const text = plainFinal || "The job ended; its scoped output is recorded in the saved session.";
     plainFinal = undefined;

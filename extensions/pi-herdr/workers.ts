@@ -29,6 +29,7 @@ import {
 } from "../pi-agency/workers/shared.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
+import { provider429Diagnostic, registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { CHILD_EXIT, hcFind, hcJson, hcText, isHc } from "./core.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, workerLabel } from "../../scripts/whois.ts";
 import { briefContract, hasWorktree, projectRules, requireContract, taskFreeChecks, workerBase, workerName } from "../pi-agency/workers/contract.ts";
@@ -348,6 +349,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   const cards = new Map(Object.entries(NATIVE_TOOL_CARDS).map(([name, kind]) => [name, createWorkerToolRenderer(kind) as ToolRenderers]));
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
   let workerMode = false;
+  registerProvider429Recovery(pi, async () => workerMode ? { role: "worker" } : undefined);
   let contextFailure: string | undefined;
   let questionAsked = false;
   /** Captured at the first agent_start after settlement and used until the next settlement:
@@ -572,7 +574,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       // An invocation without a typed handoff hands back its failure. One that already has a
       // handoff (published in this run, or before it by a kept Worker) keeps it unchanged.
       if (!settled.published) await publish(settled, ctx, {
-        diagnostic: contextFailure ?? providerErrorDiagnostic(ctx) ?? rejectedReportDiagnostic(ctx) ?? "Worker turn ended without worker_report or worker_ask." });
+        diagnostic: contextFailure ?? provider429Diagnostic(ctx) ?? providerErrorDiagnostic(ctx) ?? rejectedReportDiagnostic(ctx) ?? "Worker turn ended without worker_report or worker_ask." });
       if (settled.published) {
         // Notice routing only: whichever owner control currently holds this invocation.
         const worker = await view(await invocationControl(settled.invocationId));

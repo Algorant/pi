@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AGENCY_PROFILE_FLAG, hcProfileRequested, resolveSubagentProfile, loadSubagentProfiles, BUNDLED_SUBAGENT_PROFILES_DIRECTORY, type PiSubagentProfileDefinition, type SubagentProfileName } from "../pi-agency/subagents/profile.ts";
 import { resolveRoleEntry, resolveReviewEntry } from "../pi-agency/model-roles.ts";
+import { registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { hcJson } from "./core.ts";
 
 /** Native profile policy only. No launch/placement/observation/retention runtime. */
@@ -8,12 +9,15 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
   pi.registerFlag(AGENCY_PROFILE_FLAG, { type: "string", description: "Native HC read-only child profile: scout, researcher or reviewer." });
   if (!hcProfileRequested()) return;
   let profile: PiSubagentProfileDefinition | undefined;
+  let reviewerCallerModel: string | undefined;
+  registerProvider429Recovery(pi, async () => profile ? { role: profile.name === "reviewer" ? "review" : "subagent", ...(reviewerCallerModel ? { callerModel: reviewerCallerModel } : {}) } : undefined);
   let allowed = new Set<string>();
   let failure: string | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
     const name = pi.getFlag(AGENCY_PROFILE_FLAG);
     profile = undefined;
+    reviewerCallerModel = undefined;
     allowed = new Set();
     failure = undefined;
     pi.setActiveTools([]); // fail closed before any async selection
@@ -28,6 +32,7 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
       if (name === "reviewer") {
         callerModel = (await hcJson(["get", self.parent])).labels?.["pi.model"];
         if (!callerModel) throw new Error("Reviewer requires the native parent's pi.model label; reload that parent Pi before launching a reviewer.");
+        reviewerCallerModel = callerModel;
       }
       const entry = name === "reviewer"
         ? resolveReviewEntry(callerModel!, ctx.modelRegistry)

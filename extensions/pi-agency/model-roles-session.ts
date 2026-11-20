@@ -7,6 +7,7 @@ import { ModelSetUnavailableError, committedCellModels, resolveRoleEntry, type R
 import { resolveRoleForSwitch, type RoleResolution } from "./herdra-role.ts";
 import { workerContextRequested } from "./workers/context.ts";
 import { hcProfileRequested } from "./subagents/profile.ts";
+import { registerProvider429Recovery } from "./provider-rate-limit.ts";
 
 /**
  * Apply the role entry of agent/model-roles.json to a fresh interactive main
@@ -85,6 +86,7 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
   let refusal: string | undefined;
   /** The managed actor for this session, resolved on every session start; undefined when unmanaged. */
   let actor: { role: Role } | undefined;
+  registerProvider429Recovery(pi, async () => actor ? { role: actor.role } : undefined);
   /**
    * The model this session started on (or last took from the policy map), in memory only. A model
    * that differs from it is an in-session choice and is left alone — unless it is exactly the
