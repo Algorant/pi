@@ -1,0 +1,75 @@
+/* Verdigris layer on Words' own styles.css.
+   The --pele-* palette tokens are injected from pele/verdigris.json before this file, so the
+   document frame and the Pele diagrams inside it read the same colours. */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1rem;
+  background: #141617;
+}
+
+.words-doc {
+  --doc-panel: #1d2021;
+  --doc-code: #282828;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 2.5rem;
+  border-radius: 12px;
+  background: var(--doc-panel);
+  color: var(--pele-fg);
+  font: 16px/1.7 "Liberation Sans", sans-serif;
+}
+
+.words-doc [data-markdown='h1'] {
+  color: var(--pele-accent);
+}
+
+.words-doc :is([data-markdown='h2'], [data-markdown='h3']) {
+  color: var(--pele-series-2);
+}
+
+.words-doc [data-markdown='a'] {
+  color: var(--pele-series-2);
+}
+
+.words-doc strong {
+  color: var(--pele-series-3);
+}
+
+.words-doc :is([data-markdown='code'], [data-markdown='code-block']) {
+  font-family: "Liberation Mono", monospace;
+  background: var(--doc-code);
+}
+
+.words-doc [data-markdown='blockquote'] {
+  border-color: var(--pele-series-6);
+  opacity: 1;
+  color: var(--pele-muted);
+}
+
+.words-doc :is(th, td) {
+  border-color: var(--pele-surface-alt);
+}
+
+.words-doc [data-markdown='th'] {
+  color: var(--pele-accent);
+}
+
+.words-doc [data-markdown='mermaid'] svg {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 40rem) {
+  body {
+    padding: 0;
+  }
+
+  .words-doc {
+    padding: 1.25rem 1rem;
+    border-radius: 0;
+  }
+}

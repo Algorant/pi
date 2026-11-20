@@ -1,6 +1,6 @@
 ---
 name: studio
-description: "House style for things made for a person to see: which tool fits which job, the shared Verdigris look and taste rules, and one section each for Pele (Mermaid text to Verdigris SVG/PNG diagrams and charts), Excalidraw (editable drawings in Algorant's Obsidian vault) and fframes (videos in code). Use when creating a diagram, chart, drawing, video or other visual artifact, or choosing which tool to make it with; Sideshow renders its own mermaid surfaces with Pele."
+description: "House style for things made for a person to see: which tool fits which job, the shared Verdigris look and taste rules, and one section each for Pele (Mermaid text to Verdigris SVG/PNG diagrams and charts), Words (Markdown to a self-contained Verdigris HTML document or a terminal view), Excalidraw (editable drawings in Algorant's Obsidian vault) and fframes (videos in code). Use when creating a diagram, chart, drawing, document, handout, video or other visual artifact, or choosing which tool to make it with; Sideshow renders its own mermaid surfaces with Pele."
 metadata:
   short-description: Which creation tool for which job, and the shared house style
 ---
@@ -12,18 +12,30 @@ House style for things made for a person to see. Pick the tool by the job
 kind of creation has its own section in the same shape (when to use, how, the
 rules that matter); a new kind gets a new section and a row in the table.
 
+Requirements: Bun, the local studio install at `~/.local/share/pi-studio`
+(`pele`, `@resvg/resvg-js` and `@pierre/words`, all `latest`), and Liberation
+Sans/Mono for PNG output. One-time setup, and the command both renderers print
+when the install is missing:
+
+    mkdir -p ~/.local/share/pi-studio
+    cp ~/.pi/agent/skills/studio/package.json ~/.local/share/pi-studio/
+    cd ~/.local/share/pi-studio && bun install
+
+Refresh that install with `bun update` in the same directory.
+
 ## Which tool for which job
 
 | Job | Tool | Result |
 | --- | --- | --- |
 | A diagram or chart from text (flow, sequence, state, architecture, timeline, xychart, …) for notes, READMEs, plans, research artifacts, image views or presentations | [Pele](#pele) | Verdigris SVG and PNG files |
 | A diagram in a Sideshow post | Sideshow `kind:"mermaid"` (the `sideshow` skill) | Sideshow renders it with Pele itself; do not render or upload Pele files there |
+| A document someone reads end to end: a report, spec, research write-up or handout, especially one with math, tables or diagrams | [Words](#words) | a self-contained Verdigris HTML page, or a terminal view |
 | A drawing Algorant opens and edits by hand: a sketch, a whiteboard, a layout he will move around | [Excalidraw](#excalidraw) | an `.excalidraw.md` drawing in his vault |
 | A video, animation, motion graphic, teaser, title card or poster | [fframes](#fframes) | a rendered video (draft first) |
 
-Reach for Pele first for any diagram or chart; choose Excalidraw only when
-Algorant will work on the drawing himself, and fframes only for motion or a
-rendered video.
+Reach for Pele first for any diagram or chart; choose Words for a whole
+document, Excalidraw only when Algorant will work on the drawing himself, and
+fframes only for motion or a rendered video.
 
 ## Shared style
 
@@ -71,7 +83,7 @@ presets. Use those rather than pasting raw hex.
 ## Pele
 
 ### When to use
-Reach for Pele first when creating a diagram or chart, then use its image files in any destination. Use the smallest suitable diagram; keep labels readable and label illustrative data. Requires Bun, the local Pele/resvg installation at `~/.local/share/pi-pele`, and Liberation Sans/Mono.
+Reach for Pele first when creating a diagram or chart, then use its image files in any destination. Use the smallest suitable diagram; keep labels readable and label illustrative data.
 
 ### Render
 Resolve the bundled script relative to this skill directory. From the input's working directory:
@@ -91,6 +103,52 @@ Use SVG or PNG in a README, plan/research artifact or image view. Render outside
 
 ### Limits
 Pele outputs SVG; the script inlines CSS functions before PNG rasterisation. Widths are Arial-table estimates, so dense diagrams and non-Latin labels can still crowd. Inspect the result; shorten or split it when needed. External Mermaid plugins are unsupported. No browser or widget change is required.
+
+## Words
+
+### When to use
+A document someone reads end to end: a report, spec, research write-up or
+handout, especially one with math, tables or diagrams. Also a quick, readable
+look at a `.md` file in a terminal. For a diagram alone use Pele; for something
+to review with Algorant, with versions and comments, use Sideshow.
+
+### Render
+Resolve the bundled script relative to this skill directory. From the input's
+working directory:
+
+    bun ~/.pi/agent/skills/studio/words/render.ts doc.md out/
+
+This writes `out/doc.html` (named for the input's stem), one self-contained page
+with Words' own styles, the Verdigris layer, TeX math as SVG, `mermaid` fences
+as Pele SVG, GFM tables and task lists. It prints one JSON line with the path,
+bytes, rendered diagram count and timing. Raw HTML is removed; pass `--trusted`
+for input you wrote or otherwise trust.
+
+For a terminal view:
+
+    bun ~/.pi/agent/skills/studio/words/render.ts doc.md --terminal 80
+
+This prints Words' ANSI at that width (default 80) with its 256-colour accents
+remapped to Verdigris truecolour. A terminal cannot draw images, so math stays
+TeX and diagrams stay Mermaid source.
+
+### Colours
+`words/verdigris.css` is the document layer over Words' `styles.css`, and it
+reads the same `pele/verdigris.json` tokens the diagrams use, so a document and
+the diagrams inside it match. Edit the palette there for both.
+
+### Use the files
+Open the HTML in a browser, attach it to a note or send it as a file: it needs
+no network and refers to no external file. Diagrams for anywhere else come from
+Pele. Do not write into the vault; notes go through the `memory` skill.
+
+### Limits
+Words' math SVGs name STIX Two Math, Cambria Math and Latin Modern Math, so a
+machine with none of them falls back through its generic math and serif fonts.
+A renderer that rasterises SVG text without font fallback (Obscura) shows those
+glyphs as boxes, so check math in a browser or a resvg raster instead. Code
+fences keep their own line length: a long line wraps in the terminal and scrolls
+inside its block in the page. Look at the result before sending it.
 
 ## Excalidraw
 

@@ -1,0 +1,10 @@
+{
+  "name": "pi-studio",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pele": "latest",
+    "@resvg/resvg-js": "latest",
+    "@pierre/words": "latest"
+  }
+}

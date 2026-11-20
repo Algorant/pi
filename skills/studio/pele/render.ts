@@ -6,9 +6,11 @@
 // `verdigris` (default) reads the adjacent verdigris.json on every render; `pele-default` keeps Pele's colours.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 
-const DEPS = join(homedir(), '.local/share/pi-pele');
+const DEPS = join(homedir(), '.local/share/pi-studio');
+const SETUP =
+  'mkdir -p ~/.local/share/pi-studio && cp ~/.pi/agent/skills/studio/package.json ~/.local/share/pi-studio/ && cd ~/.local/share/pi-studio && bun install';
 const PALETTE = join(import.meta.dir, 'verdigris.json');
 const FONT = 'Liberation Sans'; // metric-compatible with the Arial width table Pele measures with
 const MONO = 'Liberation Mono';
@@ -26,13 +28,15 @@ if (!input || !THEMES.includes(theme)) {
 }
 
 // Pele and resvg come from the approved local Bun install, not from this skill directory.
+// Bun also resolves from its own package cache, so a hit outside the install still counts as missing.
 const load = async (name: string) => {
   let path: string;
   try {
     path = Bun.resolveSync(name, DEPS);
   } catch {
-    return fail(`missing ${name} in ${DEPS}; one-time setup: cd ${DEPS} && bun install`);
+    return fail(`missing ${name} in ${DEPS}; one-time setup: ${SETUP}`);
   }
+  if (!resolve(path).startsWith(DEPS + sep)) return fail(`missing ${name} in ${DEPS}; one-time setup: ${SETUP}`);
   return import(path);
 };
 const { render } = await load('pele');
