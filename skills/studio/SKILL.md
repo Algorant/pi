@@ -174,6 +174,19 @@ table and the read-back and look scripts.
 - The PNG view is for the agent to check its own work; Algorant opens
   drawings in Obsidian.
 
+## Demo clips from screen recordings
+
+### When to use
+Use this workflow for short demo clips cut from a screen recording. Judge the cut by whether a first-time viewer can follow it, not by file size, format or duration: a 2–3 MB animated WebP and a clip under 10 seconds were both rejected.
+
+### How
+Start with a clean, full-resolution recording made for the demo. Edit at 1× speed and trim waits rather than speeding up the footage. Give each function its own short section: show the starting window, trigger the shortcut, show the visible result, then hold on where it lands. Aim for about 5–7 seconds per function; do not turn the demo into a montage. Draw real keycaps on a solid panel, readable at 800 px README width, and add one line saying what to watch. If two functions look alike, separate them with a full-width title. Deliver H.264 MP4 at source resolution; check the host's attachment cap last (GitHub Free: 10 MB per video attachment).
+
+### Rules that matter
+Before handoff, inspect frames scaled to README width and watch the full cut. For a repository-hosted preview, reference it with a path relative to the README (for example, `./assets/demo.mp4`) and verify that path resolves on the branch; this is not a GitHub attachment-player embed. For a GitHub video attachment, put the bare uploaded URL on its own line or in a table cell so GitHub renders the player. Do not hand-write a video tag: it can leave only a redirect link. Preview the README on a branch before merge and confirm the GitHub attachment player's source is `private-user-images`. An HTTP 200 response or an encode-spec check is not visual review.
+
+Use Verdigris's [showcase-clips recipe](https://github.com/Algorant/verdigris/blob/main/docs/showcase-clips.md) for the exact commands; do not copy them here.
+
 ## fframes
 
 ### When to use
