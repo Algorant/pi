@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { decorateAssistantMarkdown } from "./assistant-message";
 
 /**
  * Patch-free user-message treatment (decision-23).
@@ -13,6 +14,10 @@ import { visibleWidth } from "@earendil-works/pi-tui";
  * Spacer(1) before them. Keeping both rails inside the same Markdown block is
  * what makes their spacing symmetric; a separate transcript entry would inherit
  * that spacer and pad on one side only.
+ *
+ * This function also owns the assistant branch of that same transformer (see
+ * ./assistant-message.ts): one registration, one place where the extension
+ * decides which surface gets drawn.
  */
 
 /**
@@ -66,9 +71,12 @@ export function registerUserMessageUi(pi: ExtensionAPI): void {
   });
 
   pi.registerMarkdownTransformer((markdown, context) => {
-    if (context.messageType !== "user") return markdown;
     const ctx = currentCtx;
     if (!ctx?.hasUI) return markdown;
+    if (context.messageType === "assistant") {
+      return decorateAssistantMarkdown(markdown, ctx.ui.theme);
+    }
+    if (context.messageType !== "user") return markdown;
     const displayed = markdown.replace(ATTACHED_IMAGE_PATH_RE, "[pasted image attached]");
     return addRails(displayed, ctx.ui.theme, context.availableWidth);
   });
