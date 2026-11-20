@@ -29,16 +29,17 @@ import { registerProvider429Recovery } from "./provider-rate-limit.ts";
  *
  * Session start vs an ordinary turn (task-745). A session start — `startup`, `new`,
  * `resume`, `reload`, `fork` — is the moment this module re-reads the role and the
- * starting model, and it arms exactly one healthy reconciliation. That reconciliation
- * is consumed by the session's first policy-owned turn: a loaded session whose start
- * carried another model (a resume on a stale one, a fresh session that never got its
+ * starting model. It arms exactly one healthy reconciliation except on `reload`, where
+ * the carried model may be a deliberate in-session choice and must remain untouched.
+ * A healthy reconciliation is consumed by the session's first policy-owned turn: a loaded
+ * session whose start carried another model (a resume on a stale one, a fresh session that
+ * never got its
  * role model) catches up to the committed model, thinking and Fast once, in process.
  * Every ordinary turn after it leaves a healthy row alone, so an ordinary later change
  * of the committed map never self-applies here — it arrives only through the existing
  * typed cutover, which sets the model, thinking and Fast itself, and which this gate
- * recognises as the policy's own model rather than as a human choice. A `/reload` is a
- * session start, so it re-arms the one reconciliation from the model the reload carried;
- * that is the same reset the in-memory provenance rule already documents.
+ * recognises as the policy's own model rather than as a human choice. On `/reload` the
+ * baseline is still reset to the carried model, but healthy reconciliation is not armed.
  *
  * Pre-turn gate (task-745), independent of that startup application: every managed
  * long-lived session (herdra, Ceph, manus) — including one resumed, reloaded or
@@ -135,9 +136,9 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
     }
     // The model this session starts on: a launch default or a resumed model, never an in-session choice.
     baseline = modelId(ctx);
-    // A managed session owes its first policy-owned turn one catch-up to the committed model; the
-    // gate below consumes it there, on this start's model, and never again until the next start.
-    reconciliationOwed = actor !== undefined;
+    // A managed session owes its first policy-owned turn one catch-up to the committed model,
+    // except on reload: that event carries the in-session selection and must not healthy-reconcile it.
+    reconciliationOwed = actor !== undefined && event.reason !== "reload";
     // The role's default selection is applied only to a fresh session with no messages and no
     // explicit model on the command line; the gate above is independent of this.
     if (event.reason !== "startup" && event.reason !== "new") return;
@@ -187,8 +188,8 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
       }
       // The model is the policy's (unchanged since the session started, or set to the committed
       // cell): resolve it once here. Only a quota-only block consults Herdra's selector. A usable
-      // set is handed to the one reconciliation a session start armed, and an ordinary turn after
-      // that leaves the healthy row exactly as it is instead of applying the map again.
+      // set is handed to the one reconciliation a non-reload session start armed; an ordinary
+      // turn after that leaves the healthy row exactly as it is instead of applying the map again.
       let resolution: RoleResolution<ResolvedRoleEntry>;
       try {
         resolution = await resolveRoleForSwitch(current.role, ctx.modelRegistry, () => resolveRoleEntry(current.role, ctx.modelRegistry), { excludeCaller: true });
@@ -202,8 +203,9 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
       }
       const { entry, catalog, set, quota } = resolution.value;
       const switched = resolution.switched;
-      // Healthy row: only the one reconciliation a session start armed may move it. Once consumed,
-      // an ordinary turn returns here, so a later change of the committed map applies only through
+      // Healthy row: only the one reconciliation an eligible session start armed may move it.
+      // Once consumed, an ordinary turn returns here, so a later change of the committed map
+      // applies only through
       // the existing typed cutover, never as a second self-applied path.
       if (switched === undefined) {
         if (!reconciliationOwed) return;
