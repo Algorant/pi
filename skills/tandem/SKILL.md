@@ -15,7 +15,7 @@ Archived records are read-only to agents (global AGENTS.md, *Work*); `tandem upd
 
 Every call uses the JSON envelope. `tandem_read` uses `scope=active|archived|all`; active versus archived is determined by the returned `location`, not `state` or `resolution`. `tandem_sync` supports sync, local status, and conflict resolution.
 
-Use `tandem_status` before coordination. If no workspace exists, ask before `tandem_init`. Use `tandem_add action=task` for normal work, with a non-empty `acceptance` array.
+Use `tandem_status` before coordination. Pass the same `cwd` to every call for the board you checked, especially when reading or closing records; a close with a different or omitted `cwd` can target the same ID on another board. If no workspace exists, ask before `tandem_init`. Use `tandem_add action=task` for normal work, with a non-empty `acceptance` array.
 
 ### Decisions are ADRs, not work items
 
@@ -23,9 +23,9 @@ A Decision (`decision-N`) is an ADR on every board, not a homelab-server habit: 
 
 Not a Decision, whatever it decides: Algorant's answer to a question, his pick between options, a scope change, a deferral or a "do it this way" instruction. Those are recorded on the Task that asked — its evidence, note or body — where the work and its history already live. "He decided X" is not the signal; "the project will be built this way from now on" is. When in doubt it is a note on the Task, not a Decision: a wrong Decision outlives the question that produced it, and four of them on one question is exactly how a board stops being read.
 
-Decision bookkeeping is not a report for Algorant: agents correct status themselves (`tandem_update --status`, *Triage* below) and never ask him to accept, confirm or tidy one.
+Decision bookkeeping is not a report for Algorant: agents correct status themselves with `tandem_update`'s `status` field (*Triage* below) and never ask him to accept, confirm or tidy one.
 
-A Decision is not work: it has no Accord, readiness, or backlog, and is never claimed, delivered, completed, or cancelled to tidy the board. It stays on the board as reference. Its status follows reality, and agents correct it themselves with `tandem_update --status`; do not ask Algorant to accept a Decision that is already in effect:
+A Decision is not work: it has no Accord, readiness, or backlog, and is never claimed, delivered, completed, or cancelled to tidy the board. It stays on the board as reference. Its status follows reality, and agents correct it themselves with `tandem_update`'s `status` field; do not ask Algorant to accept a Decision that is already in effect:
 - in effect: `accepted`;
 - replaced: create the new Decision with `supersedes` and set the old one `superseded`;
 - only ever a proposal, never adopted: `deprecated`, with a note pointing to the Task that holds the question (file one if none exists).
@@ -46,9 +46,9 @@ For discrete work a Ceph takes on, follow the Task default in global AGENTS.md, 
 - When that outcome needs defined steps, use a Task with appropriate subtasks/milestones within it. A request for a Task with subtasks is not permission to create an Epic with child Tasks.
 - An agent may ask Algorant whether an Epic is warranted. Do not create an Epic (`kind=epic`) unless Algorant explicitly requests or approves an Epic. Scope size, effort, multiple steps, or coordination needs alone do not authorize one; without approval, use Tasks and appropriate subtasks/milestones.
 - An Epic's children are subtasks to `dendra_start {kind: worker}`, which refuses them (a Worker owns a whole root Task). When an approved Epic's pieces should go to Workers, create those pieces as root Tasks and reference them from the Epic (`references`) instead of parenting them under it.
-- Tandem owns hierarchy and IDs. Check the installed CLI's current taxonomy and parent semantics before creating or converting a hierarchy; do not infer them from older guidance or fabricate subtask IDs. IDs are immutable, so a subtask cannot be promoted to a root Task: never clear or change a subtask's parent (it corrupts the local board and blocks later writes).
+- Tandem owns hierarchy and IDs. Check the installed CLI's current taxonomy and parent semantics before creating or converting a hierarchy; do not infer them from older guidance or fabricate subtask IDs. IDs are immutable, so a subtask cannot be promoted to a root Task: Tandem 0.17.7 refuses a reparent that changes its canonical role. Never clear or change a subtask's parent.
 
-`accord claim` requires `assignee`; `deliver` requires `summary` and at least one non-empty `evidence` entry, and accepts changed files. `rework`, `block`, `release`, and `fail` require a note. `resume` takes only the ID. `tandem_close action=cancel` requires a note.
+`accord claim` requires `assignee`; `deliver` requires `summary` and at least one non-empty `evidence` entry, and accepts changed files. `rework`, `block`, and `release` require a note. `resume` takes only the ID. `tandem_close action=cancel` requires a note.
 
 Lifecycle (installed Tandem; re-check after upgrades):
 - `deliver` sets the Accord to `delivered` but leaves workflow `state` unchanged (the Task stays in progress).
@@ -99,7 +99,7 @@ Every card names its decider. Keeping the status quo (keep, park, wait) needs no
 - **Herdra** decides ownership between projects and priority between Cephs.
 - **Algorant** decides only the global *Only Algorant decides* list (AGENTS.md, *Work*).
 
-Report one digest by your role's route: line one is the counts; then **Decided (reversible)**, one line per action so he can reverse any of them by replying (a cancel is undone by reopening or recapturing); then only his cards, batched three or four at a time. Do not create follow-up Tasks just because a card is `ready`.
+Report one digest by your role's route: line one is the counts; then **Decided (reversible)**, one line per action so he can reverse any of them by replying (a cancelled Task is archived; authorized recapture creates a new record); then only his cards, batched three or four at a time. Do not create follow-up Tasks just because a card is `ready`.
 
 ### Ready research: keep the existing fast path
 

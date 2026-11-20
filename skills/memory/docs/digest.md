@@ -7,7 +7,7 @@ description: Digest recent session context into curated memory markdown memories
 
 Turn recent session context into concise, durable markdown memory. Prefer curation over transcript summarization.
 
-This local skill replaces the old tape-based `pi-memory` digest workflow. Tape is not available in `memory`; use session files, current conversation context, and existing memory search instead.
+This local skill replaces the old tape-based `pi-memory` digest workflow. Tape is not available in `memory`; use current conversation context, the `history` tool when prior conversation context is needed, and existing memory search instead.
 
 ## Core rule
 
@@ -21,11 +21,10 @@ Inspect relevant context first, propose memory changes, then write only after us
 ## Workflow
 
 1. Identify the scope:
-   - current conversation only, or
-   - recent Pi session files under `~/.pi/agent/sessions`, or
-   - a specific project/session path the user names.
+   - current conversation context, or
+   - prior conversation context recovered with the `history` tool.
 2. Inspect existing memories before proposing updates:
-   - `memory_search({ scope: "all", query: "topic OR keyword" })`
+   - `memory_search({ scope: "all", query: "topic" })` and `memory_search({ scope: "all", query: "keyword" })` as separate searches when either term may match.
    - `memory_check()` when paths/structure are unclear.
 3. Extract durable candidates:
    - user preferences

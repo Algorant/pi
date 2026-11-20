@@ -99,7 +99,7 @@ Edit this skill's `pele/verdigris.json`: direct `--pele-*` keys and hex values, 
 See `../../../plan/pele-showcase/src/`: `01-flowchart.mmd` for agent roles, `04-state.mmd` for Tandem, and `12-xychart.mmd` for an illustrative Usage chart. The showcase README lists all supported families and their syntax.
 
 ### Use the files
-Use SVG or PNG in a README, plan/research artifact or image view. Render outside the vault; attach/embed into notes through the owning vault workflow (`memory` skill), not raw vault writes.
+Use SVG or PNG in a README, plan/research artifact or image view. Render outside the vault and deliver the file; do not write it into vault notes.
 
 ### Limits
 Pele outputs SVG; the script inlines CSS functions before PNG rasterisation. Widths are Arial-table estimates, so dense diagrams and non-Latin labels can still crowd. Inspect the result; shorten or split it when needed. External Mermaid plugins are unsupported. No browser or widget change is required.
@@ -133,14 +133,14 @@ remapped to Verdigris truecolour. A terminal cannot draw images, so math stays
 TeX and diagrams stay Mermaid source.
 
 ### Colours
-`words/verdigris.css` is the document layer over Words' `styles.css`, and it
+`words/verdigris.css` is the document layer over Words' installed `styles.css` at `~/.local/share/pi-studio/node_modules/@pierre/words/dist/styles.css`, and it
 reads the same `pele/verdigris.json` tokens the diagrams use, so a document and
 the diagrams inside it match. Edit the palette there for both.
 
 ### Use the files
-Open the HTML in a browser, attach it to a note or send it as a file: it needs
-no network and refers to no external file. Diagrams for anywhere else come from
-Pele. Do not write into the vault; notes go through the `memory` skill.
+Open the HTML in a browser or deliver it as a file: it needs no network and
+refers to no external file. Diagrams for anywhere else come from Pele. Do not
+write into the vault.
 
 ### Limits
 Words' math SVGs name STIX Two Math, Cambria Math and Latin Modern Math, so a

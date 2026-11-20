@@ -9,7 +9,7 @@ metadata:
 
 Use `ask_me` when a user's request is ambiguous enough that guessing would materially affect the outcome.
 
-Not for Cephs and manus (a project's long-running Pi tab): they send questions to Herdra with `agent_send` per AGENTS.md.
+Not for Cephs and manus (a project's long-running Pi tab): Cephs send questions to Herdra, while manus send questions to their starter, using `agent_send` per AGENTS.md.
 
 ## Decision boundary
 

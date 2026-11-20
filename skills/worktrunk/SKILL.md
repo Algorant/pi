@@ -25,7 +25,7 @@ skill when a task involves a Worktrunk-managed repository or the `wt` CLI. Keep 
 
 Every worktree in this setup is created, integrated and removed through
 Worktrunk. Nothing calls `git worktree` directly (the read-only registry checks
-in `pi-agency/workers/shared.ts` are inspection, not creation), and no second
+in `agent/extensions/pi-agency/workers/shared.ts` are inspection, not creation), and no second
 launcher, queue or cleanup script exists.
 
 | Step | Worktrunk command | Called by |
@@ -43,7 +43,7 @@ launcher, queue or cleanup script exists.
   kept) on that exact child; both tools take a Worker or a manus record.
 - The Herdr app's own worktree menu is not part of this lifecycle: it creates
   checkouts with raw `git worktree` and keeps their branches, so nothing here
-  manages what it leaves. `herdra-check` flags those leftovers and their
+  manages what it leaves. `~/Projects/herdra/bin/herdra-check` flags those leftovers and their
   project's owner removes them with `wt remove --foreground <path>`. A human who
   wants a checkout makes one with `wt switch --create <branch>` directly, which
   Worktrunk merges and removes like any other.
@@ -82,7 +82,7 @@ A checkout is disposable only when Worktrunk itself proves both facts:
 Remove exactly that branch, one at a time:
 
 ```bash
-wt list --format json | jq -r '.items[] | select(.display.state == "integrated") | .branch'
+wt -C <repo> list --format json | jq -r '.items[] | select(.display.state == "integrated" and .worktree.changes.staged == false and .worktree.changes.modified == false and .worktree.changes.untracked == false and .worktree.changes.renamed == false and .worktree.changes.deleted == false and .worktree.changes.conflicted == false) | .branch'
 wt -C <repo> remove <branch> --foreground --format json
 ```
 
@@ -124,9 +124,8 @@ particular, `wt switch` cannot move the Pi process into another checkout.
 ## Configuration and hooks
 
 Use `wt config show` before editing configuration. In ordinary repositories,
-`.config/wt.toml` is repository-shared and user config is machine-local. This
-dotfiles setup intentionally tracks the shared Worktrunk preference template,
-while these remain local per machine:
+`.config/wt.toml` is repository-shared and user config is machine-local. The
+following remain local per machine:
 
 - Worktrunk hook/alias approvals: `~/.config/worktrunk/approvals.toml`
 - Worktrunk lock/state files and generated checkouts

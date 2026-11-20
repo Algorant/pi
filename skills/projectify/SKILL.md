@@ -33,13 +33,13 @@ Throwaway projects still get their own directory and Herdr space.
 
 ## 3. Git
 
-Default: `git init -b main` in the project unless it is throwaway or already a repo (`git -C <dir> rev-parse --git-dir`). Do not create commits beyond what Algorant agreed to.
+Default: `git init -b main` in the project unless it is throwaway or already a repo. Treat it as already a repo only when `git -C <dir> rev-parse --show-toplevel` resolves to that exact canonical directory; an enclosing parent repo does not count. Do not create commits beyond what Algorant agreed to.
 
 ## 4. GitHub (only when warranted)
 
 - Check first: `gh repo view Algorant/<name>` and the local `git remote -v`.
 - Create private by default: `gh repo create Algorant/<name> --private --source <dir> --remote origin`. Push only if there are commits and Algorant wants it.
-- After the first push, run `git -C <dir> remote set-head origin --auto` so `origin/HEAD` points at `main`. Without it Worktrunk can cache the Tandem board branch (`tandem`) as the default branch and `worker_finish` fails at removal.
+- After the first push, run `git -C <dir> remote set-head origin --auto`, then verify `git -C <dir> symbolic-ref refs/remotes/origin/HEAD` resolves to `refs/remotes/origin/main`. `--auto` follows the remote's advertised HEAD; it does not guarantee that HEAD is `main`. Without correct `origin/HEAD`, Worktrunk can cache the Tandem board branch (`tandem`) as the default branch and `worker_finish` fails at removal.
 - A taken name, an existing fork, or a close-name upstream is rare: raise it with Algorant and let them decide. Never pick an alternative silently.
 - The `gh` token lacks `delete_repo`. Deleting a repo is Algorant's job.
 
@@ -49,25 +49,25 @@ Check with `tandem_status cwd=<dir>`. If there is no workspace and the project w
 
 ## 6. Native Herdr space and tabs
 
-Requires `HC_TERMINAL_ID` and the running Herdr window. Read the `herdr` skill, `hc --skill` and `herdr-app --skill`. Without HC, give Algorant the directory and stop here; never create an old Herdr TUI workspace (retired).
+Requires `HC_TERMINAL_ID`. Read the `herdr` skill, `hc --skill` and `herdr-app --skill`. `herdr-app ls` and app changes require the running Herdr window; `herdr-app commands` works without it. Without HC, give Algorant the directory and stop here; never create an old Herdr TUI workspace (retired).
 
-**Detect.** Inspect `herdr-app ls`. Match the machine and canonical project path against the existing `main` terminal's current `hc get <terminal>` cwd/repository, not just the space's initial `folder`: that can belong to another terminal or be stale. Reuse the matching space and add only missing tabs. Ambiguity is a clarification, not permission to duplicate or overwrite a live project.
+**Detect.** Inspect `herdr-app ls`. `ceph_start` is local-machine only; it has no machine counterpart, so match local spaces only. Check the canonical project path against the existing `main` terminal's `hc get <terminal>` current `foreground.cwd` (or `cwd` when current cwd is unavailable), not just the space's initial `folder`: that can belong to another terminal or be stale. Reuse the matching space and add only missing tabs. Ambiguity is a clarification, not permission to duplicate or overwrite a live project.
 
 **Prepare the kickoff from section 7 first.** With a Tandem workspace (every non-throwaway project), start the Ceph with one tool call after sections 1–5:
 
 ```
-ceph_start {project: <name>, folder: <dir>, kickoff: <kickoff>, from?}
+ceph_start {project: <name>, folder: <dir>, kickoff: <kickoff>, label?, from?}
 ```
 
-It refuses when a Ceph for the project already runs on this or a connected machine (unreachable machines come back as not checked), and when the matching space already has a `main` tab (a repair to clarify, not a second Ceph). It reuses the local space for the folder without switching to it, adding a missing `tandem` tab, or creates the new space with `space.new --tab tandem` (`tandem tui`); a new space is shown, which Algorant accepted for a project he asked for. The Ceph is `pi` with core name `<name>` in tab `main`, and the tool appends your return route and "report back when ready" to the kickoff.
+It refuses when a Ceph for the project already runs on this or a connected machine (unreachable machines come back as not checked), and when the matching space already has a `main` tab (a repair to clarify, not a second Ceph). It reuses the local space for the folder without switching to it, adding a missing `tandem` tab, or creates the new space with `space.new --tab tandem` (`tandem tui`); a new space is shown, which Algorant accepted for a project he asked for. The Ceph is `pi` with core name `<name>` in tab `main`; `label` (optional, default `<name> Ceph`) is its display label, not its core name. The tool appends your return route and "report back when ready" to the kickoff. Use `hc ls` to discover legacy existing Cephs that have no core name.
 
-A throwaway project without Tandem gets only its main Ceph, with native app creation (shown immediately; no `--no-focus` option):
+A throwaway project without Tandem gets only its main Ceph, with native app creation. `space.new` shows the new space; pass `--focus false` to keep the currently shown space/tab selected:
 
 ```bash
 herdr-app do space.new --name <name> --folder <dir> --tab main --argv '["pi"]' --task '<kickoff>'
 ```
 
-**Verify.** Read the tool's result, then `herdr-app ls` and `hc get <returned-main-terminal>`: actual membership in tab `main` (or the pending adoption it names), correct cwd, no native parent, and the real Pi program. An unparented app-backed Pi in `main` is the Ceph. A start acknowledges a terminal, not readiness or kickoff success; the Ceph's report back is the proof. Read its exact screen if blocked; trust/permission decisions go to Algorant through Herdra, never bypass them or blindly resend. Do not invent name synchronization, pane IDs or a second registry.
+**Verify.** Read the tool's result, then `herdr-app ls` and `hc get <returned-main-terminal>`: actual membership in tab `main` (or the pending adoption it names), correct cwd, no native parent, and `status.app` identifying Pi (do not infer the program from `argv`). An unparented app-backed Pi in `main` is the Ceph. A start acknowledges a terminal, not readiness or kickoff success; the Ceph's report back is the proof. Read its exact screen if blocked; trust/permission decisions go to Algorant through Herdra, never bypass them or blindly resend. Do not invent name synchronization, pane IDs or a second registry.
 
 ## 7. Handoff
 

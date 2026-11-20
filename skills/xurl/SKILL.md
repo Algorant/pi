@@ -25,7 +25,7 @@ A presence marker does not prove that the **default app/user** has a valid sessi
 
 An X OAuth2 grant for this app and user can be active on **one machine at a time**: logging in on a second machine invalidates the first machine's refresh token ([xurl#22](https://github.com/xdevplatform/xurl/issues/22)). Workstation and laptop repeatedly logged each other out this way. So **workstation is the only X session host**: `x_bookmarks` (which writes through Obsidian there) and every account read run from Pi sessions on workstation. Never run `xurl auth oauth2` on laptop or homelab-server, and never copy or sync `~/.xurl/auth.yml` between machines (rotation makes copies diverge into dead tokens). If X is ever needed on another machine, that machine gets a **second X app** with its own client ID/secret in its own Proton Pass item and fnox manifest, not a shared session; test that independence once before relying on it.
 
-When workstation's session is dead, the operator re-logs in **on workstation only**, headless (works when Algorant is connected remotely), as a reviewed Scriptify handoff (desktop is a native HC host: the `scriptify` popup overlay, see the `scriptify` skill):
+When workstation's session is dead, the operator re-logs in **on workstation only**, headless (works when Algorant is connected remotely), as a reviewed Scriptify handoff (desktop is a native HC host: the Scriptify runner pane, see the `scriptify` skill):
 
 ```bash
 fnox --non-interactive -c ~/.config/fnox/manifests/xurl.toml exec -- xurl auth oauth2 --headless Algorant
