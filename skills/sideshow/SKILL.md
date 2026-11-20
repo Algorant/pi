@@ -23,7 +23,7 @@ A post is a card in the session's chronological Stream. It has ordered surfaces,
 
 Decide whether the result is exploration or revision:
 
-- **One decision or proposal is one post.** Put the current version ("today" or before) and every alternative (A, B, C…) as labelled surfaces in that single post, with the recommendation marked, so Algorant can compare them without paging between posts. Never split the options of one decision across posts.
+- A proposal asking Algorant to choose is a decision post; use the decision-card shape described under **Writing for Algorant**. A proposal for inspection or feedback without a decision keeps its alternatives together in one post.
 - A new topic, milestone, or later round of the same decision publishes a **new post in the same session**, even if related or similarly titled. This preserves visible chronology.
 - Corrections, polish, and refinement of the same artifact update that post. Use `sideshow_update_post` for a full replacement or to remove/reorder surfaces by sending the complete ordered surface list; use `sideshow_add_surface` or `sideshow_edit_surface` for a surgical change. Uncertainty defaults to a new post.
 
@@ -31,16 +31,7 @@ Do not use a targeted add merely to represent a new step. A concrete post id is 
 
 ## Writing for Algorant
 
-- **Decide first, evidence after.** A post that needs a decision opens with a callout, then the detail below it:
-
-  > [!DECIDE] one sentence naming the choice
-  >
-  > - **A — title.** What it costs and what it buys.
-  > - **B — title.** What it costs and what it buys.
-  >
-  > Recommendation: A, because …
-
-  Two or three options, the recommendation marked. Never split one decision's options across posts.
+- **Decide first, evidence after.** A decision post opens with its decision card as the first surface: one line for the question, lettered choices with concrete consequences, and one recommendation with why. Put supporting evidence in ordinary surfaces below it. Herdra's `~/Projects/herdra/docs/decision-cards.md` documents the owned recipe in `~/Projects/herdra/bin/sideshow-card`; do not copy the recipe here.
 - **Prose meant for him carries no code identifiers, paths or flags.** Those belong in the detail sections, a quotation, or a `code` surface; the prose says what happens, not what is called.
 - **A flow, lifecycle or architecture is a diagram**, not a paragraph of arrows.
 - **No `#` heading inside a body.** The post title is the title; start at `##`, one concept per post.
@@ -51,7 +42,7 @@ Do not use a targeted add merely to represent a new step. A concrete post id is 
 
 | job | surface | why |
 | --- | --- | --- |
-| a decision for him | the Decide box above, one short surface per option | he compares without paging |
+| a decision for him | the decision card first, supporting evidence below | the question and choices lead; see **Writing for Algorant** above |
 | a comparison | a `markdown` table | dense and scannable |
 | a flow, lifecycle or architecture | `mermaid`, rendered by Pele | the `studio` skill owns the how |
 | a UI or visual change | before/after `image` surfaces in his theme | the Herdr window keeps terminal SGR foreground colours, bold and dim, but does not draw coloured backgrounds |
