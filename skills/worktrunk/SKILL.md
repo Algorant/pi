@@ -123,9 +123,9 @@ particular, `wt switch` cannot move the Pi process into another checkout.
 
 ## Configuration and hooks
 
-Use `wt config show` before editing configuration. In ordinary repositories,
-`.config/wt.toml` is repository-shared and user config is machine-local. The
-following remain local per machine:
+Use `wt config show` before editing configuration. A repository's
+`.config/wt.toml`, when it has one, is shared through git; user config is
+machine-local. The following remain local per machine:
 
 - Worktrunk hook/alias approvals: `~/.config/worktrunk/approvals.toml`
 - Worktrunk lock/state files and generated checkouts
