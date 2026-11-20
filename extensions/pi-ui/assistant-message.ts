@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { parseColor, type Color } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 /**
@@ -13,13 +15,13 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
  * - `[[Word]]` becomes a pill only for the approved vocabulary; anything else
  *   stays literal, so an unknown label is never destroyed.
  * - `**bold**` keeps its asterisks and gets an existing Verdigris foreground
- *   role; the fixed house labels also get a Nerd Font icon.
+ *   role; fixed action/status labels may also get a Nerd Font icon.
  * - Inline marks and tree lines are colored.
  * - Inline code, fenced code, indented code and links are never rewritten.
  *
- * Every color is an existing theme role. Pill body text is always the theme's
- * `text` role on a theme panel background (>= 10.5:1 in Verdigris); the tone
- * lives in the cap and icon, so no pill falls to 3:1 unreadability.
+ * Pill fills and icons use theme roles. Labels use the theme's `text` color,
+ * except the TLDR pill, whose optional foreground is read once from the loaded
+ * theme's `recapTeal` variable and otherwise falls back to `text`.
  */
 
 type FgRole = Parameters<Theme["fg"]>[0];
@@ -33,6 +35,7 @@ interface PillTone {
 interface PillWord {
   icon: string;
   tone: PillTone;
+  labelColor?: "recapTeal";
 }
 
 const GOOD: PillTone = { bg: "toolSuccessBg", accent: "accent" };
@@ -46,7 +49,7 @@ const PLAIN: PillTone = { bg: "selectedBg", accent: "muted" };
 // Nerd Font private-use code points already shipped by JetBrainsMono NF on this
 // machine (checked with `ghostty +show-face`); no emoji presentation, one cell.
 const PILL_WORDS: Record<string, PillWord> = {
-  "Needs you": { icon: "\u{F007}", tone: WARN },
+  "Needs You": { icon: "\u{F007}", tone: WARN },
   Decision: { icon: "\u{F0EB}", tone: INFO },
   Blocked: { icon: "\u{F023}", tone: BAD },
   Failed: { icon: "\u{F00D}", tone: BAD },
@@ -64,8 +67,7 @@ const PILL_WORDS: Record<string, PillWord> = {
   Skipped: { icon: "\u{F068}", tone: WARN },
   "Costs money": { icon: "\u{F155}", tone: WARN },
   Destructive: { icon: "\u{F071}", tone: BAD },
-  "Your move": { icon: "\u{F061}", tone: INFO },
-  TLDR: { icon: "\u{F02B}", tone: PLAIN },
+  TLDR: { icon: "", tone: PLAIN, labelColor: "recapTeal" },
   "Up next": { icon: "\u{F148}", tone: INFO },
   Delivered: { icon: "\u{F0D1}", tone: GOOD },
   Now: { icon: "\u{F111}", tone: PLAIN },
@@ -74,8 +76,6 @@ const PILL_WORDS: Record<string, PillWord> = {
 
 /** House labels Herdra writes as a bold lead-in, with their own tone. */
 const LABELS: Record<string, { icon: string; tone: FgRole }> = {
-  "Your move": { icon: PILL_WORDS["Your move"].icon, tone: "warning" },
-  TLDR: { icon: PILL_WORDS.TLDR.icon, tone: "mdCodeBlockBorder" },
   "Up next": { icon: PILL_WORDS["Up next"].icon, tone: "mdCodeBlockBorder" },
   Delivered: { icon: PILL_WORDS.Delivered.icon, tone: "accent" },
   Now: { icon: PILL_WORDS.Now.icon, tone: "muted" },
@@ -119,11 +119,35 @@ function cap(theme: Theme, role: BgRole, glyph: string): string {
  * never leaves the left cap on one line and the right cap on the next.
  */
 const PAD = "\u00A0";
+const recapTealCache = new WeakMap<Theme, Color | undefined>();
+
+/** Read an optional color once per Theme object; absent vars use normal text. */
+function recapTeal(theme: Theme): Color | undefined {
+  if (recapTealCache.has(theme)) return recapTealCache.get(theme);
+  let color: Color | undefined;
+  if (theme.sourcePath) {
+    try {
+      const source = readFileSync(theme.sourcePath, "utf8");
+      const json = JSON.parse(source.charCodeAt(0) === 0xfeff ? source.slice(1) : source) as { vars?: Record<string, unknown> };
+      const value = json.vars?.recapTeal;
+      if (typeof value === "string") color = parseColor(value);
+    } catch {
+      // This optional variable never blocks the ordinary theme-text fallback.
+    }
+  }
+  recapTealCache.set(theme, color);
+  return color;
+}
 
 function renderPill(theme: Theme, word: PillWord, label: string): string {
   const left = cap(theme, word.tone.bg, "\u{E0B6}");
   const right = cap(theme, word.tone.bg, "\u{E0B4}");
-  const body = `${theme.fg(word.tone.accent, `${PAD}${word.icon}${PAD}`)}${theme.bold(theme.fg("text", `${label.replaceAll(" ", PAD)}${PAD}`))}`;
+  const paddedLabel = `${label.replaceAll(" ", PAD)}${PAD}`;
+  const customLabelColor = word.labelColor === "recapTeal" ? recapTeal(theme) : undefined;
+  const labelText = customLabelColor
+    ? theme.style(paddedLabel, { fg: customLabelColor, bold: true })
+    : theme.bold(theme.fg("text", paddedLabel));
+  const body = `${theme.fg(word.tone.accent, `${PAD}${word.icon}${PAD}`)}${labelText}`;
   return `${left}${theme.bg(word.tone.bg, body)}${right}`;
 }
 
