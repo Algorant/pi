@@ -447,16 +447,12 @@ export function reopenMessage(id: string, note: string, by: Actor): void {
   appendEvent({ op: "reopen", id, at: new Date().toISOString(), by, note });
 }
 
-const TASK_MENTION = /(?:([A-Za-z0-9._-]+):)?\b(task-\d+(?:-\d+)*)\b/;
+const LINKED_TASK = /^([A-Za-z0-9._-]+):(task-\d+(?:-\d+)*)$/;
 
-/**
- * The Task a request is linked to: the sender's hc `task=` label (`project:task-N`), else the first
- * Task id its text names (`task-N`, or `project:task-N` to name the board). A bare id matches that id
- * on whichever board completes it.
- */
-export function linkedTask(view: Pick<Envelope, "task" | "body">): { project?: string; id: string } | undefined {
-  const match = TASK_MENTION.exec(view.task ?? "") ?? TASK_MENTION.exec(view.body);
-  return match ? { ...(match[1] ? { project: match[1] } : {}), id: match[2]! } : undefined;
+/** The explicitly linked Task from the sender's project-qualified hc `task=` label. */
+export function linkedTask(view: Pick<Envelope, "task">): { project: string; id: string } | undefined {
+  const match = LINKED_TASK.exec(view.task ?? "");
+  return match ? { project: match[1]!, id: match[2]! } : undefined;
 }
 
 /**
@@ -470,7 +466,7 @@ export async function closeTaskRequests(task: { project?: string; id: string }, 
   try {
     const linked = openMessages().filter((view) => {
       const link = linkedTask(view);
-      return link && link.id === task.id && (!link.project || link.project === task.project);
+      return link && link.id === task.id && link.project === task.project;
     });
     if (linked.length === 0) return undefined;
     const by = await localActor();
