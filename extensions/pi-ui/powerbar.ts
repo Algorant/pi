@@ -226,7 +226,13 @@ export function registerPowerbar(pi: ExtensionAPI) {
 	// built-in footer renders beneath it. It always renders exactly one line.
 	function refresh() {
 		const ctx = currentCtx;
-		if (!ctx?.hasUI) return;
+		if (!ctx) return;
+		// Reload can invalidate the context before session_shutdown runs. Read the
+		// UI capability at this boundary because that getter itself may throw.
+		try { if (!ctx.hasUI) return; } catch (error) {
+			if (error instanceof Error && error.message.startsWith("This extension ctx is stale after session replacement or reload.")) return;
+			throw error;
+		}
 		// Resolved once per refresh (event-driven) so OAuth presence is not
 		// re-read from disk on every footer paint. The context bar is the same:
 		// ctx.getContextUsage() walks the conversation, so it is measured here and
