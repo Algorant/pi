@@ -37,7 +37,11 @@ export function registerNstar(pi: ExtensionAPI): void {
 
   const warn = (ctx: ExtensionContext, error: unknown) => {
     const message = `Northstar: ${error instanceof Error ? error.message : String(error)}`;
-    if (ctx.hasUI) ctx.ui.notify(message, "error");
+    try {
+      if (ctx.hasUI) ctx.ui.notify(message, "error");
+    } catch (diagnosticError) {
+      if (!(diagnosticError instanceof Error && diagnosticError.message.startsWith("This extension ctx is stale after session replacement or reload."))) throw diagnosticError;
+    }
     console.error(message);
   };
   /** The session store of a Task-backed job's captures; the latest saved entry wins. */

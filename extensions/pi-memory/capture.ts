@@ -281,7 +281,15 @@ export function registerMemoryCommand(pi: ExtensionAPI): void {
 			active = abort;
 			// Detached on purpose: the handler returns now, so a running turn is never held up.
 			void capture(pi, ctx, text, abort)
-				.catch((error) => ctx.ui.notify(`/mem failed: ${messageOf(error)}`, "error"))
+				.catch((error) => {
+					const message = `/mem failed: ${messageOf(error)}`;
+					try {
+						ctx.ui.notify(message, "error");
+					} catch (diagnosticError) {
+						if (!(diagnosticError instanceof Error && diagnosticError.message.startsWith("This extension ctx is stale after session replacement or reload."))) throw diagnosticError;
+						console.error(message);
+					}
+				})
 				.finally(() => {
 					if (active === abort) active = undefined;
 				});
