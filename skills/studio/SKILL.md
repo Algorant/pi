@@ -1,6 +1,6 @@
 ---
 name: studio
-description: "House style for things made for a person to see: which tool fits which job, the shared Verdigris look and taste rules, and one section each for Pele (Mermaid text to Verdigris SVG/PNG diagrams and charts), Words (Markdown to a self-contained Verdigris HTML document or a terminal view), Excalidraw (editable drawings in Algorant's Obsidian vault) and fframes (videos in code). Use when creating a diagram, chart, drawing, document, handout, video or other visual artifact, or choosing which tool to make it with; Sideshow renders its own mermaid surfaces with Pele."
+description: "House style for things made for a person to see: which tool fits which job, the shared Verdigris look and taste rules, and one section each for Pele (Mermaid text to Verdigris SVG/PNG diagrams and charts), Words (Markdown to a self-contained Verdigris HTML document or a terminal view), Excalidraw (editable drawings in Algorant's Obsidian vault) and fframes (videos in code). Use when creating or shipping a diagram, chart, drawing, document, handout, video, screenshot, README or site image, demo clip or other visual artifact, or choosing which tool to make it with; Sideshow renders its own mermaid surfaces with Pele."
 metadata:
   short-description: Which creation tool for which job, and the shared house style
 ---
@@ -79,6 +79,21 @@ presets. Use those rather than pasting raw hex.
 - **Look before showing.** View the rendered PNG or an extracted frame yourself with the `read` tool before reporting it, and fix crowding, overlaps, crossed arrows and low contrast (small muted text on dark is the least readable) before Algorant sees it.
 - Taste, brand and visible results are Algorant's call (global AGENTS.md,
   *Only Algorant decides*): deliver visible work for his look.
+
+### Media fidelity
+
+Highest quality wins (Algorant: "highest quality wins always unless some other important mitigating factor involved").
+
+- **Stills** (screenshots, README, site and gallery images): ship the original lossless file, byte for byte. Set the display size in markup (`width="…"`); never make derived thumbnails or re-encode to JPEG or lossy WebP.
+- **Video and animation:** keep source resolution and frame rate and encode for quality, not to a size (H.264 CRF 18 or lower, as in Verdigris's showcase-clips recipe). Where only an image format plays inline (a looping README demo), use lossless animated WebP at native size.
+- **Caps come last.** Check a host or tool cap (GitHub 10 MB per video attachment, Sideshow 5 MiB per asset) only after the best version exists. If a cap forces a smaller copy, keep the master, label the copy a preview wherever it appears, and never ship the preview as the deliverable.
+- **Mitigating factors are concrete:** a hard host cap, a source that is itself lossy, privacy redaction, or Algorant's explicit choice. A smaller repo or page weight is not one.
+- **Say what was lost.** A delivery names every lossy, downscaled or sped-up step and its reason. A number Algorant gave ("about 10 seconds", "q90") is quoted as his words, never turned into a cap or target.
+- **Context views are not output.** The 1024 px image limit in global AGENTS.md governs what you load into context; judge detail on crops of the original, never on a downscaled copy.
+
+### Mockups and proof
+
+A mockup of something Algorant will see in Obsidian, a Pi pane or the Herdr app is made by the real generator or renderer, in that real target, at 1:1, with representative real data. An HTML or hand-painted sketch is allowed only labelled 'direction, not for approval'. As-built proof is a capture from the same target, shown beside the approved image at 1:1 (crop, never shrink). Re-painting with the mockup's own painter proves nothing.
 
 ## Pele
 
@@ -180,9 +195,11 @@ table and the read-back and look scripts.
 Use this workflow for short demo clips cut from a screen recording. Judge the cut by whether a first-time viewer can follow it, not by file size, format or duration: a 2–3 MB animated WebP and a clip under 10 seconds were both rejected.
 
 ### How
-Start with a clean, full-resolution recording made for the demo. Edit at 1× speed and trim waits rather than speeding up the footage. Give each function its own short section: show the starting window, trigger the shortcut, show the visible result, then hold on where it lands. Aim for about 5–7 seconds per function; do not turn the demo into a montage. Draw real keycaps on a solid panel, readable at 800 px README width, and add one line saying what to watch. If two functions look alike, separate them with a full-width title. Deliver H.264 MP4 at source resolution; check the host's attachment cap last (GitHub Free: 10 MB per video attachment).
+Start with a clean, full-resolution recording made for the demo. Edit at 1× speed and trim waits rather than speeding up the footage. Give each function its own short section: show the starting window, trigger the shortcut, show the visible result, then hold on where it lands. Each section runs until its result is visible and has landed, however long that takes; there is no per-function or total length target. Do not turn the demo into a montage. Draw real keycaps on a solid panel, readable at 800 px README width, and add one line saying what to watch. If two functions look alike, separate them with a full-width title. Deliver per *Media fidelity*: H.264 MP4 at source resolution and frame rate, host cap last (GitHub Free: 10 MB per video attachment).
 
 ### Rules that matter
+**Section ledger before any handoff.** Write a "what this teaches" table, one row per labelled section (each caption, keycap or title): *claim* (the label text); *ground truth* (the feature's own config, docs or source, or Algorant's words; never your own description); *span* (source timestamps); *frames show* (what frames from that span visibly show, written from the frames before reading the label); *match* (yes/no); *ends when* (the visible event the section holds until). A row without ground truth, or with match "no", is a draft: fix the cut or the label, or ask; a draft label never reaches Algorant. The reviewer checks every row against frames extracted from that section and notes the result in the row. The ledger travels with the handoff (Task note, or a Sideshow surface below the clip). If a ledger-checked clip is still caught mislabelled, the next review adds a blind describer: a read-only helper given each section's frames with no labels or brief.
+
 Before handoff, inspect frames scaled to README width and watch the full cut. For a repository-hosted preview, reference it with a path relative to the README (for example, `./assets/demo.mp4`) and verify that path resolves on the branch; this is not a GitHub attachment-player embed. For a GitHub video attachment, put the bare uploaded URL on its own line or in a table cell so GitHub renders the player. Do not hand-write a video tag: it can leave only a redirect link. Preview the README on a branch before merge and confirm the GitHub attachment player's source is `private-user-images`. An HTTP 200 response or an encode-spec check is not visual review.
 
 Use Verdigris's [showcase-clips recipe](https://github.com/Algorant/verdigris/blob/main/docs/showcase-clips.md) for the exact commands; do not copy them here.

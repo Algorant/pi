@@ -48,6 +48,10 @@ herdr-core (`hc`) and the Herdr app own terminals, children, status, tabs, space
 
 Apply the role route first (a manus sends to its starter, a Ceph to Herdra). `agent_send` is the one durable agent inbox; supply `terminal`: `"herdra"` (same core; from another core its supplied `"<machine>/herdra"` route, your starter gives its own) or `"<machine>/<terminal>"` for a machine in `hc machine ls` (that core resolves it at send time and tells the receiver the route to answer). Resolve names on every send; never save a terminal id across relaunch. Kinds are `request`, `result` and `blocked`; a request closes on a `reply_to`, a dispatch naming it (`from:`), or its linked Task (`task=` label or `task-N` in it) completed or cancelled through Pi; `~/.pi/agent/scripts/inbox reopen <id>` undoes a close and `~/.pi/agent/scripts/inbox thread <id>` shows delivery and the recipient's hc status. Child reports arrive here as labelled `result` messages; `hc send` only types bootstrap text into an owned terminal. Reload only affected endpoints before using a new address form, never a fleet (reload rule: global AGENTS.md, *Environment and updates*).
 
+### Visible-result builds
+
+When dispatching a build with a visible result (visible UI, rendered output, visuals or media) through either `manus_start` or `dendra_start`, set `needsAlgorant:true`. The brief names the Target surface (where Algorant will see it, in his setup) and links the approved mockup; delivery ends with `Shown on target: yes — <capture link> | no — <why>`. A capture by the mockup's own painter, an HTML imitation, or a scratch run's ANSI codes is not the target.
+
 ### Open a manus (Ceph)
 
 A Ceph dispatches independent tracks immediately. Use exactly one of a real Task or a verbatim brief; a Task is not a launch prerequisite.
