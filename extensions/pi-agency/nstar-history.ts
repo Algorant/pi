@@ -6,11 +6,12 @@ import { Type } from "typebox";
 import { createNstarHistoryRenderer } from "../pi-ui/tool-ui/custom-tools/nstar-history.ts";
 
 const execFile = promisify(execFileCallback);
-const MESSAGE_QUERY = 'reduce inputs as $entry ([]; if length >= 5 then . else . + [($entry | select(.type == "message" and .message.role == "user") | (.message.content | if type == "string" then . else map(select(.type == "text") | .text) | join("") end) | select(contains($phrase)) | .[0:1200])] end) | map(select(type == "string")) | .[]';
+const MESSAGE_QUERY = 'reduce inputs as $line ([]; if length >= 5 then . else (. + [($line | fromjson? | select(.type == "message" and .message.role == "user") | (.message.content | if type == "string" then . else map(select(.type == "text") | .text) | join("") end) | select(contains($phrase)) | .[0:1200])]) | map(select(type == "string")) end) | .[]';
 const LOCAL_ROOTS = '"$HOME/.pi/agent/sessions" "$HOME/.pi/sessions" "${PI_CODING_AGENT_SESSION_DIR:-}"';
 const ARCHBOX_LOCAL_NAME = "homelab-server";
 const REMOTE_ROOT = "/srv/data/BIGNAS/agentic/sessions";
 const MAX_OUTPUT = 65_536;
+const MAX_SESSION_FILE = "32M";
 const MAX_PHRASE = 300;
 
 type HistoryInput = { phrase: string; otherMachine?: boolean };
@@ -21,7 +22,7 @@ function shellQuote(value: string): string {
 }
 
 function searchScript(phrase: string, roots: string): string {
-  return `phrase=${shellQuote(phrase)}; q=${shellQuote(MESSAGE_QUERY)}; set +e; rg --hidden --no-ignore --max-filesize 10M --null -l -F -m 1 -- "$phrase" ${roots} | awk 'BEGIN { RS = "\\0"; ORS = "\\0" } NR <= 5' | xargs -0 -r cat | jq -nc --arg phrase "$phrase" "$q"; statuses=("\${PIPESTATUS[@]}"); if [ "\${statuses[0]}" -gt 1 ]; then exit "\${statuses[0]}"; fi; for status in "\${statuses[@]:1}"; do [ "$status" -eq 0 ] || exit "$status"; done`;
+  return `phrase=${shellQuote(phrase)}; q=${shellQuote(MESSAGE_QUERY)}; set +e; rg --hidden --no-ignore --max-filesize ${MAX_SESSION_FILE} --no-filename --no-line-number -F -- "$phrase" ${roots} | jq -Rnc --arg phrase "$phrase" "$q"; statuses=("\${PIPESTATUS[@]}"); if [ "\${statuses[0]}" -gt 1 ]; then exit "\${statuses[0]}"; fi; [ "\${statuses[1]}" -eq 0 ] || exit "\${statuses[1]}"`;
 }
 
 function localScript(phrase: string, synced = false): string {
@@ -59,7 +60,7 @@ async function recover(phrase: string, otherMachine: boolean, signal?: AbortSign
     throw new Error(`Could not parse bounded ${source} conversation results: ${error instanceof Error ? error.message : String(error)}`);
   }
   return {
-    text: excerpts.length ? excerpts.join("\n\n") : `No matching user messages found in ${source} session roots.`,
+    text: excerpts.length ? excerpts.join("\n\n") : `No matching user messages found in ${source} session roots (files larger than 32 MiB are skipped).`,
     details: { source, messages: excerpts.length, excerpts },
   };
 }
