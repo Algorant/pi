@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { hcJson } from "../pi-herdr/core.ts";
 import { OPENAI_FAST_SET_EVENT, OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import { KIND_KEY, terminalWho } from "../../scripts/whois.ts";
-import { LocalAgencySettingsError, localAgencySettings } from "./local-settings.ts";
+import { holdActive, LocalAgencySettingsError, localAgencySettings, quotaHolds, type QuotaHolds } from "./local-settings.ts";
 import { ModelSetUnavailableError, committedCellModels, resolveRoleEntry, type ResolvedRoleEntry } from "./model-roles.ts";
 import { resolveRoleForSwitch, type RoleResolution } from "./herdra-role.ts";
 import { workerContextRequested } from "./workers/context.ts";
@@ -62,6 +62,16 @@ import { registerProvider429Recovery } from "./provider-rate-limit.ts";
 const EXPLICIT_MODEL_ARGS = /^--(model|models|provider|thinking)(=|$)/;
 type Role = "herdra" | "manus" | "orchestrator";
 const modelId = (ctx: ExtensionContext): string | undefined => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+
+function formatHoldUntil(until: string, now = new Date()): string {
+  const end = new Date(until);
+  const time = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(end);
+  const dayKey = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  if (dayKey(end) === dayKey(now)) return time;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return `${time} ${dayKey(end) === dayKey(tomorrow) ? "tomorrow" : new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(end)}`;
+}
 
 /**
  * The session's role and whether this machine's model policy manages it. Only a native
@@ -151,7 +161,11 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
       pi.setThinkingLevel(entry.thinking);
       baseline = entry.model;
       const label = set ? `${role} model (set ${set})` : `${role} model`;
-      ctx.ui.notify(`${label}: ${entry.model} (${pi.getThinkingLevel()})${quota ? `; quota ${quota}` : ""}${skipped.length ? `; skipped ${skipped.join("; ")}` : ""}`, "info");
+      const holds = quotaHolds();
+      const holdNow = Date.now();
+      const holdUntil = holds[role];
+      const holdMark = holdUntil && holdActive(role, holdNow, holds) ? `; quota hold until ${formatHoldUntil(holdUntil, new Date(holdNow))}` : "";
+      ctx.ui.notify(`${label}: ${entry.model} (${pi.getThinkingLevel()})${quota ? `; quota ${quota}` : ""}${holdMark}${skipped.length ? `; skipped ${skipped.join("; ")}` : ""}`, "info");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // A managed actor blocked by quota alone is not refused: the gate cuts it over before its
@@ -176,6 +190,18 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (_event, ctx) => {
     const current = actor;
     if (!current) return;
+    let holds: QuotaHolds;
+    try { holds = quotaHolds(); }
+    catch (error) {
+      tell(ctx, `Automatic quota moves for ${current.role} are disabled by invalid hold settings: ${error instanceof Error ? error.message : String(error)}.`, `${current.role}:invalid-hold`);
+      return;
+    }
+    const holdNow = Date.now();
+    const holdUntil = holds[current.role];
+    if (holdUntil && holdActive(current.role, holdNow, holds)) {
+      tell(ctx, `Automatic quota moves for ${current.role} are held until ${formatHoldUntil(holdUntil, new Date(holdNow))}; continuing on ${modelId(ctx) ?? "the current model"}.`, `${current.role}:hold:${holdUntil}`);
+      return;
+    }
     const model = modelId(ctx);
     try {
       if (localAgencySettings().modelSets === undefined) return;

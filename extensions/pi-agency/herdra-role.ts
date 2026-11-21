@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { localAgencySettings, type ModelSetRole } from "./local-settings.ts";
+import { holdActive, localAgencySettings, quotaHolds, type ModelSetRole } from "./local-settings.ts";
 import { ModelSetUnavailableError, eligibleReviewSetNames, eligibleSetNames, type RoleRegistry } from "./model-roles.ts";
 
 const run = promisify(execFile);
@@ -22,7 +22,7 @@ const run = promisify(execFile);
  */
 export const HERDRA_CUTOVER = join(homedir(), "Projects/herdra/bin/herdra-cutover");
 
-export type RoleSwitchStatus = "switched" | "unchanged" | "blocked" | "stale";
+export type RoleSwitchStatus = "switched" | "unchanged" | "blocked" | "stale" | "held";
 export type RoleSwitch = { status: RoleSwitchStatus; role: string; from: string | null; to: string | null; operation: string | null; partial: boolean; reason: string | null };
 /**
  * One `--eligible` item: a plain set name, or (review only, Herdra 4f80fe7) a set with the
@@ -30,7 +30,7 @@ export type RoleSwitch = { status: RoleSwitchStatus; role: string; from: string 
  */
 export type EligibleCandidate = string | { set: string; providers: string[] };
 
-const STATUSES: ReadonlySet<string> = new Set(["switched", "unchanged", "blocked", "stale"]);
+const STATUSES: ReadonlySet<string> = new Set(["switched", "unchanged", "blocked", "stale", "held"]);
 
 /** The command's one JSON object, validated strictly so a changed wire fails loudly instead of being guessed at. */
 export function parseRoleSwitch(text: string, role: string): RoleSwitch {
@@ -86,6 +86,10 @@ function quotaOnly(error: unknown): error is ModelSetUnavailableError {
  * cells and paused review remain errors, never availability signals.
  */
 export async function resolveRoleForSwitch<T extends { set?: string }>(role: ModelSetRole, registry: RoleRegistry, resolve: () => T, options: { callerModel?: string; excludeCaller?: boolean; blockedProvider?: string; signal?: AbortSignal } = {}): Promise<RoleResolution<T>> {
+  const holds = quotaHolds();
+  if (holdActive(role, Date.now(), holds)) {
+    return { refusal: `Automatic quota cutover for ${role} is held until ${holds[role]}; no model change was made.` };
+  }
   let initial: T | undefined;
   let blocked: ModelSetUnavailableError | undefined;
   try { initial = resolve(); }
@@ -114,6 +118,7 @@ export async function resolveRoleForSwitch<T extends { set?: string }>(role: Mod
     const why = failure instanceof Error ? failure.message : String(failure);
     return { refusal: `Model set for ${role} is blocked and ${HERDRA_CUTOVER} role ${role} failed: ${why}` };
   }
+  if (outcome.status === "held") return { refusal: `Automatic quota cutover for ${role} is held: ${outcome.reason ?? "no model change was made"}`, outcome };
   // The selector's output is never trusted as the model; re-resolve its committed map once.
   try {
     const value = resolve();

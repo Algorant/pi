@@ -6,7 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isOpenAICodexFastTarget } from "../pi-providers/openai/model.ts";
 import { currentWindowUsage, readCachedLimits } from "../pi-providers/quota/quota-service.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "./subagents/profile.ts";
-import { localAgencySettings, localSettingsPath, temporaryAgencySettings, MODEL_SET_ROLES, type ModelSetRole, type ModelSetSelection } from "./local-settings.ts";
+import { holdActive, localAgencySettings, localSettingsPath, quotaHolds, temporaryAgencySettings, MODEL_SET_ROLES, type ModelSetRole, type ModelSetSelection } from "./local-settings.ts";
 
 /**
  * The single source of default models (task-404). `agent/model-roles.json` holds
@@ -144,7 +144,7 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
  * quota. Ordinary role selection retains its historical unknown-cache behavior;
  * the private strict policy is used only by resolveBenchmarkWorkerModel below.
  */
-type EntryPolicy = { providerException?: string; requireFreshQuota?: boolean };
+type EntryPolicy = { providerException?: string; requireFreshQuota?: boolean; quota?: boolean };
 type EntryCheck = { catalog: CatalogModel; quota?: string };
 function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold, fiveHourThreshold }: ModelRoles["quota"], allowedProviders: readonly string[] | undefined, policy: EntryPolicy = {}): { reason: string } | EntryCheck {
   const separator = entry.model.indexOf("/");
@@ -153,6 +153,7 @@ function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold,
   const catalog = registry.find(provider, entry.model.slice(separator + 1));
   if (!catalog) return { reason: "not in the model catalog" };
   if (!registry.hasConfiguredAuth(catalog)) return { reason: `no credentials for provider ${provider}` };
+  if (policy.quota === false) return { catalog };
   if (QUOTA_PROVIDERS.has(provider)) {
     const cached = readCachedLimits(limitsProviderOf(provider));
     if (policy.requireFreshQuota) {
@@ -271,9 +272,9 @@ function checkSetEntry(entry: RoleEntry, registry: RoleRegistry, where: string, 
   return "blocked" in quota ? { failure: { kind: "quota", reason: quota.blocked } } : { catalog, quota: quota.notice };
 }
 
-function resolveSetEntry(role: Exclude<ModelSetRole, "review">, registry: RoleRegistry, sets: ModelRoles["sets"], selection: ModelSetSelection, path: string): ResolvedRoleEntry {
+function resolveSetEntry(role: Exclude<ModelSetRole, "review">, registry: RoleRegistry, sets: ModelRoles["sets"], selection: ModelSetSelection, path: string, quota = true): ResolvedRoleEntry {
   const { set, cell } = selectedCell(sets, selection, role, path);
-  const checked = checkSetEntry(cell, registry, `${path}: sets.${set}.${role}`);
+  const checked = checkSetEntry(cell, registry, `${path}: sets.${set}.${role}`, { quota });
   if ("failure" in checked) {
     if (checked.failure.kind === "fast") throw new Error(`${path}: sets.${set}.${role} entry ${cell.model} sets fast:true but is not eligible for the Fast priority tier`);
     throw new ModelSetUnavailableError(`Model set "${set}" ${role} target ${cell.model} is unavailable: ${checked.failure.reason}. No fallback to other sets.`, checked.failure.kind, role, set, cell.model);
@@ -320,12 +321,13 @@ export function modelCompany(model: string, where: string): string {
 export function resolveRoleEntry(role: RoleName | "herdra", registry: RoleRegistry, path = modelRolesPath()): ResolvedRoleEntry {
   const { quota, roles, sets } = loadModelRoles(path);
   const settings = localAgencySettings();
-  if (settings.modelSets) return resolveSetEntry(role, registry, sets, settings.modelSets, path);
+  const held = holdActive(role, Date.now(), quotaHolds());
+  if (settings.modelSets) return resolveSetEntry(role, registry, sets, settings.modelSets, path, !held);
   if (role === "herdra") throw new Error(`The herdra role exists only in named model sets; "pi-agency".modelSets is not set in ${localSettingsPath()}`);
   const allowed = settings.modelProviders;
   const rejected: string[] = [];
   for (const entry of roles[role]) {
-    const checked = checkEntry(entry, registry, quota, allowed);
+    const checked = checkEntry(entry, registry, quota, allowed, { quota: !held });
     if ("reason" in checked) {
       rejected.push(`${entry.model} (${checked.reason})`);
       continue;
@@ -396,6 +398,7 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
   if (!review.enabled) throw new Error(`Review is disabled: set roles.review.enabled to true in ${path}`);
   const callerCompany = modelCompany(callerModel, "Review caller");
   const settings = localAgencySettings();
+  const held = holdActive("review", Date.now(), quotaHolds());
   const rejected: string[] = [];
   if (settings.modelSets) {
     let { set, cell } = selectedCell(sets, settings.modelSets, "review", path);
@@ -410,7 +413,7 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
         rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);
         continue;
       }
-      const checked = checkSetEntry(entry, registry, `${path}: sets.${set}.review`);
+      const checked = checkSetEntry(entry, registry, `${path}: sets.${set}.review`, { quota: !held });
       if ("failure" in checked) {
         // A Fast-ineligible entry is a configuration error, exactly as before: it aborts the
         // list instead of being skipped.
@@ -432,7 +435,7 @@ export function resolveReviewEntry(callerModel: string, registry: RoleRegistry, 
       rejected.push(`${entry.model} (same company as the caller's ${callerModel})`);
       continue;
     }
-    const checked = checkEntry(entry, registry, quota, allowed);
+    const checked = checkEntry(entry, registry, quota, allowed, { quota: !held });
     if ("reason" in checked) {
       rejected.push(`${entry.model} (${checked.reason})`);
       continue;

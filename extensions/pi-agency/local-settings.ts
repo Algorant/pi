@@ -86,6 +86,15 @@ export function localAgencySettings(): LocalAgencySettings {
  */
 export type TemporaryAgencySettings = { review?: "paused" };
 
+export type QuotaHoldRole = ModelSetRole;
+export type QuotaHolds = Readonly<Partial<Record<QuotaHoldRole, string>>>;
+
+function validHoldExpiry(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 19) === value.slice(0, 19);
+}
+
 /** Read per launch so adding or removing the section applies to the next dispatch. */
 export function temporaryAgencySettings(): TemporaryAgencySettings {
   const path = localSettingsPath();
@@ -102,4 +111,31 @@ export function temporaryAgencySettings(): TemporaryAgencySettings {
   const { review } = section as Record<string, unknown>;
   if (review !== undefined && review !== "paused") throw new Error(`${path}: "pi-agency-temporary".review must be "paused"; remove it to restore reviews.`);
   return { ...(review === undefined ? {} : { review: "paused" }) };
+}
+
+/** Read the independent, machine-local quota-hold section. Older settings readers ignore this top-level key. */
+export function quotaHolds(): QuotaHolds {
+  const path = localSettingsPath();
+  const text = settingsText(path);
+  if (text === undefined) return {};
+  const settings: unknown = JSON.parse(text);
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) throw new Error(`${path}: settings must be an object.`);
+  const section = (settings as Record<string, unknown>)["pi-agency-holds"];
+  if (section === undefined) return {};
+  if (typeof section !== "object" || section === null || Array.isArray(section)) throw new Error(`${path}: "pi-agency-holds" must be an object.`);
+  const values = section as Record<string, unknown>;
+  for (const key of Object.keys(values)) {
+    if (!(MODEL_SET_ROLES as readonly string[]).includes(key)) throw new Error(`${path}: "pi-agency-holds" has unknown role "${key}".`);
+    const until = values[key];
+    if (!validHoldExpiry(until)) {
+      throw new Error(`${path}: "pi-agency-holds".${key}.until must be an ISO UTC timestamp.`);
+    }
+  }
+  return values as QuotaHolds;
+}
+
+/** Pure expiry check: malformed settings are rejected by quotaHolds() before reaching this function. */
+export function holdActive(role: QuotaHoldRole, now: number, holds: QuotaHolds): boolean {
+  const until = holds[role];
+  return typeof until === "string" && Date.parse(until) > now;
 }
