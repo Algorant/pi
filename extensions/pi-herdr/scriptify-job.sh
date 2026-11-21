@@ -35,6 +35,6 @@ trap : INT
 cd -- "$cwd" || { outcome="FAILED: cannot enter the invoking agent's working directory"; exit 1; }
 printf 'Reviewed script: %s\n' "$script"
 printf '\033]7501;state=working:app=scriptify\007'
-"$script"
+SCRIPTIFY_WAIT_SIGNAL=1 "$script"
 classify $?
 exit

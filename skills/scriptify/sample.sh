@@ -105,7 +105,38 @@ danger() {
   fi
 }
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
+# ── Prompt waiting signal ────────────────────────────────────────────────────
+# Only the app-owned Scriptify runner sets this flag. Require its interactive PTY;
+# never put prompt text, choices, values, or credentials in the status message.
+WAIT_SIGNAL=0
+if [[ ${SCRIPTIFY_WAIT_SIGNAL:-0} == 1 && -t 0 && -t 2 && ${TERM:-dumb} != dumb ]] \
+   && command -v base64 >/dev/null 2>&1; then
+  WAIT_SIGNAL=1
+fi
+prompt_status() {  # prompt_status working|blocked KIND
+  [[ $WAIT_SIGNAL == 1 ]] || return 0
+  local state=$1 kind=$2 message
+  case $kind in
+    permission) message='A confirmation needs your response.' ;;
+    question) message='A question needs your response.' ;;
+    auth) message='Authentication input needs your response.' ;;
+    *) return 0 ;;
+  esac
+  if [[ $state == working ]]; then
+    printf '\033]7501;state=working:app=scriptify\007' >&2
+  else
+    printf '\033]7501;state=blocked:app=scriptify:kind=%s:msg=%s\007' \
+      "$kind" "$(printf '%s' "$message" | base64)" >&2
+  fi
+}
+await_prompt() {  # await_prompt KIND CMD...
+  local kind=$1 rc=0; shift
+  prompt_status blocked "$kind"
+  "$@" || rc=$?
+  prompt_status working "$kind"
+  return "$rc"
+}
+
 # Each returns 0 on success, 1 on decline/cancel, 130 on Ctrl+C, other = failure.
 # Handle the status at the call site with on_prompt_rc; never retry automatically.
 # A decline and Ctrl+C both stop with 130, the cancel status Scriptify reports
@@ -118,7 +149,8 @@ on_prompt_rc() {
   esac
 }
 
-confirm() {  # confirm PROMPT   (defaults to No)
+confirm() { await_prompt permission _confirm "$@"; }
+_confirm() {  # confirm PROMPT   (defaults to No)
   local answer
   if [[ $UI == gum ]]; then gum confirm --default=false "$1"
   else
@@ -133,7 +165,8 @@ _numbered() {  # _numbered HEADER OPTION...   prints the list, reads one index
   i=1; for n in "$@"; do printf '  %2d) %s\n' "$i" "$n" >&2; i=$((i + 1)); done
 }
 
-pick_one() {  # pick_one HEADER OPTION...   short list (about 10 or fewer)
+pick_one() { await_prompt question _pick_one "$@"; }
+_pick_one() {  # pick_one HEADER OPTION...   short list (about 10 or fewer)
   local header=$1; shift
   if [[ $UI == gum ]]; then gum choose --header "$header" -- "$@"; return; fi
   local reply opts=("$@")
@@ -143,7 +176,8 @@ pick_one() {  # pick_one HEADER OPTION...   short list (about 10 or fewer)
   printf '%s\n' "${opts[reply - 1]}"
 }
 
-pick_many() {  # pick_many HEADER OPTION...   prints one choice per line
+pick_many() { await_prompt question _pick_many "$@"; }
+_pick_many() {  # pick_many HEADER OPTION...   prints one choice per line
   local header=$1; shift
   if [[ $UI == gum ]]; then gum choose --no-limit --header "$header" -- "$@"; return; fi
   local reply idx opts=("$@")
@@ -156,21 +190,24 @@ pick_many() {  # pick_many HEADER OPTION...   prints one choice per line
   done
 }
 
-pick_long() {  # pick_long HEADER OPTION...   long fuzzy list (hosts, files, packages)
+pick_long() { await_prompt question _pick_long "$@"; }
+_pick_long() {  # pick_long HEADER OPTION...   long fuzzy list (hosts, files, packages)
   local header=$1; shift
   if [[ $PICKER == fzf ]]; then printf '%s\n' "$@" | fzf --header "$header"; return; fi
-  pick_one "$header" "$@"   # plain: same numbered read
+  _pick_one "$header" "$@"   # plain: same numbered read
 }
 # fzf exits 1 for no match and 130 for Esc or Ctrl+C.
 
-ask() {  # ask HEADER [PLACEHOLDER]   free text on stdout
+ask() { await_prompt question _ask "$@"; }
+_ask() {  # ask HEADER [PLACEHOLDER]   free text on stdout
   local reply
   if [[ $UI == gum ]]; then gum input --header "$1" --placeholder "${2:-}"; return; fi
   read -rp "$1: " reply || { printf '\n' >&2; return 1; }
   printf '%s\n' "$reply"
 }
 
-ask_secret() {  # ask_secret HEADER   masked; the value never touches argv or the script body
+ask_secret() { await_prompt auth _ask_secret "$@"; }
+_ask_secret() {  # ask_secret HEADER   masked; the value never touches argv or the script body
   local reply
   if [[ $UI == gum ]]; then gum input --password --header "$1"; return; fi
   read -rsp "$1: " reply || { printf '\n' >&2; return 1; }
