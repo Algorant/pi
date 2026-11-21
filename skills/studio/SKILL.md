@@ -28,14 +28,17 @@ Refresh that install with `bun update` in the same directory.
 | Job | Tool | Result |
 | --- | --- | --- |
 | A diagram or chart from text (flow, sequence, state, architecture, timeline, xychart, …) for notes, READMEs, plans, research artifacts, image views or presentations | [Pele](#pele) | Verdigris SVG and PNG files |
+| A diagram in Pi chat | Pi's built-in Mermaid renderer ([Mermaid in Pi chat](#mermaid-in-pi-chat)) | Unicode diagram in the transcript when supported and narrow enough; otherwise source |
 | A diagram in a Sideshow post | Sideshow `kind:"mermaid"` (the `sideshow` skill) | Sideshow renders it with Pele itself; do not render or upload Pele files there |
 | A document someone reads end to end: a report, spec, research write-up or handout, especially one with math, tables or diagrams | [Words](#words) | a self-contained Verdigris HTML page, or a terminal view |
 | A drawing Algorant opens and edits by hand: a sketch, a whiteboard, a layout he will move around | [Excalidraw](#excalidraw) | an `.excalidraw.md` drawing in his vault |
 | A video, animation, motion graphic, teaser, title card or poster | [fframes](#fframes) | a rendered video (draft first) |
 
-Reach for Pele first for any diagram or chart; choose Words for a whole
-document, Excalidraw only when Algorant will work on the drawing himself, and
-fframes only for motion or a rendered video.
+Reach for Pele first for a diagram or chart deliverable; use a fenced Mermaid
+block for a compact diagram being discussed in Pi chat, and Sideshow's Mermaid
+surface for a diagram in a Sideshow post. Choose Words for a whole document,
+Excalidraw only when Algorant will work on the drawing himself, and fframes
+only for motion or a rendered video.
 
 ## Shared style
 
@@ -94,6 +97,33 @@ Highest quality wins (Algorant: "highest quality wins always unless some other i
 ### Mockups and proof
 
 A mockup of something Algorant will see in Obsidian, a Pi pane or the Herdr app is made by the real generator or renderer, in that real target, at 1:1, with representative real data. An HTML or hand-painted sketch is allowed only labelled 'direction, not for approval'. As-built proof is a capture from the same target, shown beside the approved image at 1:1 (crop, never shrink). Re-painting with the mockup's own painter proves nothing.
+
+## Mermaid in Pi chat
+
+Use a top-level fenced `mermaid` block for a small diagram you want to read in
+Pi's transcript. Pi renders supported diagrams as Unicode in the TUI; rendering
+can fall back to the original source when syntax is unsupported or the drawing
+is wider than the available message width. That width depends on the terminal
+and message layout, so a wide diagram is better as a Pele image or a Sideshow
+Mermaid surface.
+
+In Pi 1.6.0 this compact flowchart renders inline and demonstrates decisions,
+labeled edges, `<br/>` label breaks and multi-node edges:
+
+```mermaid
+flowchart TD
+    A[Inbox: open requests<br/>and replies] --> B{Needs attention?}
+    B -->|yes| C[Ask the owner]
+    B -->|no| D[Nothing to do]
+    C & D --> E[Herdra replies]
+```
+
+If a diagram falls back to source, shorten labels or split it rather than
+relying on a fixed column cutoff. Keep inline Mermaid for a compact diagram in
+the ongoing conversation. Use a Sideshow Mermaid surface when it belongs in a
+Sideshow post, or Pele when you need SVG/PNG files for a README, note, plan or
+presentation. Those image-based outputs are more suitable when a diagram is
+wide or needs a shareable visual.
 
 ## Pele
 
