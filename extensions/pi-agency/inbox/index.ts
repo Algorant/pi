@@ -61,6 +61,8 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   let ctx: ExtensionContext | undefined;
   let endpoint: Endpoint | undefined;
   let watcher: FSWatcher | undefined;
+  let lifecycle = 0;
+  let live = false;
   let detachCompactionAbort: (() => void) | undefined;
 
   function releaseCompaction(): void {
@@ -73,7 +75,24 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
 
   async function deliverPending(): Promise<void> {
     // Held during any compaction (see gate.ts); files stay until the release rescan.
-    if (!ctx || !endpoint || inboxGate.held) return;
+    const scanCtx = ctx;
+    const scanLifecycle = lifecycle;
+    const current = () => live && lifecycle === scanLifecycle && ctx === scanCtx;
+    if (!scanCtx || !endpoint || inboxGate.held || !live) return;
+    const touchContext = (): boolean => {
+      if (!current()) return false;
+      try {
+        scanCtx.isIdle();
+        return true;
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("This extension ctx is stale after session replacement or reload.")) throw error;
+        if (lifecycle === scanLifecycle && ctx === scanCtx) {
+          live = false;
+          watcher?.close(); watcher = undefined;
+        }
+        return false;
+      }
+    };
     const key = inboxKey(endpoint);
     const dir = inboxDir(key);
     const pending: Array<{ path: string; env: Envelope }> = [];
@@ -92,7 +111,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
     let routes: Routes | undefined;
     if (pending.some(({ env }) => foreignCore(env))) {
       routes = await hcMachines().catch((error) => error instanceof Error ? error : new Error(String(error)));
-      if (!ctx || inboxGate.held) return; // reloaded or compacting meanwhile: the files wait
+      if (!current() || inboxGate.held) return; // reloaded or compacting meanwhile: the files wait
     }
     for (const { path, env } of pending) {
       // New work waits its turn: while this Pi is working, a message that is not a blocked message, an
@@ -100,28 +119,32 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       // the turn ends (agent_settled) delivers it as a follow-up that starts the next turn.
       // A typed control is different: its receiver consumes it without a model turn, so it is delivered
       // while the Pi is working too. The target records it as pending and applies it at its own idle boundary.
-      if (!steersWhileWorking(env) && !env.control && !ctx.isIdle()) continue;
+      if (!touchContext()) return;
+      if (!steersWhileWorking(env) && !env.control && !scanCtx.isIdle()) continue;
       // A delivery path that cannot deliver on the loaded code keeps the message queued instead:
       // claiming it now would consume it for a turn that code no longer matches.
-      if (keep?.(env, ctx)) continue;
+      if (keep?.(env, scanCtx)) continue;
+      // Validate again after keep and immediately before claiming, including steers and typed controls.
+      if (!touchContext()) return;
+      const session = scanCtx.sessionManager.getSessionId();
       try {
         unlinkSync(path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // an overlapping scan delivered it
         throw error;
       }
-      const session = ctx.sessionManager.getSessionId();
-      const transformed = transform ? await transform(env, ctx) : undefined;
+      const transformed = transform ? await transform(env, scanCtx) : undefined;
       if (transformed === null) {
         recordDelivery(env, session);
         continue;
       }
       const delivered = transformed ?? env;
-      // Reloaded or shut down while the transform ran: requeue its result for the next runtime.
-      if (!ctx) { dropLocalEnvelope(delivered); return; }
+      // A returned envelope is prepared for delivery; if this runtime ended while awaiting the
+      // transform, restore that exact envelope for the next runtime. Exceptions are never replayed.
+      if (!current()) { dropLocalEnvelope(delivered); return; }
       // Only delivered messages: consumed reload controls never enter note capture.
-      pi.events.emit(NSTAR_INBOX, { env: delivered, ctx });
-      const idle = ctx.isIdle();
+      pi.events.emit(NSTAR_INBOX, { env: delivered, ctx: scanCtx });
+      const idle = scanCtx.isIdle();
       if (idle) inboxGate.turnPending = true;
       pi.sendMessage({
         customType: MESSAGE_TYPE,
@@ -129,7 +152,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         display: true,
         details: delivered,
       }, idle ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "steer" });
-      recordDelivery(delivered, ctx.sessionManager.getSessionId());
+      recordDelivery(delivered, session);
     }
   }
 
@@ -138,8 +161,15 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   }
 
   pi.on("session_start", async (_event, context) => {
-    endpoint = await hcAddress(process.env.HC_TERMINAL_ID!);
+    const starting = ++lifecycle;
+    live = false;
+    watcher?.close(); watcher = undefined;
+    ctx = undefined; endpoint = undefined;
+    const address = await hcAddress(process.env.HC_TERMINAL_ID!);
+    if (lifecycle !== starting) return;
+    endpoint = address;
     ctx = context;
+    live = true;
     // Reload/session replacement must not inherit a hold from the previous runtime.
     detachCompactionAbort?.();
     detachCompactionAbort = undefined;
@@ -147,7 +177,6 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
     inboxGate.turnPending = false;
     const dir = inboxDir(inboxKey(endpoint));
     mkdirSync(dir, { recursive: true });
-    watcher?.close();
     // Scan on any event: a rename is reported under the temp name only.
     watcher = watch(dir, () => scan());
     scan();
@@ -169,6 +198,8 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   pi.on("session_compact", releaseCompaction);
   pi.on("session_compact_failed", releaseCompaction);
   pi.on("session_shutdown", () => {
+    lifecycle++;
+    live = false;
     watcher?.close(); watcher = undefined; ctx = undefined; endpoint = undefined;
     detachCompactionAbort?.(); detachCompactionAbort = undefined;
     inboxGate.held = false;
