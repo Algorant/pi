@@ -15,7 +15,7 @@ Any Sideshow tool starts the configured server on demand when a local origin is 
 
 A session is one workstream containing its Stream, posts, comments, assets, and Timeline. On the first publish, pass `sessionTitle` as the user's task name. Reuse the remembered session for that workstream. Use `newSession=true` only for an explicitly separate workstream, privacy boundary, or user request. Do not publish credentials or other secrets.
 
-Establish a new session with one completed `sideshow_publish_post` or `sideshow_upload_asset` call before issuing other session-scoped calls. Never run calls in parallel when more than one could create or infer the remembered session; they can race into separate sessions. After the first result returns, pass its explicit `sessionId` to subsequent uploads or publishes when doing so removes ambiguity.
+Establish a new session with one completed `sideshow_publish_post` or `sideshow_upload_asset` call before issuing other session-scoped calls. Never run calls in parallel when more than one could create or infer the remembered session; they can race into separate sessions. Use `newSession=true` on **exactly one** call: repeating it on a title-only publish and then on uploads creates several empty sessions with the same title, and there is no delete command for them (cleanup needs the API's DELETE). After the first result, pass that explicit `sessionId` to every later upload or publish. After the first result returns, pass its explicit `sessionId` to subsequent uploads or publishes when doing so removes ambiguity.
 
 ## Posts, Stream, and revisions
 
