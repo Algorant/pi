@@ -27,6 +27,9 @@ export function projectPayloadImages(payload: unknown, admitted: ReadonlyMap<str
       for (let i = result.length - 1; i >= 0; i--) result[i] = walk(result[i]);
       return result;
     }
+    // Copy only plain data; SDK objects in the payload (e.g. Google's config.abortSignal) pass through by reference.
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
     return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, walk(item)]).reverse());
   };
   return walk(payload);
