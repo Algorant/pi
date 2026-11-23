@@ -65,9 +65,9 @@ GH_TOKEN=$(ask_secret "GitHub token") || on_prompt_rc $?
 
 ## Interactive UI
 
-Start from [`sample.sh`](sample.sh) in this skill directory. It is a runnable template: the gate, the Verdigris gum theme, output helpers with plain twins, prompt helpers, exit-status handling, and a harmless demo flow. Copy the blocks the handoff needs into the script and delete the rest. The script stays self-contained: never `source` the template or a dotfile from a handoff script. A reviewed template for one recurring operator handoff, storing a project's Postgres role password as a Proton item, lives in the `utils` skill's Databases section (`agent/skills/utils/scripts/store-pg-password.sh`).
+Start from [`sample.sh`](sample.sh) in this skill directory for script structure and a harmless demo; the Scriptify runner loads `theme.sh` automatically for bash handoff scripts. Call `banner`, `ok`, `step`, `danger`, `confirm`, `pick_*`, `ask`, `ask_secret`, `run`, and `summary` directly—do not copy the theme or waiting-signal blocks. The script stays self-contained in its actions: never `source` a dotfile from a handoff script. A reviewed template for one recurring operator handoff, storing a project's Postgres role password as a Proton item, lives in the `utils` skill's Databases section (`agent/skills/utils/scripts/store-pg-password.sh`).
 
-Gum is optional decoration, never a requirement. When a real terminal is in front of a person, gum makes banners, confirmations, menus, spinners, and status lines pleasant. Otherwise every helper falls back to `echo` / `read`. Never install gum from the script: it comes with Omarchy as a system package (`/usr/bin/gum`, not a mise tool), so `command -v gum` is the whole check. Do not add glow, a `%` progress bar (gum has no progress command; measurable progress stays plain bash), or a compiled Charm helper.
+Gum is optional decoration, never a requirement. When a qualifying real terminal is in front of a person, gum makes banners, confirmations, menus, spinners, and status lines pleasant. Otherwise the automatically loaded helpers use plain `printf` / `read` fallbacks. Set `SCRIPTIFY_PLAIN=1` to request those plain fallbacks even in a terminal. Never install gum from the script: it comes with Omarchy as a system package (`/usr/bin/gum`, not a mise tool), so `command -v gum` is the whole check. Do not add glow, a `%` progress bar (gum has no progress command; measurable progress stays plain bash), or a compiled Charm helper.
 
 ### Gate
 
@@ -78,7 +78,7 @@ Decide once, at the top: is a person watching this terminal? The terminal checks
 - `CI` is unset; a set-but-empty `CI=""` still counts as CI
 - `SCRIPTIFY_PLAIN` is not `1`
 
-When they hold, `UI=gum` if `command -v gum` succeeds and `PICKER=fzf` if `command -v fzf` succeeds. Otherwise both stay plain.
+When they hold, the runner-loaded `theme.sh` sets `UI=gum` if `command -v gum` succeeds and `PICKER=fzf` if `command -v fzf` succeeds. Otherwise both stay plain. `SCRIPTIFY_PLAIN=1` disables the styled UI and selects the plain fallbacks.
 
 The `-t 1` test is deliberate and it is ours, not gum's: a script whose stdout is redirected or piped is acting as a data source, so it uses plain prompts even though gum itself could still render on the controlling terminal. stderr is not part of the gate.
 
@@ -86,7 +86,7 @@ UI and logs go to **stderr**. `gum spin` already writes there; `gum style` write
 
 ### Theme
 
-Never rely on gum's default Charm colors (pink and purple). When `UI=gum`, export the Verdigris `GUM_*` block from `sample.sh`. That inline copy is authoritative on machines without the `mise dot` port at `~/.config/theme_colors/verdigris-gum.sh` (absent on this machine); where both exist, change them together. Roles:
+Never rely on gum's default Charm colors (pink and purple). The runner-loaded `theme.sh` exports the Verdigris `GUM_*` block when `UI=gum`; it is the one authoritative copy. Roles:
 
 - **fern** `#8ec07c`: cursor `›`, focused confirm button, selections, `✓`
 - **aqua** `#83a598`: headers, step titles, spinner, `·` info
@@ -123,15 +123,14 @@ Use these glyph helpers, not `gum log`: `--level.foreground` recolors every leve
 
 Use fzf for every long or fuzzy list; do not use `gum filter`. Pickers print values on stdout; capture them with `$(...)`.
 
-When copying prompt helpers from the sample, copy its waiting-signal block too.
-The six prompt helpers emit an OSC 7501 `blocked` status while waiting, then
-`working` when the prompt returns. The Scriptify runner itself signals a script's
-own interactive `read` through a `BASH_ENV` prelude, so an unedited bash script
-shows the alert. `await_prompt` remains for prompts drawn by other programs. This
-helper signal is enabled only when the app-owned Scriptify runner passes
+The prompt helpers emit an OSC 7501 `blocked` status while waiting, then
+`working` when the prompt returns. The Scriptify runner loads the helpers and
+signals a script's own interactive `read` through a `BASH_ENV` prelude, so an
+unmodified bash script shows the alert. `await_prompt` remains for prompts drawn
+by other programs. This helper signal is enabled only when the app-owned Scriptify runner passes
 `SCRIPTIFY_WAIT_SIGNAL=1`, stdin and stderr are interactive TTYs with a non-dumb
-`TERM`, and the existing `base64` utility is available; if a condition fails, the
-sample says why and prompts work normally. Messages are fixed and generic by
+`TERM`, and the existing `base64` utility is available; if a condition fails,
+prompts work normally without the waiting signal. Messages are fixed and generic by
 prompt kind; never include prompt text, choices, answers, or credentials. The
 status is written to stderr, so captured prompt answers remain the only stdout
 values. Non-bash scripts, and prompts drawn by another program that are not
@@ -195,8 +194,7 @@ Algorant asks for deploy access configured on their machine using a key that mus
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Exit block, gate, Verdigris theme, output helpers, confirm, and on_prompt_rc copied from sample.sh.
-# (Omitted here; paste them verbatim.)
+# The Scriptify runner loads theme.sh; call its helpers directly.
 
 KEY="$HOME/.ssh/id_ed25519_deploy"
 HOST_ALIAS="deploy"

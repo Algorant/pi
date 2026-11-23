@@ -12,15 +12,16 @@ report() {
   bun "$inbox" result "$recipient" "Scriptify: $script $1" >/dev/null
 }
 cancel() {
+  warn "CANCELLED: $1"
   report "CANCELLED: $1"
   exit 130
 }
 classify() {
   status=$1
   case $1 in
-    0) outcome="succeeded (exit 0)" ;;
-    130) outcome="CANCELLED (exit 130: declined at its prompt, or Ctrl+C)" ;;
-    *) outcome="FAILED: exit $1" ;;
+    0) outcome="succeeded (exit 0)"; ok "$outcome" ;;
+    130) outcome="CANCELLED (exit 130: declined at its prompt, or Ctrl+C)"; warn "$outcome" ;;
+    *) outcome="FAILED: exit $1"; err "$outcome" ;;
   esac
 }
 
@@ -33,8 +34,9 @@ trap : INT
 
 # pane.split starts in its work pane's folder; a native child may work elsewhere.
 cd -- "$cwd" || { outcome="FAILED: cannot enter the invoking agent's working directory"; exit 1; }
-printf 'Reviewed script: %s\n' "$script"
 printf '\033]7501;state=working:app=scriptify\007'
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../skills/scriptify" && pwd)/theme.sh"
+banner "$script" "Working directory: $cwd"
 job_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 prelude="$job_dir/scriptify-prompt.sh"
 signal=1

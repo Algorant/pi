@@ -1,4 +1,5 @@
 # Bash BASH_ENV prelude for Scriptify's child script.
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../skills/scriptify" && pwd)/theme.sh"
 # Do nothing outside an armed runner with an interactive stdin.
 if [[ ${SCRIPTIFY_WAIT_SIGNAL:-0} == 1 && -t 0 ]]; then
   read() {
