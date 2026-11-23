@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNstarHistory } from "./nstar-history.ts";
 import { registerNstar } from "./nstar.ts";
 import { registerOrchestratorModel } from "./model-roles-session.ts";
+import registerNoSleep from "./conduct.ts";
 
 /**
  * pi-agency's own registrations: shared model and usage policy. Native HC
@@ -12,4 +13,5 @@ export default function piAgency(pi: ExtensionAPI): void {
   registerNstar(pi);
   registerNstarHistory(pi);
   registerOrchestratorModel(pi);
+  registerNoSleep(pi);
 }
