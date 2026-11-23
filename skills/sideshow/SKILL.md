@@ -31,8 +31,8 @@ Do not use a targeted add merely to represent a new step. A concrete post id is 
 
 ## Writing for Algorant
 
-- **Decide first, evidence after.** A decision post opens with its decision card as the first surface: one line for the question, lettered choices with concrete consequences, and one recommendation with why. Put supporting evidence in ordinary surfaces below it. Herdra's `~/Projects/herdra/docs/decision-cards.md` documents the owned recipe in `~/Projects/herdra/bin/sideshow-card`; do not copy the recipe here.
-- **Show what he asked to see, first.** The first screen of a post (about 800 px) answers his ask. Anything with a shape (a folder structure, a layout, a UI, a document, a data view, an Obsidian Base) opens with current and proposed renders made from real data, with one example carried through both and captions only. Introductory prose before the first visual is at most about 60 words; this budget excludes a required decision card. A decision post starts with its card, with no introductory prose before it; the card has the question, choices with concrete consequences, and one recommendation, then the renders, then everything else. Research opens with an answer of three lines or fewer and one table or diagram; the detail goes below. (Algorant, 2026-11-20: "doesn't give me some easy to see before/after mockups or renders of what I am asking for".)
+- **Proposal order.** Open with the ask and what the post answers, in two lines; these may sit inside an opening contextual decision card. For each visible change, show a tight before and after from the same crop side by side, with one caption saying what to look at. Put the pick after the evidence, or open with a decision card that states what is being decided and why before its options. Never present a blind choice. Before publishing, inspect every image and verify each before/after pair shows the same tight crop of the actual change; say whether the proposal is ready for review or needs Algorant's decision. Use no captures with unrelated content, and never take a capture by opening anything over Algorant's screen. Keep it short. Herdra's `~/Projects/herdra/docs/decision-cards.md` documents the owned recipe in `~/Projects/herdra/bin/sideshow-card`; do not copy the recipe here.
+- **Show what he asked to see.** The first screen of a post (about 800 px) answers his ask. Anything with a shape (a folder structure, a layout, a UI, a document, a data view, an Obsidian Base) uses paired current/proposed renders made from real data, with one example carried through both. Research opens with an answer of three lines or fewer and one table or diagram; the detail goes below. (Algorant, 2026-11-20: "doesn't give me some easy to see before/after mockups or renders of what I am asking for".)
 - **Prose meant for him carries no code identifiers, paths or flags.** Those belong in the detail sections, a quotation, or a `code` surface; the prose says what happens, not what is called.
 - **A flow, lifecycle or architecture is a diagram**, not a paragraph of arrows.
 - **No `#` heading inside a body.** The post title is the title; start at `##`, one concept per post.
@@ -43,14 +43,14 @@ Do not use a targeted add merely to represent a new step. A concrete post id is 
 
 | job | surface | why |
 | --- | --- | --- |
-| a decision for him | the decision card first, supporting evidence below | the question and choices lead; see **Writing for Algorant** above |
+| a decision for him | paired evidence then a contextual decision, or a contextual decision card first | the question and why are clear before the options; see **Writing for Algorant** above |
 | a comparison | a `markdown` table | dense and scannable |
 | a flow, lifecycle or architecture | `mermaid`, rendered by Pele | the `studio` skill owns the how |
 | a UI or visual change | before/after `image` surfaces in his theme | the Herdr window keeps terminal SGR foreground colours, bold and dim, but does not draw coloured backgrounds |
 | a README or doc | `markdown` exactly as its audience sees it | review the reader's view, not the source |
 | command output | `terminal` | keeps ANSI where colour carries meaning |
 | research | the answer in three lines or fewer plus one table or diagram, then findings, sources last | answer first; evidence follows |
-| a structure, layout or data-view proposal | current vs proposed image renders from real data, first | the shape is shown before it is described |
+| a structure, layout or data-view proposal | matched-crop current and proposed image renders side by side | the visible change is clear before the pick |
 | a run history | `trace` | ordered steps read as a timeline |
 
 One session per topic (see above). The `studio` skill owns colours, fonts and tool choice for visuals; this table only picks the surface.
