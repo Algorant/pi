@@ -255,9 +255,9 @@ carries `from.label`.
 `dispatch.ts` registers the three start tools of the task-65 contract (Herdra
 m63db715a) for owner Pis (not Workers or read-only profile children). Each one
 checks every precondition before any side effect, launches once, checks the
-launch and returns `{terminal, name, …}`. None selects or focuses anything (the
-one approved exception: `space.new` shows a NEW project's space), waits,
-polls, retries or falls back. Ordinary model defaults come from
+launch and returns `{terminal, name, …}`. Nothing selects or focuses anything,
+including a new project's space, which `space.new --focus false` creates without
+switching; it does not wait, poll, retry or fall back. Ordinary model defaults come from
 `model-roles.json`; the closed Worker benchmark and researcher Fable selectors
 below are the only per-launch model selections. A later failure keeps what already exists (a created
 checkout or space) and names it; nothing is removed automatically.
@@ -311,7 +311,8 @@ checkout or space) and names it; nothing is removed automatically.
   `notChecked`. It reuses the local space for `folder` without switching
   (adding a missing `tandem` tab by adoption; a space that already has a
   `main` tab is a repair to clarify) or creates the new space with
-  `space.new --tab tandem`, then starts `pi` named `<project>` (labels
+  `space.new --tab tandem --focus false` without showing it, then starts `pi`
+  named `<project>` (labels
   `label=<label or "<project> Ceph">`, `kind=ceph`) in it and renames its tab `main`.
   Only after every read-only precondition (folder, checkout root, Tandem workspace,
   duplicate terminals, app spaces) does it resolve the orchestrator role and, when

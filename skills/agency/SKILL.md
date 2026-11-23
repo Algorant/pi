@@ -74,7 +74,7 @@ When Task-backed, the manus claims its Task and reports blockers and results to 
 
 ### Start a project's Ceph
 
-`ceph_start {project, folder, kickoff, from?}` is projectify's last step, after the directory, git and Tandem workspace exist. It refuses when a Ceph for the project already runs on this or any connected machine (an `hc ls` name or `<project> / main` match; unreachable machines are reported as not checked). It reuses the local app space for `folder` without switching to it (adding a missing `tandem` tab by adoption) or creates the new project's space with `space.new` (shown: the one approved exception). The Ceph is `pi` named `<project>` in tab `main`, labelled "<project> Ceph" by default; the kickoff ends with your return route and "report back when ready".
+`ceph_start {project, folder, kickoff, from?}` is projectify's last step, after the directory, git and Tandem workspace exist. It refuses when a Ceph for the project already runs on this or any connected machine (an `hc ls` name or `<project> / main` match; unreachable machines are reported as not checked). It reuses the local app space for `folder` without switching to it (adding a missing `tandem` tab by adoption) or creates the new project's space with `space.new --focus false` (created without switching). The Ceph is `pi` named `<project>` in tab `main`, labelled "<project> Ceph" by default; the kickoff ends with your return route and "report back when ready".
 
 ### Labels
 

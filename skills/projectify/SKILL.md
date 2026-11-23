@@ -59,12 +59,12 @@ Requires `HC_TERMINAL_ID`. Read the `herdr` skill, `hc --skill` and `herdr-app -
 ceph_start {project: <name>, folder: <dir>, kickoff: <kickoff>, label?, from?}
 ```
 
-It refuses when a Ceph for the project already runs on this or a connected machine (unreachable machines come back as not checked), and when the matching space already has a `main` tab (a repair to clarify, not a second Ceph). It reuses the local space for the folder without switching to it, adding a missing `tandem` tab, or creates the new space with `space.new --tab tandem` (`tandem tui`); a new space is shown, which Algorant accepted for a project he asked for. The Ceph is `pi` with core name `<name>` in tab `main`; `label` (optional, default `<name> Ceph`) is its display label, not its core name. The tool appends your return route and "report back when ready" to the kickoff. Use `hc ls` to discover legacy existing Cephs that have no core name.
+It refuses when a Ceph for the project already runs on this or a connected machine (unreachable machines come back as not checked), and when the matching space already has a `main` tab (a repair to clarify, not a second Ceph). It reuses the local space for the folder without switching to it, adding a missing `tandem` tab, or creates the new space with `space.new --tab tandem --focus false` (`tandem tui`); the new space never takes the screen from the workspace Algorant is watching. The Ceph is `pi` with core name `<name>` in tab `main`; `label` (optional, default `<name> Ceph`) is its display label, not its core name. The tool appends your return route and "report back when ready" to the kickoff. Use `hc ls` to discover legacy existing Cephs that have no core name.
 
-A throwaway project without Tandem gets only its main Ceph, with native app creation. `space.new` shows the new space; pass `--focus false` to keep the currently shown space/tab selected:
+A throwaway project without Tandem gets only its main Ceph, with native app creation. `space.new` shows the new space unless you pass `--focus false`, which keeps the currently shown space/tab selected:
 
 ```bash
-herdr-app do space.new --name <name> --folder <dir> --tab main --argv '["pi"]' --task '<kickoff>'
+herdr-app do space.new --name <name> --folder <dir> --tab main --argv '["pi"]' --focus false --task '<kickoff>'
 ```
 
 **Verify.** Read the tool's result, then `herdr-app ls` and `hc get <returned-main-terminal>`: actual membership in tab `main` (or the pending adoption it names), correct cwd, no native parent, and `status.app` identifying Pi (do not infer the program from `argv`). An unparented app-backed Pi in `main` is the Ceph. A start acknowledges a terminal, not readiness or kickoff success; the Ceph's report back is the proof. Read its exact screen if blocked; trust/permission decisions go to Algorant through Herdra, never bypass them or blindly resend. Do not invent name synchronization, pane IDs or a second registry.

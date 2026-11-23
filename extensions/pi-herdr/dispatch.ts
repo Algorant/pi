@@ -448,9 +448,9 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
         tandemTab = named.tab === "pending" ? `${board.address} (adoption pending)` : `${named.tab} (added)`;
       }
     } else {
-      // Approved exception: a NEW project's space is shown when it is created (space.new shows it).
+      // A new project's space is created without switching (the app keeps the shown space and tab).
       let out: any;
-      try { out = JSON.parse(await command("herdr-app", ["do", "space.new", "--name", name, "--folder", folder, "--tab", "tandem", "--argv", JSON.stringify(["tandem", "tui"])], undefined, 30_000)); }
+      try { out = JSON.parse(await command("herdr-app", ["do", "space.new", "--name", name, "--folder", folder, "--tab", "tandem", "--argv", JSON.stringify(["tandem", "tui"]), "--focus", "false"], undefined, 30_000)); }
       catch (error) { throw new Error(`herdr-app space.new failed for ${name}: ${diagnosticText(error)} Nothing was started.`); }
       if (typeof out?.space !== "string") throw new Error(`herdr-app space.new returned no space id: ${JSON.stringify(out).slice(0, 300)}. Inspect herdr-app ls; nothing else was started.`);
       spaceId = out.space;
@@ -472,7 +472,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const tab = await nameTab(await localAppHost(), spaceId, started.address, "main");
     const closed = closeRequest(params.from, `${label} (${name})`, self);
     const cold = await coldRead("kickoff", label, params.kickoff, folder, ctx);
-    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.${coldReadNote(cold)}`,
+    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, not shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.${coldReadNote(cold)}`,
       { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, modelSet: orchestrator.value.set, modelQuota: orchestrator.value.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, coldRead: cold, ...tab, ...closed });
     } catch (error) {
       // A switch that already happened is a committed machine change: never hide it behind a
@@ -498,7 +498,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     },
     {
       name: "ceph_start", label: "Ceph Start",
-      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created and shown; an existing one is reused without switching), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. After those read-only checks it resolves the orchestrator role, cutting it over first when quota alone blocks the set, and launches the Pi with that exact model so its kickoff is consumed. The kickoff ends with your return route.",
+      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created without switching, as is an existing one), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. After those read-only checks it resolves the orchestrator role, cutting it over first when quota alone blocks the set, and launches the Pi with that exact model so its kickoff is consumed. The kickoff ends with your return route.",
       promptSnippet: "Start a named Ceph for a prepared project (projectify first); it reports back to you when ready.",
       parameters: CephParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => cephStart(params, signal, ctx),
