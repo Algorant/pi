@@ -241,6 +241,7 @@ function coldReadNote(facts: Record<string, unknown> | undefined): string {
 
 const appRoute = (host: AppHost) => host.machine ? `hc exec --on ${host.machine} -- herdr-app` : "herdr-app";
 const rules = (route: string, name: string, tabName: string, host: AppHost) => [
+  `Check in to your actual starter/owner ${route} one level up with ordinary agent_send kind=result (never reply_to), one headline under 160 characters: “doing X; next Y”. Follow the global AGENTS.md check-in cadence; cite the assignment in the body.`,
   `Report results, questions and blockers only to ${route} with agent_send terminal=${route}: line 1 is the answer (one line, at most 160 characters), detail below or in an artifact.`,
   "Never select or focus any space, tab or terminal. Never sleep, poll or wait on a timer: start work, end the turn, act when the inbox delivers.",
   `Your app tab should be named "${tabName}". If the tab in \`${appRoute(host)} ls\` whose terminals include $HC_TERMINAL_ID has another name, rename it: ${appRoute(host)} do tab.rename --id <that tab> --name "${tabName}". Your hc name is ${name}.`,
