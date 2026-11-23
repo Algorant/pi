@@ -113,12 +113,6 @@ async function readPostComments(sessionId: string, postId: string, signal?: Abor
 	return Array.isArray(result.comments) ? result.comments.map(asRecord) : [];
 }
 
-function commentsSummary(comments: SideshowComment[]): string {
-	if (!comments.length) return "\n\nComments on this post: none.";
-	const lines = comments.map((item) => `- #${String(item.seq ?? "?")} [${stringValue(item.author) ?? "unknown"}] ${feedbackText(item)}`);
-	return `\n\nComments on this post (all authors, read-only; the author is server-assigned, so a browser comment may appear as the agent):\n${lines.join("\n")}`;
-}
-
 function requireString(record: Record<string, unknown>, key: string, label: string): string {
 	const value = stringValue(record[key]);
 	if (!value) throw new Error(`Sideshow response was missing ${label}.`);
@@ -505,7 +499,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		name: "sideshow_get_post",
 		exposure: "codemode",
 		label: "Sideshow Get Post",
-		description: "Get one complete Sideshow post through GET /api/posts/:id. Returns current surfaces with stable ids and zero-based indexes, the current version, the full bounded retained history, and every comment on the post (all authors, read without consuming feedback).",
+		description: "Get one complete Sideshow post through GET /api/posts/:id. Returns the post fields (including current surfaces with stable ids and zero-based indexes, current version, and full bounded retained history) plus every comment on the post under postComments (all authors, read without consuming feedback).",
 		promptSnippet: "Inspect one full Sideshow post and its retained versions.",
 		promptGuidelines: [
 			"Use sideshow_get_post before a targeted surface edit when ids or current content are uncertain, and after sideshow_list_posts during restart or compaction recovery.",
@@ -517,7 +511,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const sessionId = requireString(post, "sessionId", "session id");
 			rememberSession(state, sessionId);
 			const comments = await readPostComments(sessionId, postId, signal);
-			return textResult(`${jsonText(post)}${commentsSummary(comments)}`, { ...post, post, postId, sessionId, comments, url: sessionUrl(sessionId), sessionUrl: sessionUrl(sessionId), postUrl: postUrl(postId), baseUrl: baseUrl() });
+			return textResult(jsonText({ ...post, postComments: comments }), { ...post, post, postId, sessionId, comments, url: sessionUrl(sessionId), sessionUrl: sessionUrl(sessionId), postUrl: postUrl(postId), baseUrl: baseUrl() });
 		},
 	});
 
