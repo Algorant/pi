@@ -32,6 +32,8 @@ Use helpers routinely for bounded contract/control-flow tracing, implementation 
 
 ## Northstar
 
+For non-Tandem triage, use the same [decision framing](../tandem/SKILL.md#what-algorant-needs-to-decide).
+
 Every bound job has a northstar the `notes` tool and the nstar hooks keep. Native Workers/manus bind automatically; Herdra/Ceph bind explicitly with a `taskId` or a `label` plus `brief`, and an explicit binding ends with `unbind`. An unbound pane captures nothing. Never create a second note, evergreen note or registry.
 
 - **Task-backed jobs:** nstar never writes the Task body. Captures live in the Pi session: verbatim direct inputs ("Algorant (direct)") and starter relays ("relayed by <whois label>", with message id), hand-offs as one line plus a record link, `next`, and notes. No capture is an approval; `notes` cannot edit the approvals block, and the Task/brief stays authoritative (archived Tasks stay read-only).

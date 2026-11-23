@@ -65,16 +65,116 @@ Use `tandem_sync` for synchronization and local `sync status`. Surface conflicts
 
 ## Board triage
 
+One framework at three levels: **one Task**, **one board**, **all boards**. The four verdicts, the deciders and the card shape are the same at every level; only the scope, who runs it and its trigger change. Choose the level before starting, and keep a level out of the level below it: the all-boards pass sends a project one request rather than triaging that project's board itself.
+
+### The three levels
+
+| Level | Scope | Runs it | Decides | Output |
+| --- | --- | --- | --- | --- |
+| **One Task** | A named record, plus what it references | Whoever holds it: its Ceph, or the manus running a board pass | That owner; Algorant only for his list | One card, and the action taken in the same pass |
+| **One board** | Every active Task, research Task and papercut on one project's board | That board's Ceph, or a manus it starts | The board owner | One digest: counts line, Decided (reversible), then only Algorant's cards |
+| **All boards** | Every project board's flags, plus Herdra's own rows and inbox | Herdra | Herdra routes; each board's Ceph decides its own cards | One digest: a section per project, then Algorant's cards batched three or four at a time |
+
+Triggers, none of which starts a timer or a poller: Algorant asks for a triage, summary or review, at any level; a board reaches a milestone or changes hands, for one board; `herdra-check` raises a cross-board flag (`stale-papercut`, `stale-request`, `task-delivered`, `unlinked-item`), or the same card is stale on three or more boards, for all boards.
+
 Classify work cheaply, decide who acts, and act. Use the same four verdicts for pending Tasks, research, and papercuts; the work type determines what happens after a `ready` verdict. Do not create an Epic or an omnibus papercut Task. Papercut *capture* belongs to *Filing a papercut* above, not this Board-review workflow.
 
-Triage covers Tasks only. Decisions (`decision-N`) are standing ADRs: never give them a verdict or recommend closing, cancelling or archiving them, even when a request says "decisions included". One exception runs on every Board pass: list any Decision still `proposed` (`tandem_read action=list type=decision`) and correct each yourself by the *Decisions are ADRs* rule above; report the corrections in the pass summary and do not ask Algorant to accept them.
+Triage covers Tasks only. Decisions (`decision-N`) are standing ADRs: never give them a verdict or recommend closing, cancelling or archiving them, even when a request says "decisions included". One exception runs on every one-board pass: list any Decision still `proposed` (`tandem_read action=list type=decision`) and correct each yourself by the *Decisions are ADRs* rule above; report the corrections in the pass summary and do not ask Algorant to accept them.
+
+### One delegation brief per level
+
+Copy the level's brief; its owner reads the rest of this section itself.
+
+**One Task** (a helper, or the owner doing it directly):
+
+```
+One Task: <project>:<task-id> - <title>
+Read the record, its acceptance, blockers and references, then run the per-item methodology on it.
+Return one card: id - verdict - decider - why, citing the record or current evidence - next action.
+Take the action if it is yours (dispatch, one scoping pass, close with a note and evidence); otherwise name who does. Do not start the work itself.
+```
+
+**One board** (the board's Ceph, or a manus for a pass over it):
+
+```
+One board: <project>
+Triage every active Task, research Task and papercut on the board, and correct any Decision still proposed.
+Use the four verdicts and act on the cards that are yours in the same pass: dispatch ready work, one scoping pass per refine-scope card, park a wait with its re-check trigger, cancel superseded or obsolete records with a one-line note.
+Report one digest to <return route>: the counts line, then Decided (reversible) with one line per action, then only Algorant's cards, each with what it is, why it exists, what doing it means, what he would see, and your recommendation.
+Post anything he must see or judge in <Sideshow session>. Do not wait for it.
+```
+
+**All boards** (Herdra; it routes rather than triages another project's board):
+
+```
+All boards: read the herdra-check flags, the herdra-open rows and inbox open, and each board's active Tasks.
+Fix what is Herdra's: its rows, its inbox, and its own board as a one-board pass.
+Send every other board's Ceph one request naming the cards found and asking for a one-board pass on that board.
+Report one digest: a section per project, then Algorant's cards batched three or four at a time.
+```
+
+### Per-item methodology
+
+The same heuristics run per item at every level; the all-boards pass stops at the one that decides *who* owns the item, then hands the item over. Run them cheap-first and stop as soon as one settles a verdict and a next action: a pass costs reads, not work.
+
+| Heuristic | How to check | Points to |
+| --- | --- | --- |
+| **Already answered?** | `git log` on its files, completed and archived Tasks (Logs), the current code or config, a cheap reproduction of the reported failure | `already-moved-on` |
+| **Same work elsewhere?** | `tandem_read action=search` on this board, other boards' `cwd`, prior `herdra-open` rows | `already-moved-on`, consolidated into the record that carries it |
+| **Age and activity?** | `createdAt`/`updatedAt`, attempt count, last note, what landed since filing | priority only, never readiness; high priority with nothing since filing is `refine-scope` |
+| **Recurrence?** | the same failure twice, repeated flags in the `herdra-check` log, repeated mentions in sessions | `ready` if it still bites; `already-moved-on` if it never recurred |
+| **Premise still true?** | the component, file or line it names, the version, the design, upstream behaviour, the minimal repro | `already-moved-on` if it is gone; `refine-scope` if only part changed |
+| **Right owner?** | whose files, credentials, machine or approval it needs | transfer to that Ceph or to Herdra, with a note here |
+| **Cost vs now?** | the smallest safe change, files touched, one direct edit or a brief | `ready`, done in this pass; if it needs a plan, his proposal card |
+| **Dependencies?** | each blocker's state *now*, the depended Task's Accord, an absent machine or credential | `refine-scope` for stale metadata; a park with a real trigger for a live one |
+| **His prior word?** | his words in the record, the *Only Algorant decides* list, earlier rows, Decisions | `already-moved-on` if he decided against it; otherwise his card, never a guess |
+| **Visible or live?** | UI, rendered output, a live app or desktop config, a public surface | his proposal card with before/after; never a direct dispatch |
+| **A real park trigger?** | the event that reopens it, and the date it is re-checked | `refine-scope`, parked with both written in the record; no trigger means cancel or his card |
+| **Same area?** | `relatedFiles`, paths, one symptom across items | one merged fix as the carrier, the rest consolidated into it |
+
+Every verdict cites its evidence: the commit, record id, `file:line`, host or capture it rests on. A verdict without one is the cheapest kind of guess, and two items that would take the same fix are one item.
+
+### Three kinds of item
+
+The twelve checks are the same for everything, but what settles an item depends on who holds it. Classify first: a papercut, an in-progress Task (someone holds it: claimed, delivered or blocked), or a not-started Task.
+
+| Kind | The checks that decide it | What "stale" means |
+| --- | --- | --- |
+| **Papercut** | Recurrence, cost vs now, same area, a real park trigger | Filed, and nothing has bitten again since |
+| **In progress** | The holder is alive and moving, its Accord, the last typed handoff | No motion since the holder's last report, or delivered with nobody accepting it |
+| **Not started** | Still wanted, still the right shape, his prior word, priority against age | Old, and nothing has landed behind it |
+
+- **Papercuts** take `ready` (fix it now, the smallest safe change), `already-moved-on` (close it cheaply, with the reason) or `refine-scope` (park it with its trigger). The board owner acts in the pass, and several papercuts never become one omnibus Task.
+- **In-progress Tasks** take `ready` (accept or return the delivery), `refine-scope` (the holder's shape is wrong) or `needs-direction` (only his decision is left). The holder's owner acts: release a claim whose terminal is gone, chase one that has gone quiet, accept a delivery under *Accepting delivered work*. Never rescope under a live holder without asking it, and never read a delivered Task as untouched backlog.
+- **Not-started Tasks** take all four verdicts. The board owner keeps, rescopes, merges or cancels in the pass; an outcome only he can state goes to him as a card. Priority argues with age, never with readiness.
+
+### Reading the ask
+
+The kind and the level come from the words, and a pass never widens them on its own. A named kind is a filter (`papercuts`, `in progress`, `todo`); with no kind named, take every kind. The level is the scope the ask names, else the scope implied by who is speaking.
+
+| The ask | Kind | Level |
+| --- | --- | --- |
+| "triage the papercuts" | papercuts only | the implied level: that board when a project is in play, every board when it reached Herdra with none |
+| "triage the in progress" | claimed, delivered and blocked Tasks only | the same |
+| "triage the todo" | not-started Tasks only | the same |
+| "triage <project>" | every kind | that board |
+| "triage the boards" (to Herdra, with no project) | every kind | every board, one request per Ceph |
+
+"Triage this Task" needs no split: it is one item. State the kind and level you read in the digest's first line, so a wrong reading costs one reply instead of a whole pass.
+
+### What Algorant needs to decide
+
+When he asks for a triage, a summary or a review, every item he is shown gives him what he needs to decide it himself: **what it is**, in plain words and by its label; **why it exists**; **what doing it means**, the concrete change, its owner and its size; **what he would see**; and **the recommendation with its reason**. Batch three or four at a time and keep detail behind a link.
+
+Work he must judge arrives as a concrete proposal (a plan, or a before/after carrying a real capture of the current state, never a mockup standing in for it), not an open-ended Task and not an ask whose options he cannot judge from. A card that cannot be written that way is `refine-scope`: its owner runs the scoping pass first and brings it back (Algorant, 2026-11-22: "I don't have sufficient ability to see what these are about. Need better summaries before using ask me tool"; "when I ask to do a triage or give me a summary/review, it uses these guidelines to tell me what I need to know to make a determination").
+
+The pattern is global (global `AGENTS.md`, *Communication*); the fields above are where a Tandem pass supplies it.
 
 ### Select and check (cheap)
 
-1. Run `tandem_status`, then `tandem_read`. For a named Task, inspect that record. For a Board pass, list active Tasks; use `tandem_read action=list kind=research` or `kind=papercut` if Algorant requested only that slice. Do not triage archived records as new work. Group parents with their children; call out an actionable child separately without double-counting the parent's outcome.
-2. Read the Task's acceptance, constraints, blockers, Accord status, related/referenced records, and relevant files only as needed. Check whether blockers are *still* active, current code already does the work, another Task owns it, or the promised validation actually tests the suspected failure. A delivered Task awaiting owner review is not untouched backlog.
-3. Staleness: for a card older than a few days, check what has landed since it was filed (completed Tasks, merged commits, changed rules or primitives). If later work answered, superseded or shrank it, the owner closes it as `already-moved-on`, rescopes it, or parks it with a trigger in the same pass, naming that later work as evidence. Example: task-447 (Jev to set plan/effort) was answered by Task-free briefs being small by definition and Task-backed work carrying effort and plan-first.
-4. Stop the cheap check once one verdict and one next action are justified. Do not start Subagents, web research, implementation, or a broad audit merely to assign a verdict. If no outcome is stated anywhere, the card is Algorant's (`needs-direction`); do not guess one.
+1. Run `tandem_status`, then `tandem_read`. For a named Task, inspect that record. For a one-board pass, list active Tasks; use `tandem_read action=list kind=research` or `kind=papercut` if Algorant requested only that slice. Do not triage archived records as new work. Group parents with their children; call out an actionable child separately without double-counting the parent's outcome.
+2. Read the record's acceptance, constraints, blockers, Accord status and what it references, then run it through *Per-item methodology* above. A delivered Task awaiting owner review is not untouched backlog, and a promised validation that never tests the suspected failure is `refine-scope`.
+3. Stop once one verdict and one next action are justified. Do not start Subagents, web research, implementation or a broad audit merely to assign a verdict. If no outcome is stated anywhere, the card is Algorant's (`needs-direction`); do not guess one.
 
 ### Four verdicts
 
@@ -89,7 +189,7 @@ For research, `ready` means ready to **research**, not ready to implement. A top
 
 ### Cards and routing
 
-Return one compact card per Task: `ID — verdict — decider — why (record/current evidence) — next action`. For research, also give a one-sentence vision of the decision or finding to produce; if that sentence would be a guess, use `needs-direction`. End a pass with one line per nonempty verdict listing IDs. Mark `ready` cards as **research / implementation / papercut / review**, so the next owner is obvious. Highlight high-risk safety work before low-priority polish, but priority does not change readiness.
+Return one compact card per Task: `ID — verdict — decider — why (record/current evidence) — next action`. A card that reaches Algorant carries the five fields under *What Algorant needs to decide* instead of the compact form. For research, also give a one-sentence vision of the decision or finding to produce; if that sentence would be a guess, use `needs-direction`. End a pass with one line per nonempty verdict listing IDs. Mark `ready` cards as **research / implementation / papercut / review**, so the next owner is obvious. Highlight high-risk safety work before low-priority polish, but priority does not change readiness.
 
 #### Who decides
 
@@ -103,7 +203,7 @@ Report one digest by your role's route: line one is the counts; then **Decided (
 
 ### Ready research: keep the existing fast path
 
-For a named research Task or any Board pass, act on `ready` research immediately; do not wait for another launch approval. If a named Task is not actually research (even if it mentions research, a Task is research only when its `kind` is `research`), say so and use the Board verdict without starting the research loop. Research remains research-only: no implementation or implementation/spec Task creation in the research loop.
+For a named research Task or any one-board pass, act on `ready` research immediately; do not wait for another launch approval. If a named Task is not actually research (even if it mentions research, a Task is research only when its `kind` is `research`), say so and use the Board verdict without starting the research loop. Research remains research-only: no implementation or implementation/spec Task creation in the research loop.
 
 - For `refine-scope`, write the one-sentence outcome the research must produce from what the record and its references state; if no outcome is stated anywhere, it is `needs-direction` and Algorant supplies it. Once known, prepend `## Vision` to the active Task body, preserving its content, acceptance, tags, and Accord state; then treat it as `ready`.
 - Claim `ready` research (`accord claim`, assignee `pi`). Run one read-only `scout` or `researcher` helper per Task, at most **4 live**; queue the rest. That is `dendra_start {kind: scout|researcher, label, task}` (see the `agency` skill). Give each the vision, acceptance, constraints and evidence boundary. Helpers never mutate files or Tandem records. Continue clarifying other cards while they work.
