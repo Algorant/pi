@@ -226,6 +226,11 @@ Other nonzero statuses are `FAILED`; plain exit1 is not cancellation.
 Verify effect independently of exit0. Hard runner/host loss can prevent a
 report: no observed result is never success.
 
+The runner provides a `BASH_ENV` prelude that signals only the script's own
+interactive `read` prompts. Non-bash scripts and prompts drawn by another program
+that are not wrapped in `await_prompt` are not signalled; they rely on Herdra's
+10-minute backstop.
+
 ## Naming: label and whois
 
 One naming system (task-585, herdra task-81 design B). Every start path

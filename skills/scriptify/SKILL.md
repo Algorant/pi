@@ -123,16 +123,20 @@ Use these glyph helpers, not `gum log`: `--level.foreground` recolors every leve
 
 Use fzf for every long or fuzzy list; do not use `gum filter`. Pickers print values on stdout; capture them with `$(...)`.
 
-When copying prompt helpers from the sample, copy its waiting-signal block too. The
-six prompt helpers emit an OSC 7501 `blocked` status while waiting, then `working`
-when the prompt returns. This is enabled only when the app-owned Scriptify runner
-passes `SCRIPTIFY_WAIT_SIGNAL=1`, stdin and stderr are interactive TTYs with a
-non-dumb `TERM`, and the existing `base64` utility is available. `base64` is the
-signal's only runtime utility; if it is missing, signaling stays off and prompts work
-normally. Messages are fixed and generic by prompt kind; never include prompt text,
-choices, answers, or credentials. The status is written to stderr, so captured prompt
-answers remain the only stdout values. Existing scripts copied from the sample are
-not retrofitted; only scripts copied from the updated sample carry this signal.
+When copying prompt helpers from the sample, copy its waiting-signal block too.
+The six prompt helpers emit an OSC 7501 `blocked` status while waiting, then
+`working` when the prompt returns. The Scriptify runner itself signals a script's
+own interactive `read` through a `BASH_ENV` prelude, so an unedited bash script
+shows the alert. `await_prompt` remains for prompts drawn by other programs. This
+helper signal is enabled only when the app-owned Scriptify runner passes
+`SCRIPTIFY_WAIT_SIGNAL=1`, stdin and stderr are interactive TTYs with a non-dumb
+`TERM`, and the existing `base64` utility is available; if a condition fails, the
+sample says why and prompts work normally. Messages are fixed and generic by
+prompt kind; never include prompt text, choices, answers, or credentials. The
+status is written to stderr, so captured prompt answers remain the only stdout
+values. Non-bash scripts, and prompts drawn by another program that are not
+wrapped in `await_prompt`, are not signalled and rely on Herdra's 10-minute
+backstop.
 
 `gum spin` shows only the spinner and hides the wrapped command's output. `--show-error` surfaces the failing command's stderr; use `--show-output` when both streams matter. The command's exit code still governs the script. Reserve `gum spin` for commands that are safe to watch. Never wrap an interactive `sudo` in it: sudo keeps its own plain prompt.
 

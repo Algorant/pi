@@ -106,12 +106,23 @@ danger() {
 }
 
 # ── Prompt waiting signal ────────────────────────────────────────────────────
-# Only the app-owned Scriptify runner sets this flag. Require its interactive PTY;
-# never put prompt text, choices, values, or credentials in the status message.
+# The runner prelude signals this script's own `read` calls.
+# Use await_prompt for prompts drawn by other programs (gum, fzf, sudo, ssh).
+# Only the app-owned Scriptify runner sets this flag; messages never include
+# prompt text, choices, values, or credentials.
 WAIT_SIGNAL=0
-if [[ ${SCRIPTIFY_WAIT_SIGNAL:-0} == 1 && -t 0 && -t 2 && ${TERM:-dumb} != dumb ]] \
-   && command -v base64 >/dev/null 2>&1; then
-  WAIT_SIGNAL=1
+if [[ ${SCRIPTIFY_WAIT_SIGNAL:-0} == 1 ]]; then
+  if [[ ! -t 0 ]]; then
+    printf '%s\n' 'Waiting signal off: stdin is not a terminal.' >&2
+  elif [[ ! -t 2 ]]; then
+    printf '%s\n' 'Waiting signal off: stderr is not a terminal.' >&2
+  elif [[ ${TERM:-dumb} == dumb ]]; then
+    printf '%s\n' 'Waiting signal off: TERM=dumb.' >&2
+  elif ! command -v base64 >/dev/null 2>&1; then
+    printf '%s\n' 'Waiting signal off: base64 is unavailable.' >&2
+  else
+    WAIT_SIGNAL=1
+  fi
 fi
 prompt_status() {  # prompt_status working|blocked KIND
   [[ $WAIT_SIGNAL == 1 ]] || return 0
@@ -132,7 +143,9 @@ prompt_status() {  # prompt_status working|blocked KIND
 await_prompt() {  # await_prompt KIND CMD...
   local kind=$1 rc=0; shift
   prompt_status blocked "$kind"
+  export SCRIPTIFY_PROMPT_ACTIVE=1
   "$@" || rc=$?
+  unset SCRIPTIFY_PROMPT_ACTIVE
   prompt_status working "$kind"
   return "$rc"
 }

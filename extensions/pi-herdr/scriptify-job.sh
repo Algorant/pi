@@ -35,6 +35,22 @@ trap : INT
 cd -- "$cwd" || { outcome="FAILED: cannot enter the invoking agent's working directory"; exit 1; }
 printf 'Reviewed script: %s\n' "$script"
 printf '\033]7501;state=working:app=scriptify\007'
-SCRIPTIFY_WAIT_SIGNAL=1 "$script"
+job_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+prelude="$job_dir/scriptify-prompt.sh"
+signal=1
+why=
+if [[ ! -t 0 ]]; then
+  signal=0; why='Waiting signal off: runner stdin is not a terminal — this prompt will not show a Needs-you alert.'
+elif [[ ! -t 2 ]]; then
+  signal=0; why='Waiting signal off: runner stderr is not a terminal — this prompt will not show a Needs-you alert.'
+elif [[ ${TERM:-dumb} == dumb ]]; then
+  signal=0; why='Waiting signal off: TERM=dumb — this prompt will not show a Needs-you alert.'
+elif [[ ! -f "$prelude" ]]; then
+  signal=0; why='Waiting signal off: prelude is missing — this prompt will not show a Needs-you alert.'
+fi
+if [[ -n $why ]]; then printf '%s\n' "$why" >&2; fi
+if [[ $signal == 1 ]]; then export BASH_ENV="$prelude"; else unset BASH_ENV; fi
+export SCRIPTIFY_WAIT_SIGNAL=$signal
+"$script"
 classify $?
 exit
