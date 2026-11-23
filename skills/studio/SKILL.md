@@ -45,7 +45,10 @@ only for motion or a rendered video.
 ### Verdigris palette
 
 Everything uses Algorant's Verdigris palette (`~/Projects/verdigris`;
-canonical data in `palette/verdigris.json`), dark by default.
+canonical data in `palette/verdigris.json`). Verdigris is a dark theme:
+design dark first, and offer light only as an optional convenience (for
+example `prefers-color-scheme`), never as a default, a first option or a
+recommended pick.
 
 | Core | Hex | Role |
 | --- | --- | --- |
@@ -64,8 +67,9 @@ goldenrod `#b8863b` (warnings/search), deep copper `#b9805f`
 
 Each tool carries its own tuned Verdigris: Pele's
 [`pele/verdigris.json`](pele/verdigris.json), the Excalidraw skill's `V`
-table of stored colours, and fframes' `verdigris-dark` / `verdigris-paper`
-presets. Use those rather than pasting raw hex.
+table of stored colours, and fframes' `verdigris-dark` preset plus its
+`verdigris-paper` light convenience (never the default). Use those rather
+than pasting raw hex.
 
 ### Taste rules
 
@@ -248,8 +252,8 @@ guidance; read its `AGENTS.md` first.
   `.agents/skills/fframes-video/SKILL.md` with `references/api.md`,
   `design.md` and `audio.md`. Pi loads it in that repository; do not install
   it globally.
-- House style for video: `style/README.md` (fonts, the Verdigris dark and
-  paper presets, components).
+- House style for video: `style/README.md` (fonts, the Verdigris dark
+  preset, the paper light convenience, components).
 - **Work to tap into:** the project's `project-video` skill
   (`.agents/skills/project-video/SKILL.md`) holds the workflow for videos
   about a software project (resolving scope, scaffolding, presets, music
