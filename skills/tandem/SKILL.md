@@ -32,7 +32,7 @@ A Decision is not work: it has no Accord, readiness, or backlog, and is never cl
 
 ### Filing a papercut
 
-Trigger and threshold: global AGENTS.md, *Work*. Capture never interrupts or expands the current task.
+Trigger and threshold: global AGENTS.md, *Work*. When a tool call fails, recover first; file only if it shows a brittle tool contract, confusing guidance or recurring friction, after checking for a duplicate; expected one-off failures do not count. pi-tandem's turn-end context line lists the turn's failed calls to make the decision easy. Capture never interrupts or expands the current task.
 
 Search first so duplicates do not accumulate: `tandem_read action=list kind=papercut scope=active` (or `action=search`) for an equivalent. If one exists, add a reference or note only when useful; do not file a duplicate. If no equivalent exists, `tandem_add action=task` with `priority: low`, `kind: "papercut"`, and at least one acceptance criterion.
 

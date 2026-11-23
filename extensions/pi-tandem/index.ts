@@ -20,6 +20,7 @@ import {
 	tandemPromptGuidance,
 } from "./guidance";
 import { registerTaskCommand } from "./task/index";
+import { registerFailedCallContext } from "./failed-calls";
 
 export { tandemPromptGuidance } from "./guidance";
 type Cwd = { cwd?: string; timeoutMs?: number };
@@ -59,8 +60,10 @@ const repeated = (a: string[], flag: string, v: unknown) => {
  * TypeBox's Static, which ToolDefinition uses for tool arguments. The published
  * pi-ai StringEnum is typed as a pi-schema Schema, which TypeBox reads as unknown.
  */
-const stringEnum = <const T extends readonly string[]>(values: T) =>
-	Type.Unsafe<T[number]>(StringEnum(values));
+const stringEnum = <const T extends readonly string[]>(
+	values: T,
+	options?: { description?: string },
+) => Type.Unsafe<T[number]>({ ...StringEnum(values), ...options });
 const positive = (v: unknown, message: string) => {
 	const n = Number(v);
 	if (!Number.isInteger(n) || n <= 0) throw new Error(message);
@@ -344,7 +347,12 @@ export const tandemReadParameters = Type.Object(
 		priority: Type.Optional(Type.String()),
 		effort: Type.Optional(Type.String()),
 		tag: Type.Optional(Type.String()),
-		kind: Type.Optional(Type.String()),
+		kind: Type.Optional(
+			Type.String({
+				description:
+					'Record kind filter (e.g. "papercut", "research", or "epic"); may include other kinds.',
+			}),
+		),
 		assignee: Type.Optional(Type.String()),
 		parent: Type.Optional(Type.String()),
 		accord: Type.Optional(Type.String()),
@@ -433,7 +441,12 @@ export const tandemAddParameters = Type.Object(
 		tags: Type.Optional(Type.Array(Type.String())),
 		references: Type.Optional(Type.Array(Type.String())),
 		acceptance: Type.Optional(Type.Array(Type.String())),
-		kind: Type.Optional(Type.String()),
+		kind: Type.Optional(
+			stringEnum(["papercut", "research", "epic"] as const, {
+				description:
+					"papercut for small friction, research for investigation-only, epic only with Algorant's explicit approval; omit for an ordinary Task.",
+			}),
+		),
 		priority: Type.Optional(Type.String()),
 		effort: Type.Optional(Type.String()),
 		dueDate: Type.Optional(Type.String()),
@@ -506,7 +519,12 @@ export const tandemUpdateParameters = Type.Object(
 		id: Type.String(),
 		title: Type.Optional(Type.String()),
 		body: Type.Optional(Type.String()),
-		kind: Type.Optional(Type.String()),
+		kind: Type.Optional(
+			stringEnum(["papercut", "research", "epic"] as const, {
+				description:
+					"papercut for small friction, research for investigation-only, epic only with Algorant's explicit approval; omit for an ordinary Task.",
+			}),
+		),
 		priority: Type.Optional(Type.String()),
 		effort: Type.Optional(Type.String()),
 		dueDate: Type.Optional(Type.String()),
@@ -1071,6 +1089,7 @@ export default function piTandem(pi: ExtensionAPI) {
 		},
 	});
 	registerTaskCommand(pi);
+	registerFailedCallContext(pi);
 	pi.on("before_agent_start", async (e, ctx) => {
 		const w = await workspace(ctx.cwd, ctx.signal);
 		const mentioned =

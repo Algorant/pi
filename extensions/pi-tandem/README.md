@@ -16,6 +16,8 @@ The exact tool surface is `tandem_status`, `tandem_init`, `tandem_read`, `tandem
 
 Papercut capture is intentionally not a separate tool. Record small non-blocking friction with `tandem_add action=task`, `priority: low`, `kind: "papercut"`, and at least one acceptance criterion.
 
+At turn end, pi-tandem adds one context-only line listing that turn's failed top-level tool calls; it is event-driven, is not a tool, uses `display: false` so it needs no renderer, and never files a papercut itself.
+
 Arguments are passed as arrays to `execFile` (`tandem_add` puts the title last, after `--`, so a title starting with `-` is not read as a flag); no shell command strings or protocol compatibility shims are used. Read filtering is delegated to Tandem. Use `location` to distinguish active Board records from archived Logs.
 
 ## Independent board sync
