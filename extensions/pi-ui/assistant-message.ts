@@ -92,6 +92,7 @@ const BOLD_LABELS: Record<string, { icon: string; tone: FgRole }> = {
 
 const BOLD_TONE: FgRole = "mdCodeBlockBorder";
 const TREE_TONE: FgRole = "muted";
+const PILL_CONTEXT_PROTECTED_RE = /`[^`\n]*`|\[(?:[^\[\]\n]|\[\[[^\]\n]*\]\])*\]\([^\)\n]*\)/g;
 
 const FENCE_RE = /^\s*(```|~~~)/;
 const INDENTED_CODE_RE = /^(?: {4,}|\t)/;
@@ -151,6 +152,13 @@ function renderPill(theme: Theme, word: PillWord, label: string): string {
   return `${left}${theme.bg(word.tone.bg, body)}${right}`;
 }
 
+function replaceStatePills(theme: Theme, text: string): string {
+  return text.replace(PILL_RE, (match, name: string) => {
+    const word = PILL_WORDS[name];
+    return word ? renderPill(theme, word, name) : match;
+  });
+}
+
 function decorateText(theme: Theme, text: string): string {
   let out = text.replace(BOLD_RE, (_match, inner: string) => {
     const key = inner.replace(/:$/, "").trim();
@@ -159,34 +167,29 @@ function decorateText(theme: Theme, text: string): string {
     return label ? `${icon} **${theme.fg(BOLD_TONE, inner)}**` : `**${theme.fg(BOLD_TONE, inner)}**`;
   });
 
-  out = out.replace(PILL_RE, (match, name: string) => {
-    const word = PILL_WORDS[name];
-    return word ? renderPill(theme, word, name) : match;
-  });
+  out = replaceStatePills(theme, out);
 
   return out.replace(/✓|✗/g, (mark) => theme.fg(mark === "✓" ? "accent" : "error", mark));
 }
 
-function decorateLine(theme: Theme, line: string): string {
-  // Split around spans that must stay byte-identical: inline code and links.
+function decorateProtectedLine(line: string, decorate: (text: string) => string, protectedRe = PROTECTED_RE): string {
   const parts: string[] = [];
   let last = 0;
-  PROTECTED_RE.lastIndex = 0;
-  for (let match = PROTECTED_RE.exec(line); match; match = PROTECTED_RE.exec(line)) {
-    parts.push(decorateText(theme, line.slice(last, match.index)));
+  protectedRe.lastIndex = 0;
+  for (let match = protectedRe.exec(line); match; match = protectedRe.exec(line)) {
+    parts.push(decorate(line.slice(last, match.index)));
     parts.push(match[0]);
     last = match.index + match[0].length;
   }
-  parts.push(decorateText(theme, line.slice(last)));
-  let out = parts.join("");
-
-  out = out.replace(LEADING_TREE_RE, (run) => theme.fg(TREE_TONE, run));
-  out = out.replace(LEADING_ARROW_RE, (_match, space: string, arrow: string) => `${space}${theme.fg("mdCodeBlockBorder", arrow)}`);
-  return out;
+  parts.push(decorate(line.slice(last)));
+  return parts.join("");
 }
 
-/** Display-only assistant Markdown: pills, label icons, colored bold, marks and tree lines. */
-export function decorateAssistantMarkdown(markdown: string, theme: Theme): string {
+function decoratePillsLine(theme: Theme, line: string): string {
+  return decorateProtectedLine(line, (text) => replaceStatePills(theme, text), PILL_CONTEXT_PROTECTED_RE);
+}
+
+function decorateLines(markdown: string, decorate: (line: string) => string): string {
   let inFence = false;
   return markdown
     .split("\n")
@@ -196,7 +199,25 @@ export function decorateAssistantMarkdown(markdown: string, theme: Theme): strin
         return line;
       }
       if (inFence || INDENTED_CODE_RE.test(line)) return line;
-      return decorateLine(theme, line);
+      return decorate(line);
     })
     .join("\n");
+}
+
+/** Display-only approved state pills; unlike assistant decoration, changes no bold or marks. */
+export function decorateStatePills(markdown: string, theme: Theme): string {
+  return decorateLines(markdown, (line) => decoratePillsLine(theme, line));
+}
+
+function decorateLine(theme: Theme, line: string): string {
+  let out = decorateProtectedLine(line, (text) => decorateText(theme, text));
+
+  out = out.replace(LEADING_TREE_RE, (run) => theme.fg(TREE_TONE, run));
+  out = out.replace(LEADING_ARROW_RE, (_match, space: string, arrow: string) => `${space}${theme.fg("mdCodeBlockBorder", arrow)}`);
+  return out;
+}
+
+/** Display-only assistant Markdown: pills, label icons, colored bold, marks and tree lines. */
+export function decorateAssistantMarkdown(markdown: string, theme: Theme): string {
+  return decorateLines(markdown, (line) => decorateLine(theme, line));
 }

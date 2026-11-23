@@ -1,5 +1,6 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer } from "@earendil-works/pi-tui";
+import { decorateStatePills } from "../../assistant-message";
 import { createBoxedToolRenderer } from "../core/card";
 import { durationLabel, joinTitleParts, section, statusIcon, toolName, truncatePlain } from "../core/text";
 import type { BoxedToolRenderInput, ToolUiBoxModel, ToolUiSectionModel, ToolUiTone } from "../core/types";
@@ -51,10 +52,13 @@ export function createAskMeRenderer() {
     renderCall(...args: Parameters<typeof boxed.renderCall>) {
       const content = new Container();
       const context = stringValue(args[0].context);
+      const theme = args[1];
+      const argsComplete = args[2].argsComplete;
       // Full rationale is ordinary Markdown in the transcript, not a paragraph
       // squeezed into the live dock or hidden behind tool-card expansion.
       if (context) {
-        content.addChild(new Markdown(context, 0, 0, getMarkdownTheme()));
+        const displayContext = argsComplete ? decorateStatePills(context, theme) : context;
+        content.addChild(new Markdown(displayContext, 0, 0, getMarkdownTheme()));
         content.addChild(new Spacer(1));
       }
       content.addChild(boxed.renderCall(...args));

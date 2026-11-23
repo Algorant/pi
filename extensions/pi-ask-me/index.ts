@@ -11,7 +11,7 @@ export const MAX_HEADER_LENGTH = 20;
 export const MIN_CONTEXT_LENGTH = 60;
 
 const CONTEXT_REQUIREMENT =
-	"the full decision explanation in structured Markdown: situation, proposed plan, trade-offs, and what needs deciding. It is rendered in the main conversation before the prompt opens";
+	"the full decision explanation in structured Markdown: situation, proposed plan, trade-offs, and what needs deciding. It is rendered in the main conversation before the prompt opens. Use the usual reply-emphasis state pills sparingly in the explanation when they help someone scan a genuine state or decision. Keep question text, option titles, and descriptions plain";
 
 export interface AskMeOption {
 	title: string;
@@ -109,7 +109,7 @@ const PROMPT_SNIPPET = `Ask the user for clarification instead of guessing. Use 
 const PROMPT_GUIDELINES = [
 	"Use ask_me when ambiguity, high stakes, preference, or missing requirements would materially change the implementation.",
 	"Cephs and manus (a project's long-running Pi tab) never use ask_me; they send questions to Herdra with agent_send per AGENTS.md.",
-	"Before opening ask_me, always show a clear explanation of what is being asked and why. Put it in context: the tool renders it as Markdown in the main conversation before opening the picker. Show any plan you ask the user to approve or edit; do not bury the rationale in the dialog.",
+	"Before opening ask_me, always show a clear explanation of what is being asked and why. Put it in context: the tool renders it as Markdown in the main conversation before opening the picker. Show any plan you ask the user to approve or edit; do not bury the rationale in the dialog. Use the usual reply-emphasis state pills sparingly in the explanation when they help someone scan a genuine state or decision. Keep question text, option titles, and descriptions plain.",
 	"The dialog only restates the current question and lists choices. Keep option descriptions short; only the highlighted option shows its detail. The last answer submits automatically, with no review step.",
 	'When you recommend one option, list it first and append "(Recommended)" to its title.',
 ];
