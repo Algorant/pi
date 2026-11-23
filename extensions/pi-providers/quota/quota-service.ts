@@ -213,13 +213,13 @@ export function hasUsageCredentials(provider: UsageProvider): boolean {
 }
 
 /**
- * One provider-wide window by exact label ("Week": Anthropic seven_day, Codex
- * secondary window; "5h": Anthropic five_hour, Codex primary window) when the
- * reading still belongs to the current window, i.e. its reset is in the future.
- * A missing, unlabelled or already-reset reading is unknown and returns
- * undefined; per-model windows (Opus, Sonnet, Spark) are not considered.
+ * One window by exact label ("Week": Anthropic seven_day, Codex secondary
+ * window; "5h": Anthropic five_hour, Codex primary window; "Fable": the named
+ * Anthropic Fable window) when the reading still belongs to the current window,
+ * i.e. its reset is in the future. A missing, malformed or already-reset reading
+ * is unknown and returns undefined; callers choose which labels to inspect.
  */
-export function currentWindowUsage(windows: readonly RateWindow[], label: "Week" | "5h", now = Date.now()): { usedPercent: number; resetDescription: string } | undefined {
+export function currentWindowUsage(windows: readonly RateWindow[], label: "Week" | "5h" | "Fable", now = Date.now()): { usedPercent: number; resetDescription: string } | undefined {
 	const week = windows.find((window) => window.label === label);
 	if (!week || typeof week.usedPercent !== "number" || !Number.isFinite(week.usedPercent) || !week.resetAt) return undefined;
 	const resetAt = Date.parse(week.resetAt);

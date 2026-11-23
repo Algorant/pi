@@ -53,6 +53,7 @@ function limitsProviderOf(provider: string): string {
   return provider === "openai-codex" ? "openai" : provider;
 }
 export const BENCHMARK_WORKER_MODELS = ["openai/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
+export const FABLE_RESEARCHER_MODEL = "anthropic/claude-fable-5-1" as const;
 /** Legacy benchmark id: decodes saved records and continues a live old contender only; never a new selection. */
 export const LEGACY_BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna"] as const;
 export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number] | (typeof LEGACY_BENCHMARK_WORKER_MODELS)[number];
@@ -142,9 +143,9 @@ export function loadModelRoles(path = modelRolesPath()): ModelRoles {
 /**
  * The one per-entry availability check: catalog/auth, machine provider policy and
  * quota. Ordinary role selection retains its historical unknown-cache behavior;
- * the private strict policy is used only by resolveBenchmarkWorkerModel below.
+ * strict quota labels are opt-in for named explicit selections.
  */
-type EntryPolicy = { providerException?: string; requireFreshQuota?: boolean; quota?: boolean };
+type EntryPolicy = { providerException?: string; requireFreshQuota?: boolean; quota?: boolean; additionalQuotaLabels?: readonly "Fable"[] };
 type EntryCheck = { catalog: CatalogModel; quota?: string };
 function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold, fiveHourThreshold }: ModelRoles["quota"], allowedProviders: readonly string[] | undefined, policy: EntryPolicy = {}): { reason: string } | EntryCheck {
   const separator = entry.model.indexOf("/");
@@ -160,11 +161,12 @@ function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold,
       const age = cached?.fetchedAt === undefined ? undefined : Date.now() - cached.fetchedAt;
       if (age === undefined || age < 0 || age > BENCHMARK_QUOTA_MAX_AGE_MS) return { reason: "quota cache missing, future-dated, or older than 30 minutes" };
       const windows = cached.windows;
+      const labels: Array<"Week" | "5h" | "Fable"> = ["Week", "5h", ...(policy.additionalQuotaLabels ?? [])];
       const weekWindows = windows.filter((window) => window.label === "Week");
-      const fiveHourWindows = windows.filter((window) => window.label === "5h");
       if (!weekWindows.length) return { reason: "weekly quota is missing" };
-      const checkedWindows: Array<{ label: "Week" | "5h"; usedPercent: number }> = [];
-      for (const [label, reports] of [["Week", weekWindows], ["5h", fiveHourWindows]] as const) {
+      const checkedWindows: Array<{ label: string; usedPercent: number }> = [];
+      for (const label of labels) {
+        const reports = windows.filter((window) => window.label === label);
         for (const reported of reports) {
           const current = currentWindowUsage([reported], label);
           if (!current || current.usedPercent < 0 || current.usedPercent > 100) return { reason: `reported ${label} quota is malformed or not current` };
@@ -172,9 +174,11 @@ function checkEntry(entry: RoleEntry, registry: RoleRegistry, { weeklyThreshold,
           checkedWindows.push({ label, usedPercent: current.usedPercent });
         }
       }
-      const weekSummary = checkedWindows.filter((window) => window.label === "Week").map((window) => `Week ${Math.round(window.usedPercent)}%`).join(", ");
-      const fiveHourSummary = checkedWindows.filter((window) => window.label === "5h").map((window) => `5h ${Math.round(window.usedPercent)}%`).join(", ") || "5h not reported";
-      return { catalog, quota: `${weekSummary}; ${fiveHourSummary}` };
+      const summaries = labels.map((label) => {
+        const reported = checkedWindows.filter((window) => window.label === label).map((window) => `${label} ${Math.round(window.usedPercent)}%`);
+        return reported.length ? reported.join(", ") : `${label} not reported`;
+      });
+      return { catalog, quota: summaries.join("; ") };
     }
     const windows = cached?.windows ?? [];
     const week = currentWindowUsage(windows, "Week");
@@ -354,6 +358,16 @@ export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: R
   }
   const { entry, set, quota } = resolveRoleEntry(role, registry, path);
   return { model: entry.model, thinking: overrides.thinking ?? entry.thinking, ...(set ? { set, quota } : {}) };
+}
+
+/** The approved researcher-only Fable selection: fixed high, no provider exemption, exact catalog/auth and fresh quota. */
+export function resolveFableResearcherModel(registry: RoleRegistry, path = modelRolesPath()): { model: typeof FABLE_RESEARCHER_MODEL; thinking: "high"; quota: string; quotaCheckedAt: number } {
+  const { quota } = loadModelRoles(path);
+  const entry: RoleEntry = { model: FABLE_RESEARCHER_MODEL, thinking: "high", fast: false };
+  const checked = checkEntry(entry, registry, quota, localAgencySettings().modelProviders, { requireFreshQuota: true, additionalQuotaLabels: ["Fable"] });
+  if ("reason" in checked) throw new Error(`Fable researcher selection ${FABLE_RESEARCHER_MODEL} is unavailable: ${checked.reason}. Nothing was started.`);
+  if (checked.quota === undefined) throw new Error(`Fable researcher selection ${FABLE_RESEARCHER_MODEL} passed availability without strict quota evidence. Nothing was started.`);
+  return { model: FABLE_RESEARCHER_MODEL, thinking: "high", quota: checked.quota, quotaCheckedAt: Date.now() };
 }
 
 /**

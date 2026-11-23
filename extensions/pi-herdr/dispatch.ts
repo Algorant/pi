@@ -7,7 +7,7 @@ import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/cust
 import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } from "../pi-agency/inbox/envelope.ts";
 import { localSettingsPath, temporaryAgencySettings } from "../pi-agency/local-settings.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
-import { resolveReviewEntry, resolveRoleEntry } from "../pi-agency/model-roles.ts";
+import { resolveFableResearcherModel, resolveReviewEntry, resolveRoleEntry } from "../pi-agency/model-roles.ts";
 import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
 import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, manusModelArgument, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
@@ -48,6 +48,7 @@ const DendraParameters = Type.Object({
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true delivers for Algorant judgement and forbids auto-finish." })),
   prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: optional temporary direction; durable scope stays in the Task." })),
   benchmarkModel: Type.Optional(Type.Union([Type.Literal("openai/gpt-6-luna"), Type.Literal("anthropic/claude-sonnet-5-5")], { description: "Worker only: explicit benchmark contender; high thinking is fixed, Luna uses Fast, and strict fresh quota preflight applies. No general model override." })),
+  fableResearcher: Type.Optional(Type.Boolean({ description: "Researcher only: explicitly select anthropic/claude-fable-5-1 at fixed high thinking. Use only when Algorant explicitly instructs this selection; exact catalog, configured auth and fresh quota are required. Refuses rather than falling back." })),
   from: From,
 }, { additionalProperties: false });
 
@@ -176,7 +177,7 @@ const COLD_READ = fileURLToPath(new URL("../../skills/audit/cold-read.md", impor
  * child's own role (cutting over only when quota alone blocks it) and runs one hc child. It never
  * selects, waits, polls or retries.
  */
-async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: string, task: string, ctx: ExtensionContext): Promise<{ name: string; address: string; switched?: Record<string, unknown>; helperSwitch: string }> {
+async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: string, task: string, ctx: ExtensionContext, fableResearcher?: boolean): Promise<{ name: string; address: string; switched?: Record<string, unknown>; helperSwitch: string; fable?: Record<string, unknown> }> {
   const name = await nameFor(label);
   // Helpers resolve their own role inside the child; resolving it here — after every
   // read-only precondition, before any terminal — refuses a blocked launch, cutting over
@@ -185,11 +186,13 @@ async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: st
   // session without one fails here instead of launching a reviewer that cannot route.
   const callerModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
   if (kind === "reviewer" && callerModel === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
-  const helper = kind === "reviewer"
-    ? await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel })
+  if (fableResearcher && kind !== "researcher") throw new Error("fableResearcher is available only for kind researcher. Nothing was started.");
+  const fable = fableResearcher ? resolveFableResearcherModel(ctx.modelRegistry) : undefined;
+  const helper = fable || kind === "reviewer"
+    ? (fable ? undefined : await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel }))
     : await resolveRoleForSwitch("subagent", ctx.modelRegistry, () => resolveRoleEntry("subagent", ctx.modelRegistry));
-  if ("refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
-  const helperSwitch = helper.switched
+  if (helper && "refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
+  const helperSwitch = helper && helper.switched
     ? ` Set ${helper.switched.from} → ${helper.switched.to} for ${kind} (cutover ${helper.switched.operation ?? "none"}${helper.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
     : "";
   // The caller is the native parent: the report comes to its inbox, a reviewer reads its pi.model.
@@ -197,11 +200,11 @@ async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: st
   let started: any;
   try {
     started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${kind}`,
-      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--agency-profile", kind, "--", task.trim()], name);
+      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", task.trim()], name);
   } catch (error) {
     throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
   }
-  return { name, address: started.address, ...(helper.switched ? { switched: helper.switched } : {}), helperSwitch };
+  return { name, address: started.address, ...(helper?.switched ? { switched: helper.switched } : {}), helperSwitch, ...(fable ? { fable: { model: fable.model, thinking: fable.thinking, quota: fable.quota, quotaCheckedAt: fable.quotaCheckedAt } } : {}) };
 }
 
 /**
@@ -253,11 +256,12 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   // Rows rebuilt by /reload or resume before session_start registers the tools keep their cards.
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
 
-  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; fableResearcher?: boolean; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     if (params.kind === "worker") {
       requireContract(params);
       if (params.label !== undefined) labelOf(params.label, "");
+      if (params.fableResearcher !== undefined) throw new Error("fableResearcher is for researcher helpers, not workers. Nothing was started.");
       if (params.task !== undefined) throw new Error("dendra_start worker takes taskId or brief, not task. Nothing was started.");
       requireOpenRequest(params.from, self);
       const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, benchmarkModel: params.benchmarkModel, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
@@ -269,6 +273,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
         { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...(cold ? { coldRead: cold } : {}), ...closed });
     }
     if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant, params.benchmarkModel].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
+    if (params.fableResearcher !== undefined && params.kind !== "researcher") throw new Error("fableResearcher is available only for kind researcher. Nothing was started.");
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
     // The temporary machine policy pauses reviews before any launch side effect; the
     // reviewer child would also refuse inside resolveReviewEntry, but nothing starts.
@@ -277,10 +282,10 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
-    const helper = await launchHelper(params.kind as "scout" | "researcher" | "reviewer", label, params.task, ctx);
+    const helper = await launchHelper(params.kind as "scout" | "researcher" | "reviewer", label, params.task, ctx, params.fableResearcher);
     const closed = closeRequest(params.from, `${label} (${helper.name})`, self);
-    return result(`Started ${params.kind} ${label} (${helper.name}, ${helper.address}) in ${ctx.cwd}. Its report arrives in your inbox; do not wait or poll.${helper.helperSwitch}`,
-      { kind: params.kind, label, name: helper.name, terminal: helper.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...closed });
+    return result(`Started ${params.kind} ${label} (${helper.name}, ${helper.address}) in ${ctx.cwd}.${helper.fable ? ` Model ${helper.fable.model} at ${helper.fable.thinking}; quota ${helper.fable.quota}.` : " Its report arrives in your inbox; do not wait or poll."}${helper.helperSwitch}`,
+      { kind: params.kind, label, name: helper.name, terminal: helper.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...(helper.fable ? { fable: helper.fable } : {}), ...closed });
   }
 
   async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {

@@ -8,7 +8,7 @@ import { labelFrom } from "../../../../scripts/whois.ts";
 
 /** The pi-herdr dispatch tools (pi-herdr/dispatch.ts): dendra_start, manus_start, ceph_start. */
 export type DispatchTool = "dendra_start" | "manus_start" | "ceph_start";
-type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; benchmarkModel?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
+type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; benchmarkModel?: unknown; fableResearcher?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
 type Details = Record<string, any>;
 
 const LABEL: Record<DispatchTool, string> = { dendra_start: "Dendra Start", manus_start: "Manus Start", ceph_start: "Ceph Start" };
@@ -67,6 +67,11 @@ function coldReadLong(d: Details): string {
     : `not started · ${text(cold.error) || "refused"} · the launch stands`;
 }
 
+function fableText(args: Args, d: Details): string {
+  const fable = d.fable && typeof d.fable === "object" ? d.fable : undefined;
+  return fable || args.fableResearcher === true ? ` · Fable ${text(fable?.model) || "anthropic/claude-fable-5-1"} · ${text(fable?.thinking) || "high"}` : "";
+}
+
 function benchmarkText(args: Args, d: Details): string {
   const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : {};
   const selected = text(benchmark.selectedModel) || text(args.benchmarkModel);
@@ -88,7 +93,7 @@ function whereOf(tool: DispatchTool, d: Details): string {
 function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: Theme, status?: string): string {
   const details = d ?? {};
   const parts = [theme.fg("accent", "⇢"), " ", theme.fg("toolTitle", kindOf(tool, args, details)), " ", theme.fg("text", labelOf(tool, args, details))];
-  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}${benchmarkText(args, details)}`));
+  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}${benchmarkText(args, details)}${fableText(args, details)}`));
   else {
     parts.push(theme.fg("dim", idsOf(details)));
     const where = whereOf(tool, details);
@@ -101,6 +106,8 @@ function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: The
     if (cold) parts.push(theme.fg(coldReadOf(details)!.status === "started" ? "dim" : "warning", ` · ${cold}`));
     const benchmark = benchmarkText(args, details);
     if (benchmark) parts.push(theme.fg("warning", benchmark));
+    const fable = fableText(args, details);
+    if (fable) parts.push(theme.fg("accent", fable));
   }
   return ` ${parts.join("")}`;
 }
@@ -123,6 +130,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
       fieldLine(theme, "terminal", text(d.terminal) || "—", "muted"),
       text(d.taskId) ? fieldLine(theme, "task", joinTitleParts([text(d.taskId), text(d.title) ? truncatePlain(text(d.title), expanded ? 200 : 80) : undefined]), "toolOutput") : undefined,
       d.benchmark ? fieldLine(theme, "benchmark", `${text(d.benchmark.requestedModel)} → ${text(d.benchmark.selectedModel)} · ${text(d.benchmark.providerExemption)} for ${text(d.benchmark.providerExemptionModel)} · high thinking · ${text(d.benchmark.quota)} · Fast ${d.benchmark.fast ? "on" : "off"}`, "warning") : undefined,
+      d.fable ? fieldLine(theme, "researcher model", `${text(d.fable.model)} · ${text(d.fable.thinking)} thinking · ${text(d.fable.quota)}`, "accent") : undefined,
       text(d.model) && tool === "manus_start" ? fieldLine(theme, "model", joinTitleParts([text(d.model), text(d.modelSet) ? `set ${text(d.modelSet)}` : undefined, text(d.modelQuota) ? truncatePlain(text(d.modelQuota), expanded ? 300 : 120) : undefined]), "muted") : undefined,
       switchLong(d) ? fieldLine(theme, "role set", switchLong(d), "warning") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "needsAlgorant", String(d.needsAlgorant ?? false), d.needsAlgorant ? "warning" : "muted") : undefined,
