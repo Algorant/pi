@@ -71,6 +71,11 @@ function jsonText(value: unknown): string {
 	return JSON.stringify(value, null, 2);
 }
 
+const LINK_UNAVAILABLE = "Link: unavailable — cannot read this machine's tailnet name from tailscale status --json; set SIDESHOW_URL to a URL Algorant can open.";
+function linkText(url: string | undefined): string {
+	return url ?? LINK_UNAVAILABLE;
+}
+
 function textResult(text: string, details: Record<string, unknown> = {}): TextResult {
 	return { content: [{ type: "text", text: truncateText(text) }], details };
 }
@@ -128,15 +133,15 @@ function formatPostLine(surface: Record<string, unknown>, sessionId?: string): s
 	const created = stringValue(surface.createdAt) ? ` ${surface.createdAt}` : "";
 	// Default handoff is the session workspace; the direct post page stays a
 	// recovery detail and is not what the agent repeats to the user.
-	const url = resolvedSessionId ? ` ${sessionUrl(resolvedSessionId)}` : "";
+	const url = resolvedSessionId ? ` ${linkText(sessionUrl(resolvedSessionId))}` : "";
 	return `${id}${session} ${title} v${version}${created}${url}`;
 }
 
-function revisionHandoff(postId: string, sessionId: string | undefined): { suffix: string; sessionUrl?: string; postUrl: string } {
+function revisionHandoff(postId: string, sessionId: string | undefined): { suffix: string; sessionUrl?: string; postUrl?: string } {
 	const postLink = postUrl(postId);
 	const sessionLink = sessionId ? sessionUrl(sessionId) : undefined;
 	return {
-		suffix: sessionLink ? ` Session workspace: ${sessionLink}` : ` Post artifact: ${postLink}`,
+		suffix: sessionLink ? ` Session workspace: ${sessionLink}` : postLink ? ` Post artifact: ${postLink}` : ` ${LINK_UNAVAILABLE}`,
 		sessionUrl: sessionLink,
 		postUrl: postLink,
 	};
@@ -293,7 +298,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const sessionId = requireString(post, "sessionId", "session id");
 			rememberSession(state, sessionId);
 			const handoff = revisionHandoff(params.postId, sessionId);
-			return textResult(`Added a surface to Sideshow post ${params.postId}.${handoff.suffix}${note}${feedbackSummary(post.userFeedback)}`, { ...post, post, postId: params.postId, sessionId, sessionUrl: handoff.sessionUrl, postUrl: handoff.postUrl, baseUrl: baseUrl() });
+			return textResult(`Added a surface to Sideshow post ${params.postId}.${handoff.suffix}${note}${feedbackSummary(post.userFeedback)}`, { ...post, post, postId: params.postId, sessionId, sessionUrl: handoff.sessionUrl ?? null, postUrl: handoff.postUrl ?? null, baseUrl: baseUrl() });
 		},
 	});
 
@@ -331,7 +336,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const sessionId = requireString(post, "sessionId", "session id");
 			rememberSession(state, sessionId);
 			const handoff = revisionHandoff(params.postId, sessionId);
-			return textResult(`Edited surface ${String(params.target)} in Sideshow post ${params.postId}.${handoff.suffix}${note}${feedbackSummary(post.userFeedback)}`, { ...post, post, postId: params.postId, sessionId, sessionUrl: handoff.sessionUrl, postUrl: handoff.postUrl, baseUrl: baseUrl() });
+			return textResult(`Edited surface ${String(params.target)} in Sideshow post ${params.postId}.${handoff.suffix}${note}${feedbackSummary(post.userFeedback)}`, { ...post, post, postId: params.postId, sessionId, sessionUrl: handoff.sessionUrl ?? null, postUrl: handoff.postUrl ?? null, baseUrl: baseUrl() });
 		},
 	});
 
@@ -369,8 +374,8 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const postLink = postUrl(postId);
 			const title = stringValue(surface.title) || params.title;
 			return textResult(
-				`Published Sideshow post "${title}" at ${url}\npostId: ${postId}\nsessionId: ${sessionId}\npost-artifact (explicit single-artifact share): ${postLink}${note}${feedbackSummary(surface.userFeedback)}`,
-				{ ...surface, post: surface, postId, sessionId, url, sessionUrl: url, postUrl: postLink, baseUrl: baseUrl() },
+				`Published Sideshow post "${title}"\n${url ? `Link: ${url}` : LINK_UNAVAILABLE}\npostId: ${postId}\nsessionId: ${sessionId}\npost-artifact (explicit single-artifact share): ${linkText(postLink)}${note}${feedbackSummary(surface.userFeedback)}`,
+				{ ...surface, post: surface, postId, sessionId, url: url ?? null, sessionUrl: url ?? null, postUrl: postLink ?? null, baseUrl: baseUrl() },
 			);
 		},
 	});
@@ -403,8 +408,8 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const title = stringValue(surface.title) || params.title || postId;
 			const version = surface.version === undefined ? "?" : String(surface.version);
 			return textResult(
-				`Updated Sideshow post "${title}" to version ${version} at ${url}\npostId: ${postId}\nsessionId: ${sessionId}\npost-artifact (explicit single-artifact share): ${postLink}${note}${feedbackSummary(surface.userFeedback)}`,
-				{ ...surface, post: surface, postId, sessionId, url, sessionUrl: url, postUrl: postLink, baseUrl: baseUrl() },
+				`Updated Sideshow post "${title}" to version ${version}\n${url ? `Link: ${url}` : LINK_UNAVAILABLE}\npostId: ${postId}\nsessionId: ${sessionId}\npost-artifact (explicit single-artifact share): ${linkText(postLink)}${note}${feedbackSummary(surface.userFeedback)}`,
+				{ ...surface, post: surface, postId, sessionId, url: url ?? null, sessionUrl: url ?? null, postUrl: postLink ?? null, baseUrl: baseUrl() },
 			);
 		},
 	});
@@ -511,7 +516,9 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			const sessionId = requireString(post, "sessionId", "session id");
 			rememberSession(state, sessionId);
 			const comments = await readPostComments(sessionId, postId, signal);
-			return textResult(jsonText({ ...post, postComments: comments }), { ...post, post, postId, sessionId, comments, url: sessionUrl(sessionId), sessionUrl: sessionUrl(sessionId), postUrl: postUrl(postId), baseUrl: baseUrl() });
+			const url = sessionUrl(sessionId);
+			const artifactUrl = postUrl(postId);
+			return textResult(jsonText({ ...post, postComments: comments }), { ...post, post, postId, sessionId, comments, url: url ?? null, sessionUrl: url ?? null, postUrl: artifactUrl ?? null, baseUrl: baseUrl() });
 		},
 	});
 

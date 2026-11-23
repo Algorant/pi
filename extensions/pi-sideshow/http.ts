@@ -1,5 +1,5 @@
 import { closeSync, mkdirSync, openSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,7 @@ type StartupHooks = {
 	probeTimeoutMs?: number;
 };
 let startupHooks: StartupHooks = {};
+let cachedTailnetName: string | null | undefined;
 
 /** Test seam for startup behavior; production callers should not set this. */
 export function setStartupHooksForTests(hooks: StartupHooks = {}): void {
@@ -56,6 +57,25 @@ export function agentName(): string {
 
 export function baseUrlDisplay(): string {
 	return baseUrl().replace(/^https?:\/\//, "");
+}
+
+/** Public handoff origin; requests continue to use baseUrl() on the local server. */
+export function publicBaseUrl(): string | undefined {
+	const localBase = baseUrl();
+	if (!isLocalUrl(localBase)) return localBase;
+	if (cachedTailnetName === undefined) {
+		try {
+			const status = JSON.parse(execFileSync("tailscale", ["status", "--json"], { encoding: "utf8", timeout: 2_000, maxBuffer: 10 * 1024 * 1024 })) as { Self?: { DNSName?: unknown } };
+			const name = typeof status.Self?.DNSName === "string" ? status.Self.DNSName.replace(/\.$/, "") : "";
+			cachedTailnetName = name || null;
+		} catch {
+			cachedTailnetName = null;
+		}
+	}
+	if (!cachedTailnetName) return undefined;
+	const url = new URL(localBase);
+	url.hostname = cachedTailnetName;
+	return url.toString().replace(/\/$/, "");
 }
 
 export function redact(value: unknown): string {
@@ -287,11 +307,13 @@ export async function assetAvailable(assetId: string, signal?: AbortSignal): Pro
 	return response.ok;
 }
 
-export function sessionUrl(sessionId: string): string {
-	return `${baseUrl()}/session/${encodeURIComponent(sessionId)}`;
+export function sessionUrl(sessionId: string): string | undefined {
+	const origin = publicBaseUrl();
+	return origin ? `${origin}/session/${encodeURIComponent(sessionId)}` : undefined;
 }
 
 /** Direct single-artifact page; keep using the session workspace for the default handoff. */
-export function postUrl(postId: string): string {
-	return `${baseUrl()}/p/${encodeURIComponent(postId)}`;
+export function postUrl(postId: string): string | undefined {
+	const origin = publicBaseUrl();
+	return origin ? `${origin}/p/${encodeURIComponent(postId)}` : undefined;
 }
