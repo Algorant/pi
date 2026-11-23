@@ -237,7 +237,7 @@ export async function formatTandemResult(label: string, r: Result): Promise<any>
 	const parsed = parse(r.stdout);
 	const body = r.stdout.trim() || r.stderr.trim() || "OK";
 	const shown = await output(
-		`${label}\n\n${parsed === undefined ? body : JSON.stringify(parsed, null, 2)}${r.stderr.trim() ? `\n\nstderr:\n${r.stderr.trim()}` : ""}`,
+		`${parsed === undefined ? body : JSON.stringify(parsed, null, 2)}${r.stderr.trim() ? `\n\nstderr:\n${r.stderr.trim()}` : ""}`,
 	);
 	return {
 		content: [{ type: "text", text: shown.text }],
