@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, inboxDir, inboxKey, localMachine, newId, splitHeadline, steersWhileWorking, type Envelope } from "./envelope.ts";
+import { appendEvent, inboxDir, inboxKey, localMachine, newId, splitHeadline, type Envelope } from "./envelope.ts";
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
 import { hcAddress } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
@@ -89,13 +89,26 @@ export async function targetStatus(to: Envelope["to"], ownCore: string): Promise
 export const statusText = (status: TargetStatus) => status.state === "none" ? "reporting no hc status"
   : `${status.state}${status.kind || status.msg ? ` (${[status.kind, status.msg].filter(Boolean).join(": ")})` : ""}`;
 
+type InterruptOutcome = { state: "stopped" | "idle" | "unconfirmed"; detail: string };
+type InterruptObservation = { key: string; outcome: string };
+
+function statusState(record: any): string | undefined {
+  return typeof record?.status?.state === "string" ? record.status.state : undefined;
+}
+
+function shortObservation(value: string): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine;
+}
+
 /** What the recipient's status means for a message just queued for it. */
-export function deliveryHint(status: TargetStatus, message?: Pick<Envelope, "kind" | "reply_to" | "interrupt">): string {
+export function deliveryHint(status: TargetStatus, interruptOutcome?: InterruptOutcome): string {
+  if (interruptOutcome?.state === "stopped") return `stopped it (${interruptOutcome.detail}) and queued; it reads this as its next turn`;
+  if (interruptOutcome?.state === "idle") return `it was idle (${interruptOutcome.detail}); queued; it delivers now`;
+  if (interruptOutcome?.state === "unconfirmed") return `stop not confirmed: ${interruptOutcome.detail}; queued; ${status.state === "idle" || status.state === "done" ? "it delivers now" : "it will deliver when the recipient can receive it"}`;
   switch (status.state) {
     case "idle": case "done": return "it delivers now and starts a turn";
-    case "working": return message && steersWhileWorking(message)
-      ? "it is steered into the current turn, after any long tool call, dialog or compaction ends"
-      : "it is held until that turn ends and then starts the next turn";
+    case "working": return "it is held until that turn ends and then starts the next turn";
     case "blocked": return "it waits until that is answered";
     case "none": return "no Pi status is reported there; it waits until a Pi runs";
     case "gone": return "the terminal is gone; nothing will deliver it";
@@ -105,7 +118,7 @@ export function deliveryHint(status: TargetStatus, message?: Pick<Envelope, "kin
 }
 
 /** The single durable send path, shared by agent_send and other extension callers. */
-export async function sendAgentMessage(context: ExtensionContext, params: SendParams): Promise<{ env: Envelope; file: string }> {
+export async function sendAgentMessage(context: ExtensionContext, params: SendParams): Promise<{ env: Envelope; file: string; interruptOutcome?: InterruptOutcome }> {
   if (!params.terminal) throw new Error("agent_send requires terminal: an HC terminal id/name or machine/terminal.");
   if (!process.env.HC_TERMINAL_ID) throw new Error("agent_send requires a Pi running in an HC terminal (HC_TERMINAL_ID is unset).");
   const [own, self] = await Promise.all([hcAddress(process.env.HC_TERMINAL_ID), hcJson(["get", process.env.HC_TERMINAL_ID])]);
@@ -122,6 +135,39 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     ...(params.interrupt ? { interrupt: true } : {}),
     ...(task ? { task } : {}),
   };
+  let interruptOutcome: InterruptOutcome | undefined;
+  if (params.interrupt) {
+    let before: string | undefined;
+    let beforeError: string | undefined;
+    try { before = statusState(await hcJson(["get", params.terminal, "--json"], 3_000)); }
+    catch (error) { beforeError = error instanceof Error ? error.message : String(error); }
+
+    let observed: InterruptObservation | undefined;
+    let interruptError: string | undefined;
+    try {
+      const raw = await hcText(["interrupt", params.terminal, "--json", "--timeout", "3"], undefined, 3_500);
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.key !== "string" || typeof parsed?.outcome !== "string") throw new Error("hc interrupt JSON omitted key or outcome");
+      observed = { key: parsed.key, outcome: parsed.outcome };
+    } catch (error) {
+      interruptError = error instanceof Error ? error.message : String(error);
+    }
+
+    let after: string | undefined;
+    let afterError: string | undefined;
+    try { after = statusState(await hcJson(["get", params.terminal, "--json"], 3_000)); }
+    catch (error) { afterError = error instanceof Error ? error.message : String(error); }
+
+    const detail = shortObservation(observed ? `key=${observed.key}, outcome=${observed.outcome}` : `hc interrupt failed: ${shortObservation(interruptError ?? "invalid JSON observation")}`);
+    if (before && before !== "working") {
+      interruptOutcome = { state: "idle", detail: shortObservation(`${before} (${detail})`) };
+    } else if (before === "working" && after && after !== "working") {
+      interruptOutcome = { state: "stopped", detail: shortObservation(`${before} → ${after} (${detail})`) };
+    } else {
+      const states = `${before ?? `unknown${beforeError ? ` (${shortObservation(beforeError)})` : ""}`} → ${after ?? `unknown${afterError ? ` (${shortObservation(afterError)})` : ""}`}`;
+      interruptOutcome = { state: "unconfirmed", detail: shortObservation(`${states} (${detail})`) };
+    }
+  }
   let file: string;
   try {
     file = await dropHcEnvelope(env, params.terminal);
@@ -134,5 +180,5 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     throw new Error(`Delivery not confirmed to terminal ${params.terminal}; inspect ${env.id} before retrying (${env.id}): ${reason}`);
   }
   appendEvent({ op: "send", env });
-  return { env, file };
+  return { env, file, ...(interruptOutcome ? { interruptOutcome } : {}) };
 }
