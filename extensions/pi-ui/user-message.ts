@@ -74,7 +74,7 @@ export function registerUserMessageUi(pi: ExtensionAPI): void {
     const ctx = currentCtx;
     if (!ctx?.hasUI) return markdown;
     if (context.messageType === "assistant") {
-      return decorateAssistantMarkdown(markdown, ctx.ui.theme);
+      return decorateAssistantMarkdown(markdown, ctx.ui.theme, context.availableWidth, context.isStreaming);
     }
     if (context.messageType !== "user") return markdown;
     const displayed = markdown.replace(ATTACHED_IMAGE_PATH_RE, "[pasted image attached]");

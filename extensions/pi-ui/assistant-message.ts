@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parseColor, type Color } from "@earendil-works/pi-tui";
+import { parseColor, visibleWidth, type Color } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 /**
@@ -11,15 +11,21 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
  * message, the model context, the user rails and every non-assistant surface are
  * untouched.
  *
- * Rules kept deliberately small:
- * - `[[Word]]` becomes a pill only for the approved vocabulary; anything else
- *   stays literal, so an unknown label is never destroyed.
- * - `**bold**` keeps its asterisks and gets an existing Verdigris foreground
- *   role; fixed action/status labels may also get a Nerd Font icon.
+ * Quiet reply emphasis (task-821, option A of task-819). Rules kept small:
+ * - `[[Word]]` becomes a bold word in its meaning's tint plus a muted dot, with
+ *   no fill and no icon, only for the approved vocabulary (the ask-me table minus
+ *   `Needs You`); anything else stays literal. `[[TLDR]]` keeps its grey pill.
+ * - Ordinary `**bold**` keeps its asterisks and is drawn in the theme text
+ *   color; on a line that leads with `[[Decision]]` it is ochre at normal weight.
+ *   Approved-word lead-ins (`**Git state:**`) are muted and not bold.
+ * - A line that is exactly `## Word` (approved word) is drawn as the bold tinted
+ *   word and a faint rule to the available width, as its own paragraph, bound to
+ *   a list or prose beneath it; see `decorateAssistantMarkdown`.
  * - Inline marks and tree lines are colored.
  * - Inline code, fenced code, indented code and links are never rewritten.
  *
- * Pill fills and icons use theme roles. Labels use the theme's `text` color,
+ * The ask-me context keeps the older pills through `decorateStatePills`. Pill
+ * fills and icons there use theme roles; labels use the theme's `text` color,
  * except the TLDR pill, whose optional foreground is read once from the loaded
  * theme's `recapTeal` variable and otherwise falls back to `text`.
  */
@@ -74,23 +80,25 @@ const PILL_WORDS: Record<string, PillWord> = {
   "Git state": { icon: "\u{E702}", tone: PLAIN },
 };
 
-/** House labels Herdra writes as a bold lead-in, with their own tone. */
-const LABELS: Record<string, { icon: string; tone: FgRole }> = {
-  "Up next": { icon: PILL_WORDS["Up next"].icon, tone: "mdCodeBlockBorder" },
-  Delivered: { icon: PILL_WORDS.Delivered.icon, tone: "accent" },
-  Now: { icon: PILL_WORDS.Now.icon, tone: "muted" },
-  "Git state": { icon: PILL_WORDS["Git state"].icon, tone: "muted" },
-};
+/**
+ * Assistant vocabulary: every legacy pill word except `Needs You`. Words default
+ * to a muted tint; these groups name the ones that carry a meaning colour.
+ */
+const ASSISTANT_EXCLUDED = "Needs You";
+const TINTS: Record<string, FgRole> = Object.fromEntries(
+  (
+    [
+      ["warning", ["Decision", "At risk", "Unverified", "Costs money"]],
+      ["mdLink", ["Up next", "In progress", "Now", "Pending"]],
+      ["mdCodeBlockBorder", ["Done", "Passed", "Live", "Delivered"]],
+      ["error", ["Blocked", "Failed", "Destructive"]],
+    ] as [FgRole, string[]][]
+  ).flatMap(([role, words]) => words.map((word) => [word, role])),
+);
 
-/** Pill words doubled as bold lead-ins (`**At risk:**`) keep their icon and tone. */
-const BOLD_LABELS: Record<string, { icon: string; tone: FgRole }> = {
-  ...Object.fromEntries(
-    Object.entries(PILL_WORDS).map(([word, pill]) => [word, { icon: pill.icon, tone: pill.tone.accent }]),
-  ),
-  ...LABELS,
-};
+const isAssistantWord = (word: string): boolean => Object.hasOwn(PILL_WORDS, word) && word !== ASSISTANT_EXCLUDED;
+const tintOf = (word: string): FgRole => (Object.hasOwn(TINTS, word) ? TINTS[word] : "muted");
 
-const BOLD_TONE: FgRole = "mdCodeBlockBorder";
 const TREE_TONE: FgRole = "muted";
 const PILL_CONTEXT_PROTECTED_RE = /`[^`\n]*`|\[(?:[^\[\]\n]|\[\[[^\]\n]*\]\])*\]\([^\)\n]*\)/g;
 
@@ -98,7 +106,6 @@ const FENCE_RE = /^\s*(```|~~~)/;
 const INDENTED_CODE_RE = /^(?: {4,}|\t)/;
 const LEADING_TREE_RE = /^(\s*(?:[│├└][─ ]*)+)/;
 const LEADING_ARROW_RE = /^(\s*)(→)/;
-const PROTECTED_RE = /`[^`\n]*`|\[[^\]\n]*\]\([^)\n]*\)/g;
 const PILL_RE = /\[\[([^[\]\n]{1,40})\]\]/g;
 const BOLD_RE = /(?<!\\)\*\*(?=\S)([^*\n]+?)\*\*/g;
 
@@ -159,20 +166,28 @@ function replaceStatePills(theme: Theme, text: string): string {
   });
 }
 
-function decorateText(theme: Theme, text: string): string {
-  let out = text.replace(BOLD_RE, (_match, inner: string) => {
-    const key = inner.replace(/:$/, "").trim();
-    const label = BOLD_LABELS[key];
-    const icon = label ? theme.fg(label.tone, label.icon) : "";
-    return label ? `${icon} **${theme.fg(BOLD_TONE, inner)}**` : `**${theme.fg(BOLD_TONE, inner)}**`;
-  });
-
-  out = replaceStatePills(theme, out);
-
-  return out.replace(/✓|✗/g, (mark) => theme.fg(mark === "✓" ? "accent" : "error", mark));
+/** Quiet assistant word: bold tinted word and a muted dot; a non-breaking space keeps the dot on the word's row. */
+function quietWord(theme: Theme, word: string): string {
+  return `${theme.bold(theme.fg(tintOf(word), word))}${PAD}${theme.fg("muted", "·")}`;
 }
 
-function decorateProtectedLine(line: string, decorate: (text: string) => string, protectedRe = PROTECTED_RE): string {
+function replaceAssistantPills(theme: Theme, text: string): string {
+  return text.replace(PILL_RE, (match, name: string) => {
+    if (name === "TLDR") return renderPill(theme, PILL_WORDS.TLDR, name);
+    return isAssistantWord(name) ? quietWord(theme, name) : match;
+  });
+}
+
+function decorateText(theme: Theme, text: string, decisionLine: boolean): string {
+  const out = text.replace(BOLD_RE, (_match, inner: string) => {
+    if (isAssistantWord(inner.replace(/:$/, "").trim())) return theme.fg("muted", inner);
+    if (decisionLine) return theme.fg("warning", inner);
+    return `**${theme.fg("text", inner)}**`;
+  });
+  return replaceAssistantPills(theme, out).replace(/✓|✗/g, (mark) => theme.fg(mark === "✓" ? "accent" : "error", mark));
+}
+
+function decorateProtectedLine(line: string, decorate: (text: string) => string, protectedRe: RegExp): string {
   const parts: string[] = [];
   let last = 0;
   protectedRe.lastIndex = 0;
@@ -210,14 +225,105 @@ export function decorateStatePills(markdown: string, theme: Theme): string {
 }
 
 function decorateLine(theme: Theme, line: string): string {
-  let out = decorateProtectedLine(line, (text) => decorateText(theme, text));
+  const decisionLine = line.trimStart().startsWith("[[Decision]]");
+  let out = decorateProtectedLine(line, (text) => decorateText(theme, text, decisionLine), PILL_CONTEXT_PROTECTED_RE);
 
   out = out.replace(LEADING_TREE_RE, (run) => theme.fg(TREE_TONE, run));
   out = out.replace(LEADING_ARROW_RE, (_match, space: string, arrow: string) => `${space}${theme.fg("mdCodeBlockBorder", arrow)}`);
   return out;
 }
 
-/** Display-only assistant Markdown: pills, label icons, colored bold, marks and tree lines. */
-export function decorateAssistantMarkdown(markdown: string, theme: Theme): string {
-  return decorateLines(markdown, (line) => decorateLine(theme, line));
+const HEADING_RE = /^##[ \t]+(.+?)[ \t]*$/;
+const MIN_RULE = 3;
+const RULE_FALLBACK: FgRole = "borderMuted";
+const BIND_LIST_RE = /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/;
+const HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const SETEXT_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+// A line that starts some other block, or could turn the heading into a table, setext heading or code.
+const BLOCK_START_RE = /^(?: {4,}|\t|\s*(?:```|~~~|>|#|<|\[[^\]]+\]:|[-+*][ \t]|\d+[.)][ \t]|[-*_=]{3,}))|\|/;
+
+function headingWord(line: string): string | undefined {
+  const word = HEADING_RE.exec(line)?.[1];
+  return word && isAssistantWord(word) ? word : undefined;
+}
+
+/** True when the next content line may sit directly under the heading without changing either block. */
+function bindsToHeading(lines: string[], index: number): boolean {
+  const line = lines[index];
+  if (HR_RE.test(line)) return false;
+  if (BIND_LIST_RE.test(line)) return true;
+  if (BLOCK_START_RE.test(line)) return false;
+  return !SETEXT_RE.test(lines[index + 1] ?? "");
+}
+
+type Rgb = [number, number, number];
+
+function rgbOf(ansi: string): Rgb | undefined {
+  const match = /\x1b\[[34]8;2;(\d+);(\d+);(\d+)m/.exec(ansi);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
+}
+
+/** The tint role blended `amount` of the way over the pill panel background; undefined unless both are 24-bit. */
+function blendInto(theme: Theme, role: FgRole, amount: number): Rgb | undefined {
+  const fg = rgbOf(theme.getFgAnsi(role));
+  const bg = rgbOf(theme.getBgAnsi("selectedBg"));
+  if (!fg || !bg) return undefined;
+  return fg.map((c, i) => Math.round(bg[i] + (c - bg[i]) * amount)) as Rgb;
+}
+
+function paintRule(theme: Theme, tint: FgRole, fill: string): string {
+  const blended = tint === "muted" ? undefined : blendInto(theme, tint, tint === "mdLink" ? 0.45 : 0.3);
+  return blended ? `\x1b[38;2;${blended.join(";")}m${fill}\x1b[39m` : theme.fg(RULE_FALLBACK, fill);
+}
+
+/** Bold tinted word and a faint rule filling the line; the rule is left out when under MIN_RULE cells remain, so it can never wrap. */
+function renderHeading(theme: Theme, word: string, availableWidth: number): string {
+  const tint = tintOf(word);
+  const label = theme.bold(theme.fg(tint, word));
+  const fillWidth = availableWidth - visibleWidth(label) - 1;
+  return fillWidth < MIN_RULE ? label : `${label} ${paintRule(theme, tint, "─".repeat(fillWidth))}`;
+}
+
+/**
+ * Display-only assistant Markdown: quiet words, colored bold, marks, tree lines
+ * and `## Word` headings. Headings need `availableWidth` and a settled message;
+ * while streaming (or without a width) they stay plain Markdown.
+ *
+ * A heading becomes its own paragraph (a blank line is added before it when text
+ * precedes it). When a list item or prose follows, the blank lines beneath are
+ * dropped and the heading ends in a Markdown hard break, so the content starts on
+ * the next row; before any other block the normal gap stays.
+ */
+export function decorateAssistantMarkdown(markdown: string, theme: Theme, availableWidth = 0, isStreaming = false): string {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_RE.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence || INDENTED_CODE_RE.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const word = availableWidth > 0 && !isStreaming ? headingWord(line) : undefined;
+    if (!word) {
+      out.push(decorateLine(theme, line));
+      continue;
+    }
+    if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+    const heading = renderHeading(theme, word, availableWidth);
+    const next = lines.findIndex((candidate, at) => at > i && candidate.trim() !== "");
+    if (next >= 0 && bindsToHeading(lines, next)) {
+      out.push(`${heading}  `);
+      i = next - 1;
+    } else {
+      out.push(heading);
+      if (i + 1 < lines.length && lines[i + 1].trim() !== "") out.push("");
+    }
+  }
+  return out.join("\n");
 }
