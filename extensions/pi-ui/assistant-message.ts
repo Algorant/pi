@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseColor, visibleWidth, type Color } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { decorateDecisionBoxes } from "./decision-box";
 
 /**
  * Assistant-side emphasis drawing (task-750).
@@ -23,6 +24,9 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
  *   a list or prose beneath it; see `decorateAssistantMarkdown`.
  * - Inline marks and tree lines are colored.
  * - Inline code, fenced code, indented code and links are never rewritten.
+ * - A well-formed standalone `## Decision` section (task-826) is drawn as a thin
+ *   muted-ochre box once the message settles; see ./decision-box.ts. Anything
+ *   that does not fit its strict form keeps the rules above.
  *
  * The ask-me context keeps the older pills through `decorateStatePills`. Pill
  * fills and icons there use theme roles; labels use the theme's `text` color,
@@ -294,7 +298,7 @@ function renderHeading(theme: Theme, word: string, availableWidth: number): stri
  * dropped and the heading ends in a Markdown hard break, so the content starts on
  * the next row; before any other block the normal gap stays.
  */
-export function decorateAssistantMarkdown(markdown: string, theme: Theme, availableWidth = 0, isStreaming = false): string {
+function decorateSections(markdown: string, theme: Theme, availableWidth: number, isStreaming: boolean): string {
   const lines = markdown.split("\n");
   const out: string[] = [];
   let inFence = false;
@@ -326,4 +330,15 @@ export function decorateAssistantMarkdown(markdown: string, theme: Theme, availa
     }
   }
   return out.join("\n");
+}
+
+/** Display-only assistant Markdown: Decision boxes, and everything else through decorateSections. */
+export function decorateAssistantMarkdown(markdown: string, theme: Theme, availableWidth = 0, isStreaming = false): string {
+  const edge = (text: string): string => {
+    const blended = blendInto(theme, "warning", 0.5);
+    return blended ? `\x1b[38;2;${blended.join(";")}m${text}\x1b[39m` : theme.fg("muted", text);
+  };
+  return decorateDecisionBoxes(markdown, theme, availableWidth, isStreaming, edge, (text) =>
+    decorateSections(text, theme, availableWidth, isStreaming),
+  );
 }
