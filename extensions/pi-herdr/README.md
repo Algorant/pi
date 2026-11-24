@@ -676,6 +676,22 @@ Files left by the retired legacy Worker runtime are not read.
   shows its terminal, runtime and `report · delivery` state; `worker_pause`
   records the Tandem block, marks its control paused, interrupts and confirms
   it stopped working (a handoff published first still wins).
+- `worker_recover` also adopts a **manus** whose starter terminal a restart
+  replaced, so `worker_finish`/`worker_discard` work again. It reads only until
+  every proof holds, else refuses with no change: the old starter terminal has no
+  hc record; the record's own child terminal is live and is this manus (recorded
+  address, name, `kind=manus`, `--session-id` equal to the record's, Task/label);
+  its `starter=` label names nothing or this owner; its `herdr.space` label is
+  this owner's space, where the Herdr app lists the manus and this owner is the
+  sole terminal of the one tab named `main`; this owner's checkout is the
+  manus's project. Then it creates one successor control record for the same
+  invocation (id `<previous>-recovered`, so a racing second owner fails on the
+  exclusive create). Nothing is claimed, launched, merged or removed, the `starter=`
+  label is not rewritten (`inbox exited` finds a manus by its recorded child
+  terminal and control-record chain, so a finish by the new owner is still seen as
+  handled), and an in-flight manus's brief still names the old route.
+  Receipts of the former owner stay valid for this child's chain. A manus whose
+  terminal is gone has no such proof and stays with its recorded starter.
 - A ready `worker_report` runs the Task's runnable validations once in the
   Worker checkout, records their exit codes against the reported HEAD in the
   immutable report (`checks`; a failure is recorded, not hidden) and delivers

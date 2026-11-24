@@ -86,19 +86,22 @@ if (command === "result") {
 // receipt decides whether the starter has already acted; ordinary inbox traffic is not final.
 // Other child kinds retain the original any-message behavior.
 async function manusExitWasHandled(self: any, core: string): Promise<boolean> {
-  if (self.labels?.kind !== "manus" || typeof self.labels?.starter !== "string") return false;
+  if (self.labels?.kind !== "manus") return false;
   try {
-    const [starter, records, outcomes] = await Promise.all([
-      hcAddress(self.labels.starter), listHcWorkerRecords(), listHcWorkerOutcomes(),
-    ]);
-    const matches = records.filter((record) => isManusRecord(record) && record.childAgent === self.name
-      && record.owner.core === core && record.owner.terminal === starter.terminal
-      && record.child?.core === core && record.child.terminal === self.address);
-    if (matches.length !== 1) return false;
-    const record = matches[0]!;
+    const [records, outcomes] = await Promise.all([listHcWorkerRecords(), listHcWorkerOutcomes()]);
+    // The manus is found by the child terminal its own control records captured, not by its starter= label:
+    // a recovered manus keeps the label naming a starter that no longer exists. Its chain is every control
+    // record of the one invocation; the current owner is the one no successor replaced.
+    const chain = records.filter((record) => isManusRecord(record) && record.childAgent === self.name
+      && record.owner.core === core && record.child?.core === core && record.child.terminal === self.address);
+    const superseded = new Set(chain.map((record) => record.recoveryOfDeliveryId));
+    const current = chain.filter((record) => !superseded.has(record.deliveryId));
+    if (current.length !== 1 || chain.some((record) => record.invocationId !== current[0]!.invocationId)) return false;
+    const record = current[0]!;
     if (record.state === "discarding" || record.state === "discarded") return true;
-    return outcomes.some((outcome) => outcome.deliveryId === record.deliveryId && outcome.childAgent === record.childAgent
-      && outcome.owner.core === record.owner.core && outcome.owner.terminal === record.owner.terminal
+    // A receipt written by a former owner before recovery counts for exactly this child's chain.
+    return outcomes.some((outcome) => chain.some((entry) => entry.deliveryId === outcome.deliveryId
+      && outcome.childAgent === record.childAgent && outcome.owner.core === entry.owner.core && outcome.owner.terminal === entry.owner.terminal)
       && outcome.acceptedAt !== undefined);
   } catch (error) {
     console.error(`inbox: could not verify ${self.name ?? self.address} manus finish/discard receipt; sending exit notice (${error instanceof Error ? error.message : error})`);

@@ -30,7 +30,8 @@ import {
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { provider429Diagnostic, registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
-import { CHILD_EXIT, hcFind, hcJson, hcText, isHc } from "./core.ts";
+import { CHILD_EXIT, coreId as appCoreId, hcFind, hcJson, hcText, isHc } from "./core.ts";
+import { resolveAppSpace } from "./app-host.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, workerLabel } from "../../scripts/whois.ts";
 import { briefContract, hasWorktree, projectRules, requireContract, taskFreeChecks, workerBase, workerName } from "../pi-agency/workers/contract.ts";
 import type { Envelope } from "../pi-agency/inbox/envelope.ts";
@@ -144,6 +145,47 @@ async function keptSessionStart({ record, started }: WorkerView): Promise<HcWork
     throw new Error(`Kept continuation ${record.deliveryId} does not answer this Worker's session.`);
   }
   return readHcWorkerStart(prior.invocationId);
+}
+
+/**
+ * A manus belongs to its starter terminal, which a restart replaces. Recovery adopts it only on
+ * record-specific native proof, every part read now and any doubt or lookup error refusing:
+ * the old starter terminal has no hc record at all; the record's own child terminal is live and
+ * provably this manus (address, name, kind, launch session id, Task/label); its `starter=` label
+ * (a route, often the old starter's name) resolves to nothing or to this owner, never to another
+ * terminal; its `herdr.space` label (the starter's own space at start) is this owner's space, where
+ * the app lists the manus and this owner is the one terminal of the one tab named main; and this
+ * owner's checkout is the manus's project. A role or name alone proves nothing. Reads only.
+ */
+async function proveOrphanedManus(previous: HcWorkerRecord, owner: Owner, cwd: string): Promise<void> {
+  const refuse = (why: string) => new Error(`Manus ${previous.childAgent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}) and cannot be adopted by ${owner.terminal}: ${why}. Recovery made no changes.`);
+  if (previous.owner.core !== owner.core) throw refuse("it was started on another core");
+  const former = await hcFind(previous.owner.terminal);
+  if (former) throw refuse(`hc still has a record of that starter terminal (${former.address}, ${former.state}); only a terminal hc no longer knows is proven gone`);
+  const recorded = previous.child;
+  if (!recorded || recorded.core !== owner.core) throw refuse("its record names no child terminal on this core");
+  const child = await hcFind(recorded.terminal);
+  if (!child || child.state !== "live") throw refuse(`its recorded terminal ${recorded.terminal} is not live, so nothing proves which space and starter it belonged to`);
+  const argv: unknown[] = Array.isArray(child.argv) ? child.argv : [];
+  const labels = child.labels ?? {};
+  const taskLabel = previous.taskId ? labels.task === `${basename(dirname(previous.integration.repoKey))}:${previous.taskId}` : labels[LABEL_KEY] === previous.label;
+  if (child.address !== recorded.terminal || child.name !== previous.childAgent || labels[KIND_KEY] !== "manus" || !taskLabel ||
+      !argv.some((arg, index) => arg === "--session-id" && argv[index + 1] === previous.childSessionId)) {
+    throw refuse(`terminal ${recorded.terminal} is not this record's manus (address, name, kind, launch session or Task label differs)`);
+  }
+  const starter = labels.starter;
+  if (typeof starter !== "string" || !starter) throw refuse("the manus terminal carries no starter label");
+  const named = await hcFind(starter);
+  if (named && named.address !== owner.terminal) throw refuse(`its starter label ${starter} now names another terminal (${named.address})`);
+  const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
+  const spaceId = labels["herdr.space"];
+  if (typeof spaceId !== "string" || !spaceId || self.labels?.["herdr.space"] !== spaceId) throw refuse("this owner is not in the space the manus was started in");
+  const { space, tab } = await resolveAppSpace(spaceId, self.labels?.["herdr.tab"], owner.core, owner.terminal);
+  if (tab.name !== "main" || space.tabs.filter((entry: any) => entry.name === "main").length !== 1 || tab.terminals?.length !== 1) {
+    throw refuse(`this owner is not the sole terminal of the space's one main tab (tab ${tab.name}, ${tab.terminals?.length ?? 0} terminals)`);
+  }
+  if (!space.tabs.some((entry: any) => entry.terminals?.some((item: any) => appCoreId(space.machine, item.terminal) === child.address))) throw refuse("the Herdr app does not list the manus terminal in this space");
+  if ((await nativeProjectIdentity(cwd)).repoKey !== previous.integration.repoKey) throw refuse("this owner's checkout is another project");
 }
 
 /** The captured Worker terminal, or nothing. An undelivered kept continuation
@@ -408,7 +450,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const owner = await currentOwner(ctx);
     const record = await currentRecord(agent, owner.core);
     if (!ownedBy(record, owner)) throw new Error(isManusRecord(record)
-      ? `Manus ${agent} belongs to its starter terminal ${record.owner.terminal} (core ${record.owner.core}); only that starter finishes or discards it. Nothing changed.`
+      ? `Manus ${agent} belongs to its starter terminal ${record.owner.terminal} (core ${record.owner.core}); only that starter finishes or discards it; if that terminal is gone after a restart, the replacement main-tab owner adopts it with worker_recover. Nothing changed.`
       : `Worker ${agent} belongs to owner ${record.owner.terminal} session ${record.ownerSessionId}. Use worker_recover to adopt it explicitly.`);
     return { owner, worker: await view(record) };
   }
@@ -720,30 +762,35 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         ...(planPending && !answering ? { plan: params.approve ? "approved" : "revise" } : {}), ...(answering ? { questionId: params.questionId, answer: params.message.trim() } : {}) });
   }
 
-  async function recoverWorker(params: { taskId?: string; agent: string }, ctx: ExtensionContext) {
+  async function recoverWorker(params: { taskId?: string; agent: string }, ctx: ExtensionContext, manus = false) {
     const owner = await currentOwner(ctx);
     const current = leaves(await workerChain(params.agent, owner.core));
     if (params.taskId !== undefined && current.some((record) => record.taskId !== params.taskId)) throw new Error("Recovery taskId differs from the captured Worker contract; nothing changed.");
     if (current.length !== 1) throw new Error(`Native Worker ${params.agent} has ${current.length} current deliveries for ${params.taskId}; recovery made no changes.`);
     const previous = current[0]!;
     if (ownedBy(previous, owner)) return { record: previous, adopted: false };
-    if (isManusRecord(previous)) throw new Error(`Manus ${params.agent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}); only that starter finishes or discards it. Recovery made no changes.`);
-    if (["discarding", "discarded"].includes(previous.state)) throw new Error(`Worker ${params.agent} is ${previous.state}; recovery made no changes.`);
-    await validateCapturedCheckout(previous.integration.source, previous.integration.repoKey, "Worker source");
-    await validateCapturedCheckout(previous.integration.target, previous.integration.repoKey, "Captured Worker target");
-    if (previous.taskId) {
-      const task = await tandemShow(previous.taskId, previous.integration.target.checkoutPath);
-      requireActiveTask(task, previous.taskId, "Worker recovery");
-      if (task.assignee !== previous.childAgent) throw new Error(`Tandem ownership mismatch for ${previous.taskId}: expected ${previous.childAgent}, found ${task.assignee ?? "none"}. Recovery never claims.`);
+    if (isManusRecord(previous) && !manus) throw new Error(`Manus ${params.agent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}); worker_recover adopts it, then worker_finish or worker_discard. Nothing changed.`);
+    if (["discarding", "discarded"].includes(previous.state)) throw new Error(`${isManusRecord(previous) ? "Manus" : "Worker"} ${params.agent} is ${previous.state}; recovery made no changes.`);
+    if (isManusRecord(previous)) await proveOrphanedManus(previous, owner, ctx.cwd);
+    else {
+      await validateCapturedCheckout(previous.integration.source, previous.integration.repoKey, "Worker source");
+      await validateCapturedCheckout(previous.integration.target, previous.integration.repoKey, "Captured Worker target");
+      if (previous.taskId) {
+        const task = await tandemShow(previous.taskId, previous.integration.target.checkoutPath);
+        requireActiveTask(task, previous.taskId, "Worker recovery");
+        if (task.assignee !== previous.childAgent) throw new Error(`Tandem ownership mismatch for ${previous.taskId}: expected ${previous.childAgent}, found ${task.assignee ?? "none"}. Recovery never claims.`);
+      }
+      // Refuses a terminal holding the Worker's name without its invocation; reads only.
+      await liveInvocation(await view(previous));
     }
-    // Refuses a terminal holding the Worker's name without its invocation; reads only.
-    await liveInvocation(await view(previous));
     const now = Date.now();
     // A successor control for the SAME invocation: owner data only, nothing the Worker produced,
     // and no relabel. A late handoff of that invocation is read here through its id.
     const { handoffReadAt: _read, ...control } = previous;
+    // A manus successor's id is derived from the record it replaces, so a second owner racing this recovery
+    // collides on the one exclusive create instead of leaving two current records.
     const record: HcWorkerRecord = {
-      ...control, deliveryId: createHcDeliveryId(), recoveryOfDeliveryId: previous.deliveryId, ownerSessionId: owner.sessionId,
+      ...control, deliveryId: isManusRecord(previous) ? `${previous.deliveryId}-recovered` : createHcDeliveryId(), recoveryOfDeliveryId: previous.deliveryId, ownerSessionId: owner.sessionId,
       owner: { core: owner.core, terminal: owner.terminal }, createdAt: now, updatedAt: now,
     };
     await createHcWorkerRecord(record);
@@ -950,10 +997,14 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       ...createWorkerToolRenderer("recover"),
       async execute(_id: string, params: { taskId?: string; agent: string }, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
         return withHcWorkerLifecycle(params.agent, async () => {
-          const { record, adopted } = await recoverWorker(params, ctx);
+          const { record, adopted } = await recoverWorker(params, ctx, true);
           const worker = await view(record);
-          const live = await liveInvocation(worker);
-          return text(adopted ? `Adopted Worker ${workerName(record)} into this owner session as delivery ${record.deliveryId} of invocation ${record.invocationId} (${handoffState(worker)}; invocation ${runtimeState(live)}); nothing was continued.` : `Worker ${params.agent} is already owned by this session; no changes.`,
+          const manus = isManusRecord(record);
+          const live = await liveChild(worker);
+          return text(adopted
+            ? manus ? `Adopted manus ${workerName(record)} from its former starter into this owner terminal as delivery ${record.deliveryId} (terminal ${runtimeState(live)}); nothing was continued, merged or removed. worker_finish or worker_discard acts on it now.`
+              : `Adopted Worker ${workerName(record)} into this owner session as delivery ${record.deliveryId} of invocation ${record.invocationId} (${handoffState(worker)}; invocation ${runtimeState(live)}); nothing was continued.`
+            : `${manus ? "Manus" : "Worker"} ${params.agent} is already owned by this ${manus ? "terminal" : "session"}; no changes.`,
             { host: "hc", agent: params.agent, taskId: record.taskId, deliveryId: record.deliveryId, recoveryOfDeliveryId: record.recoveryOfDeliveryId, invocationId: record.invocationId, adopted,
               handoffState: handoffState(worker), sessionPath: sessionPathOf(worker), terminal: live?.address, state: runtimeState(live) });
         });
