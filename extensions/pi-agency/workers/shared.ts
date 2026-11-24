@@ -425,19 +425,22 @@ export async function validateWorkerDispatch(task: any, cwd: string): Promise<vo
     throw new Error(`Task ${task.id} is a subtask of ${task.parentId}; a Worker owns an entire root Task, never a subtask. Start the Worker for ${task.parentId}; its subtasks are milestones within that assignment.`);
   }
   const effort = task.effort;
-  if (typeof effort !== "string" || !effort.trim()) {
-    throw new Error(`Task ${task.id} has no effort set; set effort before starting a Worker.`);
-  }
-  if (WORKER_LIGHT_EFFORTS.has(effort)) return;
+  const effortUnset = typeof effort !== "string" || !effort.trim();
+  if (!effortUnset && WORKER_LIGHT_EFFORTS.has(effort)) return;
 
+  // One refusal lists every missing field. With effort unset the Task size is unknown,
+  // so the medium-or-larger fields are listed as conditional on the effort chosen.
   const missing: string[] = [];
+  if (effortUnset) missing.push("effort (set it to trivial, small, medium or larger)");
   if ((await tandemAssignment(task.id, cwd)).length === 0) {
-    missing.push(`Task ${task.id} has no runnable validations; medium or larger effort requires a runnable validation written as \`$ <command>\`.`);
+    missing.push(`a runnable validation written as \`$ <command>\`${effortUnset ? " (needed if effort is medium or larger)" : ""}`);
   }
   if (!Array.isArray(task.relatedFiles) || task.relatedFiles.length === 0) {
-    missing.push(`Task ${task.id} has no relatedFiles; medium or larger effort requires at least one related file.`);
+    missing.push(`relatedFiles with at least one file${effortUnset ? " (needed if effort is medium or larger)" : ""}`);
   }
-  if (missing.length > 0) throw new Error(missing.join(" "));
+  if (missing.length === 0) return;
+  const reason = effortUnset ? "; a trivial or small effort needs only effort" : " (medium or larger effort requires them)";
+  throw new Error(`Task ${task.id} cannot start a Worker; missing: ${missing.join("; ")}${reason}. Fix all of these in Tandem, then retry; no checkout or terminal was created.`);
 }
 
 export function latestTodoList(ctx: ExtensionContext): WorkerReport["checklist"] {
