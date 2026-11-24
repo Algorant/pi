@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendEvent, inboxDir, inboxKey, localMachine, newId, splitHeadline, type Envelope } from "./envelope.ts";
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
-import { hcAddress } from "../../../scripts/whois.ts";
+import { hcAddress, terminalWho } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
 
 export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"] };
@@ -53,6 +53,40 @@ export async function dropHcEnvelope(env: Envelope, terminal: string): Promise<s
   }
   env.to = landed.env.to;
   return `${peer.name}:${landed.file}`;
+}
+
+/**
+ * An unqualified recipient: what hc itself resolves (an address or name) always wins. Only when hc answers
+ * a definitive not_found is it read as a project name, the target being that project's one live Ceph on
+ * this core: whois's terminal rule (a pi in its space's `main` tab, `kind` ceph), the project compared
+ * without case as the app space's name is. A machine/terminal address is never reinterpreted, nor is any
+ * other hc failure (an unreachable core, a gone terminal): those fail as before. Several Cephs match, or
+ * `hc ls` failing, is an error naming the cause, never a guess.
+ */
+export async function resolveRecipient(terminal: string): Promise<string> {
+  if (terminal.includes("/")) return terminal;
+  try {
+    await hcJson(["get", terminal]);
+    return terminal;
+  } catch (error) {
+    if ((error as { kind?: string }).kind !== "not_found") throw error;
+    const project = terminal.toLowerCase();
+    let listed;
+    try { listed = await hcJson(["ls", "--json"]); }
+    catch (lsError) { throw new Error(`${error instanceof Error ? error.message : error}; as a project name it could not be looked up (${lsError instanceof Error ? lsError.message : lsError}).`); }
+    if (!Array.isArray(listed?.terminals)) throw new Error(`${error instanceof Error ? error.message : error}; as a project name it could not be looked up (hc ls returned no terminal list).`);
+    const cephs: string[] = [];
+    for (const entry of listed.terminals) {
+      const where = typeof entry?.where === "string" ? entry.where : "";
+      if (entry.state !== "live" || typeof entry.address !== "string" || entry.address.includes("/") || entry.agent !== "pi" || !where.endsWith(" / main")) continue;
+      if (where.slice(0, -" / main".length).toLowerCase() !== project) continue;
+      const who = terminalWho(await hcJson(["get", entry.address]));
+      if (who.kind === "ceph") cephs.push(entry.address);
+    }
+    if (cephs.length === 1) return cephs[0]!;
+    if (cephs.length > 1) throw new Error(`hc get: no terminal "${terminal}", and ${cephs.length} Cephs match project ${terminal} (${cephs.join(", ")}); send to one by address.`);
+    throw error;
+  }
 }
 
 /** A recipient's current hc status: hc's own state word (idle, working, done, blocked, error), `none`, `gone`, `background` (its Pi no longer owns the terminal) or `unknown`. */
@@ -121,6 +155,7 @@ export function deliveryHint(status: TargetStatus, interruptOutcome?: InterruptO
 export async function sendAgentMessage(context: ExtensionContext, params: SendParams): Promise<{ env: Envelope; file: string; interruptOutcome?: InterruptOutcome }> {
   if (!params.terminal) throw new Error("agent_send requires terminal: an HC terminal id/name or machine/terminal.");
   if (!process.env.HC_TERMINAL_ID) throw new Error("agent_send requires a Pi running in an HC terminal (HC_TERMINAL_ID is unset).");
+  const target = await resolveRecipient(params.terminal);
   const [own, self] = await Promise.all([hcAddress(process.env.HC_TERMINAL_ID), hcJson(["get", process.env.HC_TERMINAL_ID])]);
   const machine = localMachine();
   const percent = context.getContextUsage()?.percent;
@@ -129,7 +164,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
   const env: Envelope = {
     v: 1, id: newId(), at: new Date().toISOString(), kind: params.kind, reply_to: params.reply_to ?? null,
     from: { machine, ...own, session: context.sessionManager.getSessionId(), ...(typeof percent === "number" ? { context: Math.round(percent) } : {}) },
-    to: { machine, terminal: params.terminal, core: "", label: "" },
+    to: { machine, terminal: target, core: "", label: "" },
     body: splitHeadline(params.body),
     ...(params.control ? { control: params.control } : {}),
     ...(params.interrupt ? { interrupt: true } : {}),
@@ -139,13 +174,13 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
   if (params.interrupt) {
     let before: string | undefined;
     let beforeError: string | undefined;
-    try { before = statusState(await hcJson(["get", params.terminal, "--json"], 3_000)); }
+    try { before = statusState(await hcJson(["get", target, "--json"], 3_000)); }
     catch (error) { beforeError = error instanceof Error ? error.message : String(error); }
 
     let observed: InterruptObservation | undefined;
     let interruptError: string | undefined;
     try {
-      const raw = await hcText(["interrupt", params.terminal, "--json", "--timeout", "3"], undefined, 3_500);
+      const raw = await hcText(["interrupt", target, "--json", "--timeout", "3"], undefined, 3_500);
       const parsed = JSON.parse(raw);
       if (typeof parsed?.key !== "string" || typeof parsed?.outcome !== "string") throw new Error("hc interrupt JSON omitted key or outcome");
       observed = { key: parsed.key, outcome: parsed.outcome };
@@ -155,7 +190,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
 
     let after: string | undefined;
     let afterError: string | undefined;
-    try { after = statusState(await hcJson(["get", params.terminal, "--json"], 3_000)); }
+    try { after = statusState(await hcJson(["get", target, "--json"], 3_000)); }
     catch (error) { afterError = error instanceof Error ? error.message : String(error); }
 
     const detail = shortObservation(observed ? `key=${observed.key}, outcome=${observed.outcome}` : `hc interrupt failed: ${shortObservation(interruptError ?? "invalid JSON observation")}`);
@@ -170,14 +205,14 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
   }
   let file: string;
   try {
-    file = await dropHcEnvelope(env, params.terminal);
+    file = await dropHcEnvelope(env, target);
   } catch (error) {
     // The send event is the only place this body is stored, so a failed drop still records it, with
     // the failure beside it: `inbox recent`/`thread` then show what was not delivered and why.
     const reason = error instanceof Error ? error.message : String(error);
     appendEvent({ op: "send", env });
     appendEvent({ op: "fail", id: env.id, at: new Date().toISOString(), note: reason });
-    throw new Error(`Delivery not confirmed to terminal ${params.terminal}; inspect ${env.id} before retrying (${env.id}): ${reason}`);
+    throw new Error(`Delivery not confirmed to terminal ${target}; inspect ${env.id} before retrying (${env.id}): ${reason}`);
   }
   appendEvent({ op: "send", env });
   return { env, file, ...(interruptOutcome ? { interruptOutcome } : {}) };
