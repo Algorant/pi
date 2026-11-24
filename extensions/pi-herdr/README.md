@@ -678,7 +678,10 @@ Files left by the retired legacy Worker runtime are not read.
   records the Tandem block, marks its control paused, interrupts and confirms
   it stopped working (a handoff published first still wins).
 - `worker_recover` also adopts a **manus** whose starter terminal a restart
-  replaced, so `worker_finish`/`worker_discard` work again. It reads only until
+  replaced, and `worker_finish`/`worker_discard` run that same adoption in place
+  (inside their lifecycle guard, then continue with every existing gate; no prior
+  `worker_recover` call is needed). A Worker is never adopted implicitly, and
+  when the proof refuses they stop with no change. It reads only until
   every proof holds, else refuses with no change: the old starter terminal has no
   hc record; the record's own child terminal is live and is this manus (recorded
   address, name, `kind=manus`, `--session-id` equal to the record's, Task/label);

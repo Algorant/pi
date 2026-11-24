@@ -158,7 +158,7 @@ async function keptSessionStart({ record, started }: WorkerView): Promise<HcWork
  * owner's checkout is the manus's project. A role or name alone proves nothing. Reads only.
  */
 async function proveOrphanedManus(previous: HcWorkerRecord, owner: Owner, cwd: string): Promise<void> {
-  const refuse = (why: string) => new Error(`Manus ${previous.childAgent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}) and cannot be adopted by ${owner.terminal}: ${why}. Recovery made no changes.`);
+  const refuse = (why: string) => new Error(`Manus ${previous.childAgent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}) and cannot be adopted by ${owner.terminal}: ${why}. Nothing changed.`);
   if (previous.owner.core !== owner.core) throw refuse("it was started on another core");
   const former = await hcFind(previous.owner.terminal);
   if (former) throw refuse(`hc still has a record of that starter terminal (${former.address}, ${former.state}); only a terminal hc no longer knows is proven gone`);
@@ -446,12 +446,18 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     return { core: await coreId(), terminal: self.address, sessionId: ctx.sessionManager.getSessionId() };
   }
 
-  async function ownedWorker(agent: string, ctx: ExtensionContext): Promise<{ owner: Owner; worker: WorkerView }> {
+  /** `adoptManus` (worker_finish and worker_discard only, inside their lifecycle guard): a manus whose starter a
+   * restart replaced is adopted in place by the same read-only proof and successor record worker_recover uses; a
+   * refusing proof changes nothing. A Worker is never adopted implicitly. */
+  async function ownedWorker(agent: string, ctx: ExtensionContext, adoptManus = false): Promise<{ owner: Owner; worker: WorkerView }> {
     const owner = await currentOwner(ctx);
-    const record = await currentRecord(agent, owner.core);
-    if (!ownedBy(record, owner)) throw new Error(isManusRecord(record)
-      ? `Manus ${agent} belongs to its starter terminal ${record.owner.terminal} (core ${record.owner.core}); only that starter finishes or discards it; if that terminal is gone after a restart, the replacement main-tab owner adopts it with worker_recover. Nothing changed.`
-      : `Worker ${agent} belongs to owner ${record.owner.terminal} session ${record.ownerSessionId}. Use worker_recover to adopt it explicitly.`);
+    let record = await currentRecord(agent, owner.core);
+    if (!ownedBy(record, owner)) {
+      if (adoptManus && isManusRecord(record)) record = (await recoverWorker({ agent }, ctx, true)).record;
+      else throw new Error(isManusRecord(record)
+        ? `Manus ${agent} belongs to its starter terminal ${record.owner.terminal} (core ${record.owner.core}); only that starter acts on it, or, if that terminal is gone after a restart, the replacement main-tab owner through worker_finish, worker_discard or worker_recover. Nothing changed.`
+        : `Worker ${agent} belongs to owner ${record.owner.terminal} session ${record.ownerSessionId}. Use worker_recover to adopt it explicitly.`);
+    }
     return { owner, worker: await view(record) };
   }
 
@@ -769,7 +775,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (current.length !== 1) throw new Error(`Native Worker ${params.agent} has ${current.length} current deliveries for ${params.taskId}; recovery made no changes.`);
     const previous = current[0]!;
     if (ownedBy(previous, owner)) return { record: previous, adopted: false };
-    if (isManusRecord(previous) && !manus) throw new Error(`Manus ${params.agent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}); worker_recover adopts it, then worker_finish or worker_discard. Nothing changed.`);
+    if (isManusRecord(previous) && !manus) throw new Error(`Manus ${params.agent} belongs to its starter terminal ${previous.owner.terminal} (core ${previous.owner.core}); worker_finish and worker_discard adopt it when its starter is gone. Nothing changed.`);
     if (["discarding", "discarded"].includes(previous.state)) throw new Error(`${isManusRecord(previous) ? "Manus" : "Worker"} ${params.agent} is ${previous.state}; recovery made no changes.`);
     if (isManusRecord(previous)) await proveOrphanedManus(previous, owner, ctx.cwd);
     else {
@@ -1106,7 +1112,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   ];
 
   async function finishWorker(params: { agent: string; crashSummary?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) {
-    const { owner, worker } = await ownedWorker(params.agent, ctx);
+    const { owner, worker } = await ownedWorker(params.agent, ctx, true);
     const { record } = worker;
     // A manus record has no typed handoff, assignment or invocation label: finish and discard
     // act on its captured checkout and terminal, and skip the Worker-only gates.
@@ -1302,7 +1308,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   }
 
   async function discardWorker(params: { agent: string; note: string }, ctx: ExtensionContext) {
-    const { owner, worker } = await ownedWorker(params.agent, ctx);
+    const { owner, worker } = await ownedWorker(params.agent, ctx, true);
     const current = worker.record;
     const manus = isManusRecord(current);
     const kindName = manus ? "manus" : "Worker";
