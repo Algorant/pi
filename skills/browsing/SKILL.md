@@ -5,7 +5,10 @@ description: "Driving the browser for agent web work: the user's real Chromium t
 
 # Browsing
 
-One browser: **browse**, driving the user's real Chromium through its extension in the paired agent profile.
+One browser: **browse**, driving the user's real Chromium through its paired extension in whichever profile
+Chromium is actually running — today Chromium's **Default** profile, which also holds his Proton Pass and his
+site sessions. There is no separate "agent profile": pairing ties the extension to the local relay, it does
+not create a browser profile.
 Never open another visible browser and never install or drive Playwright, Puppeteer or Selenium. Web search and
 `fetch_content` stay separate; use browse when a page needs JavaScript, interaction, real layout or a
 signed-in session.
@@ -21,7 +24,7 @@ Call `status` and read `nextStep`.
 
 - Connected: go on.
 - Relay up, extension **unpaired**: tell the user to open Extensions → browse → Options → **Pair with a code**, run `browse pair` in their own terminal, then enter the printed code in Options and click Connect. You never read, relay or store that code.
-- Paired but browser disconnected: tell the user to open the browse profile; it reconnects by itself. If relay or extension is missing, report it and stop. Never switch browsers or reinstall.
+- Paired but browser disconnected: ask him to reopen that Chromium window — the one whose profile carries the browse extension, currently Default — and it reconnects by itself. When `status` says connected, do not ask him to open a browser at all. If relay or extension is missing, report it and stop. Never switch browsers or reinstall.
 
 ## Work on a page
 
@@ -54,7 +57,7 @@ Read local files with Pi's own file tools, never `file://` URLs or the browser a
 
 ## Signed-in work, logins, challenges
 
-- The browser holds the user's own sessions. For a login, 2FA, captcha or payment, `handoff(message)` shows a card with instructions; the user acts, then clicks Continue. Tell him in chat first.
+- The browser holds the user's own sessions, in that Chromium profile. For a login, 2FA, captcha or payment, `handoff(message)` shows a card with instructions; he acts in that tab, then clicks Continue. Tell him in chat first, and say plainly that Proton Pass and his passkeys are his to use there: never type credentials into a tool call and never pretend to complete a passkey step. The session he creates persists in that profile afterwards, until the site expires it or he clears it.
 - Never complete a payment, put credentials in a tool call, or echo cookie or storage values.
 - When navigation reports a bot challenge, hand the interactive one over; never solve it or retry in a
   loop.
@@ -63,7 +66,9 @@ Read local files with Pi's own file tools, never `file://` URLs or the browser a
 ## Leave his settings alone
 
 Pairing, updates, tab behaviour, the relay and the extension belong to the user. Do not change them to
-make a task easier.
+make a task easier. browse's own updater is off on purpose: `OPENCODE_BROWSER_AUTO_UPDATE=off` in
+`~/.pi/agent/mcp.json`, because mise owns this install and `mise up` updates it, while browse's
+self-updater would fight the package manager.
 
 ## Report
 
