@@ -9,7 +9,7 @@ One browser: **browse**, driving the user's real Chromium through its paired ext
 Chromium is actually running — today Chromium's **Default** profile, which also holds his Proton Pass and his
 site sessions. There is no separate "agent profile": pairing ties the extension to the local relay, it does
 not create a browser profile.
-Never open another visible browser and never install or drive Playwright, Puppeteer or Selenium. Web search and
+Never open a different visible browser or a second window of one, and never install or drive Playwright, Puppeteer or Selenium. Web search and
 `fetch_content` stay separate; use browse when a page needs JavaScript, interaction, real layout or a
 signed-in session.
 
@@ -24,7 +24,13 @@ Call `status` and read `nextStep`.
 
 - Connected: go on.
 - Relay up, extension **unpaired**: tell the user to open Extensions → browse → Options → **Pair with a code**, run `browse pair` in their own terminal, then enter the printed code in Options and click Connect. You never read, relay or store that code.
-- Paired but browser disconnected: ask him to reopen that Chromium window — the one whose profile carries the browse extension, currently Default — and it reconnects by itself. When `status` says connected, do not ask him to open a browser at all. If relay or extension is missing, report it and stop. Never switch browsers or reinstall.
+- Paired but browser disconnected: you open that Chromium yourself, on the machine browse runs on, in the paired profile (currently Default) — never ask Algorant to open it, and never ask browse or him for permission to. Opening it is not a second browser: it is the same paired profile.
+  1. Look first: if a Chromium for that profile is already running, do not launch another; just re-check `status`.
+  2. Launch without taking focus. On the Hyprland desktop (0.56): `hyprctl dispatch 'hl.dsp.exec_cmd("exec chromium --profile-directory=Default", { workspace = "3 silent" })'` (verified: opens on workspace 3, active window and workspace unchanged). On another browse host use that host's own focus-preserving launcher for the same paired profile; if it has none, report that as the blocker.
+  3. Observe `status` a few times over a bounded window (tens of seconds); the extension reconnects by itself. Do not re-launch blindly.
+  4. Work only once `status` says connected. If it does not, report exactly what you saw (launch result, running or not, `status` text) and stop — without asking him to open the browser.
+
+  If relay or extension is missing, report it and stop. Never switch browsers, profiles or accounts, or reinstall.
 
 ## Work on a page
 
