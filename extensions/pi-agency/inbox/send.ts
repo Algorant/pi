@@ -6,8 +6,9 @@ import { appendEvent, inboxDir, inboxKey, localMachine, newId, splitHeadline, ty
 import { hcFind, hcJson, hcMachine, hcMachines, hcText, piBackground } from "../../pi-herdr/core.ts";
 import { hcAddress, terminalWho } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
+import { validateFailures, type Failures } from "../../pi-tandem/failure-summary.ts";
 
-export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"] };
+export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"]; failures?: Failures };
 
 /** Shared atomic local drop; callers record the same send event after success. */
 export function dropLocalEnvelope(env: Envelope): string {
@@ -167,6 +168,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     to: { machine, terminal: target, core: "", label: "" },
     body: splitHeadline(params.body),
     ...(params.control ? { control: params.control } : {}),
+    ...(params.failures ? { failures: validateFailures(params.failures) } : {}),
     ...(params.interrupt ? { interrupt: true } : {}),
     ...(task ? { task } : {}),
   };

@@ -7,6 +7,7 @@ import {
   validateWorkerAssignment, validateWorkerQuestion, validateWorkerReport,
   handoffRecordDirectory, integrationOutcomeDirectory, recordPath, writeWorkerRecordJson,
 } from "./handoff-record.ts";
+import { validateFailures, type Failures } from "../../pi-tandem/failure-summary.ts";
 
 /**
  * Native Worker records in the existing handoff store, one writer per file:
@@ -114,6 +115,8 @@ export type HcWorkerHandoff = {
   version: 1; invocationId: string; taskId?: string; childAgent: string; childSessionId: string;
   child: HcWorkerEndpoint; sessionPath: string; publishedAt: number;
   question?: WorkerQuestion; report?: WorkerReport; diagnostic?: string;
+  /** Automatic failed-call summary of this invocation: only on a ready report, absent when nothing failed. */
+  failures?: Failures;
 };
 
 export type HcWorkerOutcome = {
@@ -262,6 +265,10 @@ export function validateHcWorkerHandoff(value: unknown): HcWorkerHandoff {
   if (handoff.report) {
     handoff.report = validateWorkerReport(handoff.report);
     if (handoff.report.taskId !== handoff.taskId || handoff.report.deliveryId !== handoff.invocationId) throw new Error("Native Worker report identity differs from its invocation.");
+  }
+  if (handoff.failures !== undefined) {
+    if (handoff.report?.status !== "ready") throw new Error("A failed-call summary belongs only to a ready native Worker report.");
+    handoff.failures = validateFailures(handoff.failures);
   }
   if (handoff.diagnostic !== undefined && (typeof handoff.diagnostic !== "string" || !handoff.diagnostic.trim())) throw new Error("Invalid native Worker failure diagnostic.");
   return handoff;

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +8,8 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-
 import { createHcReportRenderer, type HcReportDetails } from "../pi-ui/tool-ui/custom-tools/hc-report.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { HEADLINE_MAX, splitHeadline } from "../pi-agency/inbox/envelope.ts";
-import { peerText } from "../../scripts/whois.ts";
+import { KIND_KEY, peerText } from "../../scripts/whois.ts";
+import { collectFailures, FAILURE_SCOPE, openFailureScope, trackScope } from "../pi-tandem/failure-summary.ts";
 import { AGENCY_PROFILE_FLAG } from "../pi-agency/subagents/profile.ts";
 import { provider429 } from "../pi-agency/provider-rate-limit.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
@@ -23,6 +25,8 @@ export function registerHcReport(pi: ExtensionAPI) {
   let ended = false;
   let plainFinal: string | undefined;
   let lastStop: string | undefined;
+  /** This helper invocation's failed-call scope, opened before its first tool can run. */
+  let scope: string | undefined;
   const reset = () => { attempted = false; ended = false; plainFinal = undefined; lastStop = undefined; };
 
   async function closeUnlessKept(ctx: ExtensionContext): Promise<void> {
@@ -71,8 +75,10 @@ export function registerHcReport(pi: ExtensionAPI) {
     const label = `${args.question ? "Question" : "Final report"} (${role}): `;
     const notice = splitHeadline(`${label}${text.split("\n")[0]?.trim() ?? ""}`);
     // One attempt; an unconfirmed drop fails into the error outcome and is never resent.
+    // The failed-call summary belongs to a final report, never to a question.
+    const failures = args.question ? undefined : collectFailures(pi, ctx, scope!);
     const { env } = await sendAgentMessage(ctx, { terminal: parent, kind: "result",
-      body: `${notice}\nReport: ${file}\nSession: ${session}` });
+      body: `${notice}\nReport: ${file}\nSession: ${session}`, ...(failures ? { failures } : {}) });
     ended = true; // questions finish this job too; keep is the only retention opt-out
     return { content: [{ type: "text", text: `${args.question ? "Question" : "Final report"} queued as ${env.id} in the parent's inbox. This job is finished.` }],
       details: { parent: peerText(env.to, env.from.machine), terminal: peerText(env.from, env.from.machine), session, file, message: env.id, question: !!args.question, kept: self.keep }, terminate: true };
@@ -98,10 +104,17 @@ export function registerHcReport(pi: ExtensionAPI) {
     const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
     // A Worker hands back through its Task record instead (workers.ts), with the same close rule.
     parent = ctx.mode === "tui" && pi.getFlag(WORKER_CONTEXT_FLAG) !== true ? self.parent ?? undefined : undefined;
+    // A manus track is one failed-call scope for its whole session; a resumed session keeps its marker.
+    const track = trackScope(ctx.sessionManager.getSessionId());
+    if (self.labels?.[KIND_KEY] === "manus" && !ctx.sessionManager.getBranch().some((entry: any) => entry.type === "custom" && entry.customType === FAILURE_SCOPE && entry.data?.id === track)) openFailureScope(pi, track);
     role = String(pi.getFlag(AGENCY_PROFILE_FLAG) || self.name || self.template || "child");
     pi.registerTool({ ...tool, exposure: parent ? "model-only" : "hidden" });
   });
-  pi.on("before_agent_start", reset);
+  pi.on("before_agent_start", () => {
+    reset();
+    // Each helper invocation is its own scope: one origin id, opened before any tool call.
+    if (parent) { scope = `helper-${randomUUID()}`; openFailureScope(pi, scope); }
+  });
   pi.on("message_end", (event) => {
     const message = event.message;
     if (!parent || message.role !== "assistant") return;

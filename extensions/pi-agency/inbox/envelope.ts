@@ -5,6 +5,7 @@ import { localAgencySettings, localSettingsPath } from "../local-settings.ts";
 import { hcEndpoint, isHc } from "../../pi-herdr/core.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "../subagents/profile.ts";
 import { newId as uniqueId, stateDir, writeAtomic } from "../state.ts";
+import type { Failures } from "../../pi-tandem/failure-summary.ts";
 
 /**
  * Agent-inbox envelope, journal and open index, shared by the pi-agency inbox and the
@@ -45,6 +46,8 @@ export type Envelope = {
   body: string;
   /** `<project>:<task-N>`: the sender's hc `task=` label (a manus's track), its request's linked Task. */
   task?: string;
+  /** Automatic failed-call summary of the completed work this message hands over (bounded, closed vocabulary); the receiver renders it after the body. */
+  failures?: Failures;
   /** The sender stopped the recipient's current turn before queueing this message; retained for history. */
   interrupt?: boolean;
   /** Typed Pi control request; ordinary message text never dispatches commands. */

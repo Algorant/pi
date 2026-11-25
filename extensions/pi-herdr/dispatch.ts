@@ -201,7 +201,7 @@ async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: st
   let started: any;
   try {
     started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${kind}`,
-      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", task.trim()], name);
+      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", `${task.trim()}\n\nUse the automatic failed-call summary in your final report for this invocation; do not infer failures or repeat the summary.`], name);
   } catch (error) {
     throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
   }
@@ -369,6 +369,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       task ? `- Claim the Task now with yourself as assignee: tandem accord claim ${task.id} --assignee pi:${name}.` : "- This work is Task-free: git and the originating inbox thread are the record. Do not fabricate a Task or write Tandem for it.",
       ...rules(self.route, name, label, host).map((rule) => `- ${rule}`),
       `- Deliver to ${self.route} with agent_send terminal=${self.route} kind=result when your work is committed, verified and ready (line 1 the answer, at most 160 characters), then end your turn and wait. ${self.label} (${self.route}) finishes or discards your delivery with worker_finish/worker_discard, which merges through Worktrunk after Algorant's yes when needed. Do not merge, close this terminal, remove this checkout or delete its branch yourself.`,
+      "- When you finish this track, mark the handoff to your starter as complete. Use the automatic failed-call summary for this track, including your completed Workers and helpers, without repeating their counts.",
     ].filter((entry) => entry !== undefined).join("\n");
     const labels = { "herdr.space": spaceId, ...(task ? { task: `${project}:${task.id}` } : {}), starter: self.route, needsAlgorant: String(needsAlgorant), [LABEL_KEY]: label, [KIND_KEY]: "manus" };
     const failedAfter = worktree ? ` Checkout ${cwd} (branch ${branch}) is preserved; no automatic removal.` : "";

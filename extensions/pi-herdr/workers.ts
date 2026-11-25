@@ -9,6 +9,7 @@ import { NSTAR_WORKER } from "../pi-agency/nstar-note.ts";
 import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { taskFreeBrief, workerBrief, workerDirection } from "../pi-agency/workers/brief.ts";
 import { registerWorkerContext, workerContextCapability, WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
+import { collectFailures, openFailureScope, renderFailures } from "../pi-tandem/failure-summary.ts";
 import { checksPassed, formatChecks, formatWorkerReport, validateWorkerReport, type WorkerReport } from "../pi-agency/workers/handoff-record.ts";
 import {
   acknowledgeHcWorkerStart, createHcDeliveryId, createHcInvocationId, createHcWorkerRecord, hcRecordPath, isManusRecord, listHcWorkerOutcomes,
@@ -428,7 +429,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   }
 
   /** Creates the invocation's one immutable handoff; false when it already has one (left intact). */
-  async function publish(current: WorkerRun, ctx: ExtensionContext, outcome: Pick<HcWorkerHandoff, "question" | "report" | "diagnostic">): Promise<boolean> {
+  async function publish(current: WorkerRun, ctx: ExtensionContext, outcome: Pick<HcWorkerHandoff, "question" | "report" | "diagnostic" | "failures">): Promise<boolean> {
     const created = await publishHcWorkerHandoff({ version: 1, invocationId: current.invocationId, taskId: current.record.taskId, childAgent: current.self.name,
       childSessionId: current.record.childSessionId, child: { core: current.record.owner.core, terminal: current.self.address },
       sessionPath: ctx.sessionManager.getSessionFile()!, publishedAt: Date.now(), ...outcome });
@@ -473,6 +474,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       try {
         if (!run) {
           run = await captureRun(ctx);
+          // Everything this invocation does from here on is its own failed-call scope; a kept Worker's next invocation opens another.
+          openFailureScope(pi, run.invocationId);
           questionAsked = false;
         }
         const { record, self, invocationId } = run;
@@ -488,7 +491,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         const contract = record.taskId
           ? workerBrief(record.taskId, record.assignment!, record.planRequired, record.planAcceptedAt !== undefined, rules, WORKER_LIGHT_EFFORTS.has(task.effort))
           : taskFreeBrief(record.label!, record.brief!, record.needsAlgorant!, rules);
-        const brief = `${contract}\n\nLabel: ${record.label ?? record.childAgent}. Owner/return route: ${record.owner.terminal}. Project: ${dirname(record.integration.repoKey)}. Checkout: ${record.integration.source.checkoutPath}. needsAlgorant: ${record.needsAlgorant ?? false}.${record.from ? ` Originating inbox thread: ${record.from}.` : ""}\nCheck in to this actual owner one level up using ordinary agent_send kind=result (never reply_to), one headline under 160 characters: “doing X; next Y”; cite the assignment in the body and follow the global AGENTS.md cadence.\nYou run as a native HC Worker invocation. Work only in this captured checkout.${hasWorktree(record) ? ` The owner target checkout ${target} is off-limits. Use relative paths.` : " worktree:false explicitly uses this shared checkout; never merge or remove it."} You are the last delegation level: do not start Subagents, Reviewers, Workers, hc terminals or any other agent; if you need help, a decision or a user-run Scriptify step (give the reviewed script path), use worker_ask. Each worker_report or worker_ask ends this invocation and hands the outcome to your owner; plain final text without one is an error outcome. Continuations reopen this same session.`;
+        const brief = `${contract}\n\nLabel: ${record.label ?? record.childAgent}. Owner/return route: ${record.owner.terminal}. Project: ${dirname(record.integration.repoKey)}. Checkout: ${record.integration.source.checkoutPath}. needsAlgorant: ${record.needsAlgorant ?? false}.${record.from ? ` Originating inbox thread: ${record.from}.` : ""}\nCheck in to this actual owner one level up using ordinary agent_send kind=result (never reply_to), one headline under 160 characters: “doing X; next Y”; cite the assignment in the body and follow the global AGENTS.md cadence.\nDeliver through the normal ready handoff. Use the automatic failed-call summary for this delivery cycle; do not repeat it in a plan, question or check-in.\nYou run as a native HC Worker invocation. Work only in this captured checkout.${hasWorktree(record) ? ` The owner target checkout ${target} is off-limits. Use relative paths.` : " worktree:false explicitly uses this shared checkout; never merge or remove it."} You are the last delegation level: do not start Subagents, Reviewers, Workers, hc terminals or any other agent; if you need help, a decision or a user-run Scriptify step (give the reviewed script path), use worker_ask. Each worker_report or worker_ask ends this invocation and hands the outcome to your owner; plain final text without one is an error outcome. Continuations reopen this same session.`;
         pi.events.emit(NSTAR_WORKER, { ctx, taskId: record.taskId, label: record.label ?? record.childAgent, brief: record.brief, cwd: target, starter: record.owner });
         return {
           brief: existing ? `${brief}\n\nThis invocation already handed back ${existing.question ? "a clarification question" : existing.report ? `a ${existing.report.status} report` : "its outcome"}. Await the owner's continuation; do not edit or submit another report.` : brief,
@@ -539,6 +542,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     async execute(_id: string, params: WorkerReportInput, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext): Promise<AgentToolResult<WorkerReport> & { terminate: true }> {
       let report: WorkerReport;
       let current: WorkerRun;
+      let failures: HcWorkerHandoff["failures"];
       try {
         if (params.status === "ready" && params.evidence.length === 0) throw new Error("A ready report needs at least one evidence item (criterion and observation).");
         current = await runForSubmission();
@@ -565,11 +569,13 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
           report = { ...report, checks: { head, ...checks } };
           // Delivery belongs to the ready handoff: finish then makes the one accepting write.
           if (record.taskId && shown.accord?.status !== "delivered") await deliverReport(record.taskId, target, report);
+          // Snapshot at completion, still inside this invocation's scope; absent when nothing failed.
+          failures = collectFailures(pi, ctx, current.invocationId);
         }
       } catch (error) {
         throw new Error(`${diagnosticText(error)}${REJECTED_REPORT_SUFFIX}`);
       }
-      if (!await publish(current, ctx, { report })) throw new Error(`Invocation ${current.invocationId} already handed back its outcome; this report was NOT recorded. Stop and wait for the owner.`);
+      if (!await publish(current, ctx, { report, ...(failures ? { failures } : {}) })) throw new Error(`Invocation ${current.invocationId} already handed back its outcome; this report was NOT recorded. Stop and wait for the owner.`);
       const checks = report.checks ? ` Checks: ${formatChecks(report.checks)}${checksPassed(report.checks) ? "" : "; a failed check goes to the owner with this report"}.` : "";
       return { content: [{ type: "text", text: `Worker report recorded for ${report.label ?? report.taskId} (needsAlgorant:${report.needsAlgorant ?? false}) with status ${report.status}; this invocation hands it to the owner and closes.${checks}` }], details: report, terminate: true };
     },
@@ -633,7 +639,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
             const report = worker.handoff?.report;
             // The handoff is the authority: a diff that cannot be read is named, and the notice still goes.
             const review = report?.status === "ready" ? await readyReview(worker.record, report).catch((error) => `${formatWorkerReport(report)}\nDIFF: unavailable (${diagnosticText(error)})`) : undefined;
-            await sendAgentMessage(ctx, { terminal: worker.record.owner.terminal, kind: "result", body: noticeBody(worker, review) });
+            await sendAgentMessage(ctx, { terminal: worker.record.owner.terminal, kind: "result", body: noticeBody(worker, review), ...(report?.status === "ready" && worker.handoff?.failures ? { failures: worker.handoff.failures } : {}) });
           } catch (error) {
             // The handoff file is the authority; the owner (or a recovering owner) reads it.
             pi.appendEntry("pi-herdr-worker-notice-error", { deliveryId: worker.record.deliveryId, invocationId: settled.invocationId, error: diagnosticText(error) });
@@ -976,7 +982,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
             priorHandoff: prior?.handoff?.question ? "question" : prior?.handoff?.report?.status ?? "none" });
         }
         const counts = record.taskId ? tandemCounts(await tandemShow(record.taskId, record.integration.target.checkoutPath), record.taskId) : undefined;
-        const handoff = formatWorkerReport(published.report, counts);
+        const handoff = `${formatWorkerReport(published.report, counts)}${published.failures ? `\n${renderFailures(published.failures)}` : ""}`;
         // This owner has now read the report: its own control fact, never a copy of the report.
         const current = await updateHcWorkerRecord(record.deliveryId, (latest) => latest.handoffReadAt === undefined && !["discarding", "discarded"].includes(latest.state) ? { ...latest, handoffReadAt: Date.now() } : latest);
         return text(handoff, { ...base, deliveryState: deliveryState({ ...worker, record: current }), report: published.report });

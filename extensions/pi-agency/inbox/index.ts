@@ -7,8 +7,10 @@ import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, sendAgentMessage, statusText, targetStatus, type SendParams } from "./send.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
 import { addressText, ageText, closeMessage, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, recordDelivery, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
-import { hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
-import { hcAddress, peerName, peerText } from "../../../scripts/whois.ts";
+import { hcJson, hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
+import { collectFailures, renderFailures, startedHelpers, trackScope, validateFailures } from "../../pi-tandem/failure-summary.ts";
+import { listHcWorkerRecords } from "../workers/hc-record.ts";
+import { hcAddress, KIND_KEY, peerName, peerText } from "../../../scripts/whois.ts";
 
 /**
  * Agent inbox: one folder per native HC terminal. Senders drop a small JSON file via
@@ -138,7 +140,22 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         recordDelivery(env, session);
         continue;
       }
-      const delivered = transformed ?? env;
+      let delivered = transformed ?? env;
+      let failureSection = "";
+      if (delivered.failures) {
+        try {
+          // Rebuilt from the validated fields: nothing outside the closed contract is delivered, persisted or relayed.
+          const failures = validateFailures(delivered.failures);
+          delivered = { ...delivered, failures };
+          failureSection = `\n\n${renderFailures(failures)}`;
+        }
+        catch (error) {
+          // A malformed summary is dropped with a note, so it can never poison a later merge; the message itself still arrives.
+          console.error(`[pi-agent-inbox] Dropped invalid failed-call summary on ${delivered.id}: ${error}`);
+          const { failures: _dropped, ...rest } = delivered;
+          delivered = rest;
+        }
+      }
       // A returned envelope is prepared for delivery; if this runtime ended while awaiting the
       // transform, restore that exact envelope for the next runtime. Exceptions are never replayed.
       if (!current()) { dropLocalEnvelope(delivered); return; }
@@ -148,7 +165,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       if (idle) inboxGate.turnPending = true;
       pi.sendMessage({
         customType: MESSAGE_TYPE,
-        content: `${header(delivered, routes)}\n${delivered.body}`,
+        content: `${header(delivered, routes)}\n${delivered.body}${failureSection}`,
         display: true,
         details: delivered,
       }, idle ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "steer" });
@@ -231,7 +248,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   pi.registerTool({
     name: "agent_send",
     label: "Agent Send",
-    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. A recipient that is working holds a request or result until that turn ends, then starts the next turn with it; only a blocked message or a reply (reply_to) is steered into the running turn. interrupt: true stops the recipient's current turn first, then queues this message for its next turn. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is split at its last word boundary within 160, and the rest becomes the first body line before any existing details (nothing is dropped). Kinds: request, result, blocked. A reply_to message id closes that request; so does a dispatch naming it (from:) or its explicitly linked Task (the sender's project-qualified task= label) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen).",
+    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. A recipient that is working holds a request or result until that turn ends, then starts the next turn with it; only a blocked message or a reply (reply_to) is steered into the running turn. interrupt: true stops the recipient's current turn first, then queues this message for its next turn. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is split at its last word boundary within 160, and the rest becomes the first body line before any existing details (nothing is dropped). Kinds: request, result, blocked. A reply_to message id closes that request; so does a dispatch naming it (from:) or its explicitly linked Task (the sender's project-qualified task= label) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen). On a manus’s final result use complete: ‘track’; omit it on plans, questions, check-ins and ordinary results. The summary is attached automatically; never write it yourself.",
     promptSnippet: "Message another Pi by native HC terminal/name using its durable inbox.",
     parameters: {
       type: "object",
@@ -241,13 +258,27 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         kind: { type: "string", enum: [...KINDS], description: "request, result, or blocked." },
         body: { type: "string", minLength: 1, description: `Message text: line 1 is the answer, a one-line headline of at most ${HEADLINE_MAX} characters; details below. A longer first line is split at its last word boundary within ${HEADLINE_MAX} and the overflow becomes the first body line, before any existing details; nothing is dropped.` },
         reply_to: { type: "string", pattern: ID_PATTERN.source, description: "Id of the agent message this answers, e.g. m4f1a2c9." },
+        complete: { type: "string", enum: ["track"], description: "A manus’s final result only: marks the track complete and attaches the automatic failed-call summary. Omit it everywhere else." },
         interrupt: { type: "boolean", description: "Set true to stop the recipient's current turn first, then queue this message for its next turn. The result reports whether hc confirmed a stop or observed the terminal idle; if the stop is unconfirmed, the message is still queued. Default false preserves ordinary durable delivery. Blocked messages and replies (reply_to) still steer." },
       },
       required: ["terminal", "kind", "body"],
     },
     ...createAgentSendRenderer(),
-    async execute(_id: string, params: SendParams, _signal: unknown, _update: unknown, context: ExtensionContext) {
-      const { env, file, interruptOutcome } = await sendAgentMessage(context, params);
+    async execute(_id: string, params: SendParams & { complete?: "track" }, _signal: unknown, _update: unknown, context: ExtensionContext) {
+      const { complete, ...send } = params;
+      let failures: Envelope["failures"];
+      if (complete !== undefined) {
+        if (complete !== "track") throw new Error('complete must be "track".');
+        if (send.kind !== "result") throw new Error('complete: "track" applies only to kind "result".');
+        if (!process.env.HC_TERMINAL_ID || (await hcJson(["get", process.env.HC_TERMINAL_ID])).labels?.[KIND_KEY] !== "manus") throw new Error('complete: "track" is only for a manus’s final result; this terminal is not a manus. Nothing was sent.');
+        // This track's own failures plus the summaries of the Workers and helpers it started, merged by origin.
+        // A child is proven by existing native evidence only: Worker records this terminal owns, and the helper
+        // terminals its own dendra_start results named; any other sender's summary is not this track's.
+        const own = await hcAddress(process.env.HC_TERMINAL_ID);
+        const workers = new Set((await listHcWorkerRecords()).filter((record) => record.owner.core === own.core && record.owner.terminal === own.terminal).map((record) => record.invocationId));
+        failures = collectFailures(pi, context, trackScope(context.sessionManager.getSessionId()), { children: { core: own.core, workers, helperTerminals: startedHelpers(context.sessionManager.getBranch() as any) } });
+      }
+      const { env, file, interruptOutcome } = await sendAgentMessage(context, { ...send, ...(failures ? { failures } : {}) });
       const to = peerName(env.to, localMachine());
       // Delivery itself is asynchronous; the recipient's status now says when it lands (task-555).
       const target = await targetStatus(env.to, env.from.core!);
