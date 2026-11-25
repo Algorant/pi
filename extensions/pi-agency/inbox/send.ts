@@ -99,24 +99,34 @@ export type TargetStatus = { route: string; state: string; kind?: string; msg?: 
  * A recipient that never resolved to a core has no hc status (undefined).
  */
 export async function targetStatus(to: Envelope["to"], ownCore: string): Promise<TargetStatus | undefined> {
+  return (await readTarget(to, ownCore))?.status;
+}
+
+/** `targetStatus` plus the one recipient read behind it: the route it queried and, for a live terminal, hc's record (callers that need more than the status reuse it, never read again). */
+export type TargetRead = { route: string; record?: any; status: TargetStatus };
+
+export async function readTarget(to: Envelope["to"], ownCore: string): Promise<TargetRead | undefined> {
   if (!to.core) return undefined; // a send that never resolved its recipient
   let route = to.terminal;
   try {
     if (to.core !== ownCore) {
       const machine = (await hcMachines()).find((entry) => entry.id === to.core);
-      if (!machine) return { route: `${to.machine}/${to.terminal}`, state: "unknown", msg: `no machine in hc machine ls has core ${to.core}` };
+      if (!machine) {
+        const unresolved = `${to.machine}/${to.terminal}`;
+        return { route: unresolved, status: { route: unresolved, state: "unknown", msg: `no machine in hc machine ls has core ${to.core}` } };
+      }
       route = `${machine.name}/${to.terminal}`;
     }
     const found = await hcFind(route);
-    if (!found || found.state !== "live") return { route, state: "gone" };
+    if (!found || found.state !== "live") return { route, status: { route, state: "gone" } };
     // hc's status word is the Pi's last report; a stopped or backgrounded Pi keeps reporting idle/done (task-632).
     const foreground = piBackground(found);
-    if (foreground) return { route, state: "background", msg: `terminal foreground: ${foreground}` };
+    if (foreground) return { route, record: found, status: { route, state: "background", msg: `terminal foreground: ${foreground}` } };
     const status = found.status;
-    if (!status?.state) return { route, state: "none" };
-    return { route, state: status.state, ...(status.kind ? { kind: status.kind } : {}), ...(status.msg ? { msg: status.msg } : {}) };
+    if (!status?.state) return { route, record: found, status: { route, state: "none" } };
+    return { route, record: found, status: { route, state: status.state, ...(status.kind ? { kind: status.kind } : {}), ...(status.msg ? { msg: status.msg } : {}) } };
   } catch (error) {
-    return { route, state: "unknown", msg: error instanceof Error ? error.message : String(error) };
+    return { route, status: { route, state: "unknown", msg: error instanceof Error ? error.message : String(error) } };
   }
 }
 
@@ -153,7 +163,7 @@ export function deliveryHint(status: TargetStatus, interruptOutcome?: InterruptO
 }
 
 /** The single durable send path, shared by agent_send and other extension callers. */
-export async function sendAgentMessage(context: ExtensionContext, params: SendParams): Promise<{ env: Envelope; file: string; interruptOutcome?: InterruptOutcome }> {
+export async function sendAgentMessage(context: ExtensionContext, params: SendParams): Promise<{ env: Envelope; file: string; interruptOutcome?: InterruptOutcome; self: any }> {
   if (!params.terminal) throw new Error("agent_send requires terminal: an HC terminal id/name or machine/terminal.");
   if (!process.env.HC_TERMINAL_ID) throw new Error("agent_send requires a Pi running in an HC terminal (HC_TERMINAL_ID is unset).");
   const target = await resolveRecipient(params.terminal);
@@ -217,5 +227,5 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
     throw new Error(`Delivery not confirmed to terminal ${target}; inspect ${env.id} before retrying (${env.id}): ${reason}`);
   }
   appendEvent({ op: "send", env });
-  return { env, file, ...(interruptOutcome ? { interruptOutcome } : {}) };
+  return { env, file, self, ...(interruptOutcome ? { interruptOutcome } : {}) };
 }

@@ -2,12 +2,16 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import type { Envelope } from "../pi-agency/inbox/envelope.ts";
+import { headlineOf } from "../pi-agency/inbox/envelope.ts";
+import type { TargetRead } from "../pi-agency/inbox/send.ts";
 import { readHcWorkerRecord, isManusRecord, type HcWorkerOutcome, type HcWorkerRecord } from "../pi-agency/workers/hc-record.ts";
 
 /**
- * Herdra's lifecycle rows (herdra task-250). Herdra's main terminal owns the row of each Worker or manus it
- * starts: `work-start` once per confirmed launch, `work-done` once after the native finish/discard succeeded.
- * Herdra's `herdra-open` owns the row, its idempotence and its record; this module only calls it at those two
+ * Herdra's lifecycle rows (herdra task-250, task-258). Herdra's main terminal owns the row of each Worker or manus it
+ * starts: `work-start` once per confirmed launch, `work-done` once after the native finish/discard succeeded;
+ * and of each request it sends a Ceph: `request-start` once after the envelope is durably queued.
+ * Herdra's `herdra-open` owns the row, its idempotence and its record; this module only calls it at those three
  * edges. It never throws, never touches native state and never repeats a native side effect: a call that
  * fails or times out is a distinct line on the tool result, and the native outcome stands.
  */
@@ -23,7 +27,7 @@ const UNDO_MAX_BYTES = 300;
 
 /** The caller's own `hc get` payload with its address and core: both owner paths already hold them. */
 export type HookCaller = { core: string; terminal: string; record: { state?: string; parent?: unknown; status?: { app?: string }; labels?: Record<string, string> } };
-export type HookReport = { edge: "work-start" | "work-done"; key: string; status: "ok" | "failed" | "skipped"; message: string };
+export type HookReport = { edge: "work-start" | "work-done" | "request-start"; key: string; status: "ok" | "failed" | "skipped"; message: string };
 
 /**
  * The current Herdra main terminal, read from its actual `hc get` payload (its hc name is null, so a name
@@ -107,6 +111,48 @@ export async function workDone(key: string, outcome: { text: string; undo?: stri
   }
 }
 
+/**
+ * The project of a Ceph, read from the recipient's actual `hc get` payload and its status (no further read):
+ * a live, parentless Pi in the foreground (`status.app` pi, `parent` null, not the stopped/backgrounded Pi
+ * the status read reports) whose `where` is exactly `<project> / main`, carrying no Worker, manus, helper or
+ * starter marking (`kind` only ever `ceph`). A label alone never makes a Ceph: undefined for anything else.
+ */
+function cephMainProject(record: { state?: string; parent?: unknown; status?: { app?: string }; labels?: Record<string, string> }, status: { state: string }): string | undefined {
+  const { state, parent, labels = {} } = record;
+  const where = labels.where ?? "";
+  if (state !== "live" || record.status?.app !== "pi" || parent !== null || status.state === "background" || !where.endsWith(" / main")) return undefined;
+  if ((labels.kind && labels.kind !== "ceph") || labels.starter || labels["pi.worker.invocation"]) return undefined;
+  const project = where.slice(0, -" / main".length);
+  return project && !project.includes(" / ") ? project : undefined;
+}
+
+/**
+ * After `agent_send` durably queued a request (the send returned; a failed drop threw before any call).
+ * Only the current Herdra main terminal, only a plain `request` (no control), only to a Ceph (`cephMainProject`) other than
+ * itself: the recipient is judged from the one `hc get` the send's status read already made, at the route it
+ * queried (`t1p`, or `machine/t1p` found through the core id in `hc machine ls`). Anything else does nothing.
+ * The key is the new envelope's id, even for a request that carries `reply_to`; the label is its headline
+ * exactly as `headlineOf` reads it (herdra-open refuses an unfit one, which shows as a failed hook).
+ */
+export async function requestStart(env: Envelope, sender: HookCaller["record"], target: TargetRead | undefined): Promise<HookReport | undefined> {
+  const key = env.id;
+  try {
+    if (env.kind !== "request" || env.control || !isHerdraMain({ core: env.from.core, terminal: env.from.terminal, record: sender })) return undefined;
+    if (env.to.core === env.from.core && env.to.terminal === env.from.terminal) return undefined;
+    if (!target) return { edge: "request-start", key, status: "failed", message: "the recipient was never resolved to a core, so no Ceph check or route exists" };
+    if (!target.record) {
+      return target.status.state === "unknown" ? { edge: "request-start", key, status: "failed", message: `the recipient could not be verified as a Ceph: ${oneLine(target.status.msg ?? "unknown", 300)}` } : undefined;
+    }
+    const project = cephMainProject(target.record, target.status);
+    if (project === undefined) return undefined;
+    if (target.record.address !== target.route) return { edge: "request-start", key, status: "failed", message: `hc reports the recipient at ${String(target.record.address)}, not at the queried route ${target.route}` };
+    const report = await call("request-start", key, [project, target.route, headlineOf(env.body)]);
+    return report.status === "ok" && report.message !== `r-${key}` ? { ...report, status: "failed", message: `unexpected output "${report.message}" (expected r-${key})` } : report;
+  } catch (error) {
+    return { edge: "request-start", key, status: "failed", message: oneLine(error instanceof Error ? error.message : String(error), 300) };
+  }
+}
+
 /** A real merge only: an `a..b` range of two different commits in a worktree. Anything else is accepted work. */
 export function finishOutcome(receipt: Pick<HcWorkerOutcome, "integration" | "mergeRange" | "revert" | "targetTip">): { text: string; undo?: string } {
   const [from, to] = (receipt.mergeRange ?? "").split("..");
@@ -122,7 +168,7 @@ export function finishOutcome(receipt: Pick<HcWorkerOutcome, "integration" | "me
 export function withHook<T extends { content: unknown[]; details?: unknown }>(result: T, hook: HookReport | undefined): T {
   if (!hook) return result;
   const line = hook.status === "failed"
-    ? `Herdra row hook ${hook.edge} NOT confirmed (key ${hook.key}): ${hook.message}. The native ${hook.edge === "work-start" ? "launch" : "finish or discard"} is complete and was not touched or repeated.`
+    ? `Herdra row hook ${hook.edge} NOT confirmed (key ${hook.key}): ${hook.message}. ${hook.edge === "request-start" ? "The request is queued in the inbox" : `The native ${hook.edge === "work-start" ? "launch" : "finish or discard"} is complete`} and was not touched or repeated.`
     : hook.status === "skipped" ? `Herdra row hook ${hook.edge} not run: ${hook.message}.`
     : `Herdra row ${hook.edge}: ${hook.message}.`;
   const first = result.content[0] as { type: "text"; text: string };

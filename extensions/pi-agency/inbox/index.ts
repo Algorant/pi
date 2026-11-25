@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { createAgentSendRenderer, renderAgentMessage } from "../../pi-ui/tool-ui/custom-tools/agent-inbox";
 import { NSTAR_INBOX } from "../nstar-note.ts";
 import { inboxGate } from "./gate.ts";
-import { deliveryHint, dropLocalEnvelope, sendAgentMessage, statusText, targetStatus, type SendParams } from "./send.ts";
+import { deliveryHint, dropLocalEnvelope, readTarget, sendAgentMessage, statusText, type SendParams } from "./send.ts";
+import { requestStart, withHook } from "../../pi-herdr/herdra-work.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
 import { addressText, ageText, closeMessage, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, recordDelivery, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
 import { hcJson, hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
@@ -278,15 +279,18 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         const workers = new Set((await listHcWorkerRecords()).filter((record) => record.owner.core === own.core && record.owner.terminal === own.terminal).map((record) => record.invocationId));
         failures = collectFailures(pi, context, trackScope(context.sessionManager.getSessionId()), { children: { core: own.core, workers, helperTerminals: startedHelpers(context.sessionManager.getBranch() as any) } });
       }
-      const { env, file, interruptOutcome } = await sendAgentMessage(context, { ...send, ...(failures ? { failures } : {}) });
+      const { env, file, interruptOutcome, self } = await sendAgentMessage(context, { ...send, ...(failures ? { failures } : {}) });
       const to = peerName(env.to, localMachine());
       // Delivery itself is asynchronous; the recipient's status now says when it lands (task-555).
-      const target = await targetStatus(env.to, env.from.core!);
+      const read = await readTarget(env.to, env.from.core!);
+      const target = read?.status;
+      // Herdra main's request to a Ceph opens its widget row; the same recipient read decides, and a failure never touches the queued send.
+      const hook = await requestStart(env, self, read);
       const now = target ? ` ${to} is ${statusText(target)} now: ${deliveryHint(target, interruptOutcome)}.` : interruptOutcome ? ` ${deliveryHint({ state: "unknown", route: params.terminal }, interruptOutcome)}.` : "";
-      return {
+      return withHook({
         content: [{ type: "text" as const, text: `Queued ${env.kind} ${env.id}${env.reply_to ? ` (reply to ${env.reply_to})` : ""} for ${to} (${addressText(env.to)}); it is delivered into that Pi conversation when it is running.${now} inbox thread ${env.id} shows queued, delivered or failed.` }],
         details: { envelope: env, file, ...(target ? { target } : {}) },
-      };
+      }, hook);
     },
   } as any);
 }
