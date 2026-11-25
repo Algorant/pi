@@ -1,7 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 
-const SurfaceKind = StringEnum(["html", "markdown", "mermaid", "diff", "terminal", "image", "json", "code", "trace"] as const);
+const SurfaceKind = StringEnum(["html", "markdown", "mermaid", "diff", "terminal", "image", "json", "code", "trace", "explanation"] as const);
 const DiffLayout = StringEnum(["unified", "split"] as const);
 const AssetKind = StringEnum(["image", "file"] as const);
 const TargetSchema = Type.Union([
@@ -46,11 +46,14 @@ export const SurfaceSchema = Type.Object({
 	language: Type.Optional(Type.String({ description: "code only: highlighting language." })),
 	lineStart: Type.Optional(Type.Integer({ minimum: 1, description: "code only: display starting line." })),
 	steps: Type.Optional(Type.Array(TraceStepSchema, { minItems: 1, description: "trace only: ordered steps rendered as a timeline." })),
+	issue: Type.Optional(Type.String({ description: "explanation only (required): what is wrong, one short single-line paragraph of at most 600 characters." })),
+	how: Type.Optional(Type.String({ description: "explanation only (required): how it happened, one short single-line paragraph of at most 600 characters." })),
+	solution: Type.Optional(Type.String({ description: "explanation only (required): the fix, one short single-line paragraph of at most 600 characters." })),
 });
 
 export const SurfacesSchema = Type.Array(SurfaceSchema, {
 	minItems: 1,
-	description: "Ordered surfaces; kinds: html, markdown, mermaid, diff, terminal, image, json, code, trace.",
+	description: "Ordered surfaces; kinds: html, markdown, mermaid, diff, terminal, image, json, code, trace, explanation.",
 });
 
 export const GetPostSchema = Type.Object({

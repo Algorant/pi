@@ -15,6 +15,7 @@ import {
   toolName,
   truncatePlain,
 } from "../core/text";
+import { sideshowExplanationRow } from "../custom-tools/sideshow";
 import type { ToolUiTone } from "../core/types";
 
 type CodemodeArgs = { code?: string };
@@ -57,13 +58,16 @@ function formatCost(cost: number): string {
 }
 
 function callLine(theme: Theme, call: NestedCall, expanded: boolean): string[] {
-  const args = call.args ? truncatePlain(call.args, expanded ? ARGS_WIDTH.expanded : ARGS_WIDTH.collapsed) : undefined;
+  // A Sideshow surface writer carrying an explanation shows its field lengths instead of clipped JSON.
+  const sideshow = sideshowExplanationRow(theme, call, expanded);
+  const args = sideshow?.summary ?? (call.args ? truncatePlain(call.args, expanded ? ARGS_WIDTH.expanded : ARGS_WIDTH.collapsed) : undefined);
   const line = [
     `${statusIcon(theme, callTone(call))} ${toolName(theme, displayCallName(call.name))}`,
-    args ? theme.fg("muted", args) : undefined,
+    args ? (sideshow ? args : theme.fg("muted", args)) : undefined,
     call.durationMs !== undefined ? theme.fg("dim", formatDuration(call.durationMs) ?? "") : undefined,
     call.cost ? theme.fg("dim", formatCost(call.cost)) : undefined,
   ].filter(Boolean).join(" ");
+  if (sideshow?.diagnostic.length) return [line, ...sideshow.diagnostic];
   if (!expanded || !call.error) return [line];
   return [line, ...call.error.split("\n").map((errorLine) => `  ${paint(theme, "error", errorLine)}`)];
 }

@@ -48,6 +48,7 @@ import {
 } from "./validation";
 import { forgetSession, reconstructSession, rememberSession, type SideshowState } from "./state";
 import { syncPiTrace } from "./trace";
+import { lowerExplanation } from "./explanation";
 import { FEEDBACK_GUIDELINE, POST_URL_GUIDELINE } from "./guidance";
 import { expandMermaidSurfaces, hasMermaid, imageSurface, renderMermaidSurfaces, sourceSurface, type RenderedMermaid } from "./mermaid";
 const MAX_ASSET_BYTES = 5 * 1024 * 1024;
@@ -277,11 +278,12 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: AddSurfaceSchema,
 		async execute(_toolCallId, params: AddSurfaceInput, signal, _onUpdate, ctx) {
 			validateAddSurfaceInput(params);
-			await requireKnownAssets([params.surface as unknown as Record<string, unknown>], `adding a surface to post ${params.postId}`, signal);
+			const newSurface = lowerExplanation(params.surface);
+			await requireKnownAssets([newSurface as unknown as Record<string, unknown>], `adding a surface to post ${params.postId}`, signal);
 			let post: Record<string, unknown>;
 			let note = "";
-			if (params.surface.kind === "mermaid") {
-				const item = (await renderMermaidSurfaces([params.surface], "surface", signal)).get(0)!;
+			if (newSurface.kind === "mermaid") {
+				const item = (await renderMermaidSurfaces([newSurface], "surface", signal)).get(0)!;
 				const ref = await readPostRef(params.postId, signal);
 				const assetId = await pngUploader(state, ref.sessionId, signal)(item.png, "mermaid-0.png");
 				post = await postMermaidPair(params.postId, item, signal, () => requestJson(`/api/posts/${encodeURIComponent(params.postId)}/surfaces`, {
@@ -292,7 +294,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			} else {
 				post = asRecord(await requestJson(`/api/posts/${encodeURIComponent(params.postId)}/surfaces`, {
 					method: "POST",
-					body: JSON.stringify({ surface: params.surface, before: params.before, after: params.after }),
+					body: JSON.stringify({ surface: newSurface, before: params.before, after: params.after }),
 				}, signal));
 			}
 			const sessionId = requireString(post, "sessionId", "session id");
@@ -314,12 +316,13 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: EditSurfaceSchema,
 		async execute(_toolCallId, params: EditSurfaceInput, signal, _onUpdate, ctx) {
 			validateEditSurfaceInput(params);
-			if (params.surface) await requireKnownAssets([params.surface as unknown as Record<string, unknown>], `editing surface ${String(params.target)} of post ${params.postId}`, signal);
+			const replacement = params.surface ? lowerExplanation(params.surface) : undefined;
+			if (replacement) await requireKnownAssets([replacement as unknown as Record<string, unknown>], `editing surface ${String(params.target)} of post ${params.postId}`, signal);
 			let post: Record<string, unknown>;
 			let note = "";
 			const editPath = `/api/posts/${encodeURIComponent(params.postId)}/surfaces/${encodeURIComponent(String(params.target))}`;
-			if (params.surface?.kind === "mermaid") {
-				const item = (await renderMermaidSurfaces([params.surface], "surface", signal)).get(0)!;
+			if (replacement?.kind === "mermaid") {
+				const item = (await renderMermaidSurfaces([replacement], "surface", signal)).get(0)!;
 				const ref = await readPostRef(params.postId, signal);
 				const assetId = await pngUploader(state, ref.sessionId, signal)(item.png, "mermaid-0.png");
 				post = await postMermaidPair(params.postId, item, signal, () => requestJson(editPath, {
@@ -330,7 +333,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 			} else {
 				post = asRecord(await requestJson(editPath, {
 					method: "PATCH",
-					body: JSON.stringify({ surface: params.surface, content: params.content, kits: params.kits }),
+					body: JSON.stringify({ surface: replacement, content: params.content, kits: params.kits }),
 				}, signal));
 			}
 			const sessionId = requireString(post, "sessionId", "session id");
@@ -350,7 +353,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: PublishPostSchema,
 		async execute(_toolCallId, params: PublishPostInput, signal, _onUpdate, ctx) {
 			validatePublishInput(params);
-			let surfaces = params.surfaces;
+			let surfaces = params.surfaces.map((surface) => lowerExplanation(surface));
 			let note = "";
 			const session = await ensureSession(state, { session: params.session, newSession: params.newSession, title: params.sessionTitle ?? params.title, agent: params.agent, cwd: ctx.cwd }, signal);
 			if (hasMermaid(surfaces)) {
@@ -389,7 +392,7 @@ function registerTools(pi: ExtensionAPI, state: SideshowState): void {
 		parameters: UpdatePostSchema,
 		async execute(_toolCallId, params: UpdatePostInput, signal, _onUpdate, ctx) {
 			validateUpdateInput(params);
-			let surfaces = params.surfaces;
+			let surfaces = params.surfaces?.map((surface) => lowerExplanation(surface));
 			let note = "";
 			if (surfaces && hasMermaid(surfaces)) {
 				const rendered = await renderMermaidSurfaces(surfaces, "surfaces", signal);

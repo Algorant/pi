@@ -1,5 +1,7 @@
+import { explanationProblems, explanationRefusal } from "./explanation";
+
 export type SurfacePayload = {
-	kind: "html" | "markdown" | "mermaid" | "diff" | "terminal" | "image" | "json" | "code" | "trace";
+	kind: "html" | "markdown" | "mermaid" | "diff" | "terminal" | "image" | "json" | "code" | "trace" | "explanation";
 	html?: string;
 	kits?: string[];
 	markdown?: string;
@@ -18,6 +20,9 @@ export type SurfacePayload = {
 	language?: string;
 	lineStart?: number;
 	steps?: Array<{ label: string; kind?: string; detail?: string; ts?: string }>;
+	issue?: string;
+	how?: string;
+	solution?: string;
 };
 
 type Target = string | number;
@@ -39,6 +44,7 @@ const ALLOWED_SURFACE_FIELDS: Record<SurfacePayload["kind"], ReadonlySet<string>
 	json: new Set(["kind", "data"]),
 	code: new Set(["kind", "code", "language", "title", "lineStart"]),
 	trace: new Set(["kind", "steps", "assetId", "title"]),
+	explanation: new Set(["kind", "issue", "how", "solution"]),
 };
 
 function hasOwn(value: object, key: string): boolean {
@@ -90,6 +96,11 @@ export function validateSurfacePayload(surface: SurfacePayload, path = "surface"
 		case "code":
 			requireString(surface, "code", path);
 			break;
+		case "explanation": {
+			const problems = explanationProblems(surface, path);
+			if (problems.length) throw explanationRefusal(problems);
+			break;
+		}
 		case "trace":
 			if (!(typeof surface.assetId === "string" && surface.assetId.trim()) && !(Array.isArray(surface.steps) && surface.steps.length)) {
 				throw new Error(`${path} kind "trace" requires non-empty steps or an assetId.`);
