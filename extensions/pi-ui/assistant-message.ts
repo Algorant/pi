@@ -15,7 +15,8 @@ import { decorateDecisionBoxes } from "./decision-box";
  * Quiet reply emphasis (task-821, option A of task-819). Rules kept small:
  * - `[[Word]]` becomes a bold word in its meaning's tint plus a muted dot, with
  *   no fill and no icon, only for the approved vocabulary (the ask-me table minus
- *   `Needs You`); anything else stays literal. `[[TLDR]]` keeps its grey pill.
+ *   `Needs You`); anything else stays literal. `[[TLDR]]` is such a word too, and
+ *   the closing TLDR paragraph of a settled reply sits under one faint rule.
  * - Ordinary `**bold**` keeps its asterisks and is drawn in the theme text
  *   color; on a line that leads with `[[Decision]]` it is ochre at normal weight.
  *   Approved-word lead-ins (`**Git state:**`) are muted and not bold.
@@ -177,7 +178,6 @@ function quietWord(theme: Theme, word: string): string {
 
 function replaceAssistantPills(theme: Theme, text: string): string {
   return text.replace(PILL_RE, (match, name: string) => {
-    if (name === "TLDR") return renderPill(theme, PILL_WORDS.TLDR, name);
     return isAssistantWord(name) ? quietWord(theme, name) : match;
   });
 }
@@ -237,6 +237,7 @@ function decorateLine(theme: Theme, line: string): string {
   return out;
 }
 
+const TLDR_RE = /^ {0,3}\[\[TLDR\]\]/;
 const HEADING_RE = /^##[ \t]+(.+?)[ \t]*$/;
 const MIN_RULE = 3;
 const RULE_FALLBACK: FgRole = "borderMuted";
@@ -275,6 +276,13 @@ function blendInto(theme: Theme, role: FgRole, amount: number): Rgb | undefined 
   return fg.map((c, i) => Math.round(bg[i] + (c - bg[i]) * amount)) as Rgb;
 }
 
+/** True when the standalone paragraph starting at `index` is the last content of the text. */
+function closesText(lines: string[], index: number): boolean {
+  let last = lines.length - 1;
+  while (last > index && lines[last].trim() === "") last--;
+  return lines.slice(index + 1, last + 1).every((line) => line.trim() !== "");
+}
+
 function paintRule(theme: Theme, tint: FgRole, fill: string): string {
   const blended = tint === "muted" ? undefined : blendInto(theme, tint, tint === "mdLink" ? 0.45 : 0.3);
   return blended ? `\x1b[38;2;${blended.join(";")}m${fill}\x1b[39m` : theme.fg(RULE_FALLBACK, fill);
@@ -290,7 +298,9 @@ function renderHeading(theme: Theme, word: string, availableWidth: number): stri
 
 /**
  * Display-only assistant Markdown: quiet words, colored bold, marks, tree lines
- * and `## Word` headings. Headings need `availableWidth` and a settled message;
+ * and `## Word` headings. The closing `[[TLDR]]` paragraph of the reply gets one
+ * rule above it, with a Markdown hard break so the sentence starts on the next
+ * row. Rules and headings need `availableWidth` and a settled message;
  * while streaming (or without a width) they stay plain Markdown.
  *
  * A heading becomes its own paragraph (a blank line is added before it when text
@@ -298,7 +308,7 @@ function renderHeading(theme: Theme, word: string, availableWidth: number): stri
  * dropped and the heading ends in a Markdown hard break, so the content starts on
  * the next row; before any other block the normal gap stays.
  */
-function decorateSections(markdown: string, theme: Theme, availableWidth: number, isStreaming: boolean): string {
+function decorateSections(markdown: string, theme: Theme, availableWidth: number, isStreaming: boolean, atTail: boolean): string {
   const lines = markdown.split("\n");
   const out: string[] = [];
   let inFence = false;
@@ -313,7 +323,13 @@ function decorateSections(markdown: string, theme: Theme, availableWidth: number
       out.push(line);
       continue;
     }
-    const word = availableWidth > 0 && !isStreaming ? headingWord(line) : undefined;
+    const settled = availableWidth > 0 && !isStreaming;
+    if (settled && atTail && availableWidth >= MIN_RULE && TLDR_RE.test(line) && (out.length === 0 || out[out.length - 1].trim() === "") && closesText(lines, i)) {
+      out.push(`${theme.fg(RULE_FALLBACK, "─".repeat(availableWidth))}  `);
+      out.push(decorateLine(theme, line));
+      continue;
+    }
+    const word = settled ? headingWord(line) : undefined;
     if (!word) {
       out.push(decorateLine(theme, line));
       continue;
@@ -338,7 +354,9 @@ export function decorateAssistantMarkdown(markdown: string, theme: Theme, availa
     const blended = blendInto(theme, "warning", 0.5);
     return blended ? `\x1b[38;2;${blended.join(";")}m${text}\x1b[39m` : theme.fg("muted", text);
   };
+  // A segment is the reply's tail when it ends the whole Markdown; segments before a Decision box do not.
+  const tail = markdown.trimEnd();
   return decorateDecisionBoxes(markdown, theme, availableWidth, isStreaming, edge, (text) =>
-    decorateSections(text, theme, availableWidth, isStreaming),
+    decorateSections(text, theme, availableWidth, isStreaming, tail.endsWith(text.trimEnd())),
   );
 }
