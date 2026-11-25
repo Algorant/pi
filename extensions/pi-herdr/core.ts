@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 export const CHILD_EXIT = resolve(dirname(fileURLToPath(import.meta.url)), "../../scripts/child-exit");
 
 /**
+ * The one native-kickoff marker: a native launch (helper, Worker, manus, Ceph) puts it before `--` so the
+ * Pi labels its first turn, the kickoff on its command line, `pi.turn=agent` (`turn-label.ts`).
+ */
+export const KICKOFF_FLAG = "hc-kickoff";
+
+/**
  * An app that shows this core as a remote machine qualifies its ids as
  * `<machine>/<id>`; hc labels and addresses are this core's own, unqualified.
  * A local app gives unqualified ids, which pass through unchanged.

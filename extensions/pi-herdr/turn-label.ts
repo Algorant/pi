@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { NSTAR_INBOX } from "../pi-agency/nstar-note.ts";
 import { ageText, openMessages } from "../pi-agency/inbox/envelope.ts";
-import { hcJson } from "./core.ts";
+import { hcJson, KICKOFF_FLAG } from "./core.ts";
 
 const MAX_LABEL_LENGTH = 160;
 /** Most owed message ids one label lists; the rest are counted. */
@@ -44,6 +44,12 @@ export function owedLabel(terminal: string): string {
 /** Publish the completed turn's origin and visible reply through HC's native label path. */
 export function registerHcTurnLabels(pi: ExtensionAPI): void {
   let inboxStarted = false;
+  // A native launch's kickoff is the prompt on its command line, which Pi hands over as ordinary input.
+  // The launch flag owes it the agent label: armed only by the process's own startup (a reload, /new or
+  // resume still carries the flag but is not the kickoff) and spent by the first input of that process.
+  // That input's run stays the kickoff until it settles, retries included; any later input ends it.
+  let kickoffOwed = false;
+  let kickoffRun = false;
   let turnOrigin: "person" | "agent" = "person";
   // Set by a self-reload and consumed by the very next turn: the note never outlives the code change it names.
   let reload: { say: string; field: string } | undefined;
@@ -52,11 +58,18 @@ export function registerHcTurnLabels(pi: ExtensionAPI): void {
     reload = pending ? { say: `reload pending: ${pending}`, field: "pending" } : { say: `reloaded to ${to}`, field: to };
   });
   pi.events.on(NSTAR_INBOX, () => { inboxStarted = true; });
+  pi.registerFlag(KICKOFF_FLAG, { type: "boolean", default: false, description: "Native HC launch: the prompt on the command line is an agent kickoff, so its first turn is labeled pi.turn=agent." });
+  pi.on("session_start", (event) => {
+    kickoffOwed = event.reason === "startup" && pi.getFlag(KICKOFF_FLAG) === true;
+  });
   pi.on("input", (event) => {
     if (event.text.startsWith("<hc from=")) inboxStarted = true;
+    kickoffRun = kickoffOwed;
+    kickoffOwed = false;
   });
+  pi.on("agent_settled", () => { kickoffRun = false; });
   pi.on("agent_start", async () => {
-    turnOrigin = inboxStarted ? "agent" : "person";
+    turnOrigin = inboxStarted || kickoffRun ? "agent" : "person";
     inboxStarted = false;
     // The turn starts with what is owed: a request delivered to this Pi and not yet answered.
     await hcJson(["label", process.env.HC_TERMINAL_ID!, `pi.turn=${turnOrigin}`, `pi.say=${reload?.say ?? ""}`,

@@ -32,7 +32,7 @@ import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { finishOutcome, withHook, workDone, workStart, type HookCaller, type HookReport } from "./herdra-work.ts";
 import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { provider429Diagnostic, registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
-import { CHILD_EXIT, coreId as appCoreId, hcFind, hcJson, hcText, isHc } from "./core.ts";
+import { CHILD_EXIT, coreId as appCoreId, hcFind, hcJson, hcText, isHc, KICKOFF_FLAG } from "./core.ts";
 import { resolveAppSpace } from "./app-host.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, workerLabel } from "../../scripts/whois.ts";
 import { briefContract, hasWorktree, projectRules, requireContract, taskFreeChecks, workerBase, workerName } from "../pi-agency/workers/contract.ts";
@@ -310,7 +310,7 @@ async function launchInvocation(record: HcWorkerRecord, prompt: string, registry
   const labels = { [INVOCATION_LABEL]: record.invocationId, [KIND_KEY]: "worker", ...(record.taskId ? { task: `${basename(dirname(record.integration.repoKey))}:${record.taskId}` } : {}), needsAlgorant: String(record.needsAlgorant ?? false), ...(record.label ? { [LABEL_KEY]: record.label } : {}) };
   const args = ["run", "--bg", "--rm", "--no-notify", "--outlive-parent", "--json", "--name", record.childAgent,
     "--cwd", record.integration.source.checkoutPath, ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--",
-    CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", record.childSessionId, "--model", record.model, `--${WORKER_CONTEXT_FLAG}`, "--", prompt];
+    CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", record.childSessionId, "--model", record.model, `--${WORKER_CONTEXT_FLAG}`, "--", prompt];
   let started: any;
   try {
     started = await hcJson(args, 30_000);

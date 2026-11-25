@@ -16,7 +16,7 @@ import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
 import { requireContract } from "../pi-agency/workers/contract.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, terminalWho } from "../../scripts/whois.ts";
-import { CHILD_EXIT, coreId as appCoreId, hcJson, hcMachines } from "./core.ts";
+import { CHILD_EXIT, coreId as appCoreId, hcJson, hcMachines, KICKOFF_FLAG } from "./core.ts";
 import { appCommand, localAppHost, resolveAppSpace, type AppHost } from "./app-host.ts";
 import { ownerExtensionArgs, type StartWorker } from "./workers.ts";
 import { withHook, workStart, type HookCaller } from "./herdra-work.ts";
@@ -201,7 +201,7 @@ async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: st
   let started: any;
   try {
     started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${kind}`,
-      "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", `${task.trim()}\n\nUse the automatic failed-call summary in your final report for this invocation; do not infer failures or repeat the summary.`], name);
+      "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", `${task.trim()}\n\nUse the automatic failed-call summary in your final report for this invocation; do not infer failures or repeat the summary.`], name);
   } catch (error) {
     throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
   }
@@ -376,7 +376,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
-        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--session-id", childSessionId, "--model", manusModel.argument, "--", brief], name);
+        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", childSessionId, "--model", manusModel.argument, "--", brief], name);
     } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
     // The record's own observation of the terminal the launch returned; finish closes it by this.
     try {
@@ -471,7 +471,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", folder, "--label", `herdr.space=${spaceId}`,
-        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", ...ownerExtensionArgs(), "--model", cephModel, kickoff], name);
+        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--model", cephModel, kickoff], name);
     } catch (error) { throw new Error(`${diagnosticText(error)} Space ${spaceId} is kept as it is; no automatic removal.`); }
     const tab = await nameTab(await localAppHost(), spaceId, started.address, "main");
     const closed = closeRequest(params.from, `${label} (${name})`, self);

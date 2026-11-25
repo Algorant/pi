@@ -92,6 +92,12 @@ hc run --bg --rm --no-notify --name trace-scout -- ~/.pi/agent/scripts/child-exi
 
 Agents start them with `dendra_start` (below), which runs exactly this launch.
 
+Every native launch (helper, Worker, manus, Ceph) also passes `--hc-kickoff` before `--`. That is the
+only marker that the command-line prompt is an agent kickoff: `turn-label.ts` publishes
+`pi.turn=agent` for that run, retries included, so a finished kickoff reads as an agent completion
+instead of a person's. It is armed only by the process's own startup and spent by its first input;
+any later input, `/new`, resume or reload is labeled as before (`person` unless the inbox started it).
+
 Profiles use the existing `pi-agency/agents/<name>.md` tools/prompt and
 `model-roles.json` quota/availability policy, not models copied into templates.
 The tool allowlist applies to direct and nested codemode calls. All three profiles include `bash` (database queries, Python/uv, git, file readers); read-only is the profile prompt's role instruction, not a tool lockout. Profile startup
