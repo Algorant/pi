@@ -96,7 +96,7 @@ function trim(note: NstarCaptures): void {
  * scope frame the block, and the captures live in the Pi session. A Task-free job
  * keeps its whole note in the ignored note file.
  */
-export async function nstarNote(binding: NstarBinding, options: { initialize?: boolean; brief?: string; session?: NstarSession; change?: (note: NstarNote) => void } = {}): Promise<{ text: string; block: string; archived: boolean }> {
+export async function nstarNote(binding: NstarBinding, options: { initialize?: boolean; brief?: string; session?: NstarSession; change?: (note: NstarNote) => void; skipArchived?: boolean } = {}): Promise<{ text: string; block: string; archived: boolean }> {
   const location = nstarLocation(binding);
   return withFileMutationQueue(location, async () => {
     if ("taskId" in binding) {
@@ -104,14 +104,16 @@ export async function nstarNote(binding: NstarBinding, options: { initialize?: b
       const task = await tandemShow(binding.taskId, binding.cwd);
       const archived = task.location === "logs";
       if (task.location !== "board" && !archived) throw new Error("Unknown Tandem location; northstar will not continue.");
-      if (archived && options.change) throw new Error(`Archived Task ${binding.taskId} is read-only; no northstar write attempted.`);
+      // Automatic capture (skipArchived) skips a finished Task quietly; an explicit write still refuses.
+      const change = archived && options.skipArchived ? undefined : options.change;
+      if (archived && change) throw new Error(`Archived Task ${binding.taskId} is read-only; no northstar write attempted.`);
       const limits = [`The Task contract remains authoritative: tandem show ${binding.taskId}.`, ...(task.relatedFiles?.length ? [`Scope: ${task.relatedFiles.join(", ")}`] : []), ...(task.accord?.constraints ?? [])].join("\n");
       const saved = options.session.load();
       const note: NstarNote = { ...structuredClone(saved ?? NO_CAPTURES), goal: task.title, limits, rest: "" };
-      options.change?.(note);
+      change?.(note);
       trim(note);
       const captures: NstarCaptures = { approvals: note.approvals, next: note.next, handoffs: note.handoffs, notes: note.notes };
-      if (JSON.stringify(captures) !== JSON.stringify(saved ?? NO_CAPTURES)) options.session.save(captures);
+      if (!archived && JSON.stringify(captures) !== JSON.stringify(saved ?? NO_CAPTURES)) options.session.save(captures);
       const text = format(note).trimEnd();
       return { text, block: text, archived };
     }

@@ -53,7 +53,7 @@ export function registerNstar(pi: ExtensionAPI): void {
       save: (captures: NstarCaptures) => pi.appendEntry(CAPTURES, { key, captures }),
     };
   }
-  const note = (ctx: ExtensionContext, binding: NstarBinding, options: { initialize?: boolean; brief?: string; change?: (note: NstarNote) => void } = {}) =>
+  const note = (ctx: ExtensionContext, binding: NstarBinding, options: { initialize?: boolean; brief?: string; change?: (note: NstarNote) => void; skipArchived?: boolean } = {}) =>
     nstarNote(binding, { ...options, session: session(ctx, binding) });
 
   async function bind(next: Job, ctx: ExtensionContext, brief?: string): Promise<void> {
@@ -63,7 +63,7 @@ export function registerNstar(pi: ExtensionAPI): void {
   }
   function capture(ctx: ExtensionContext, kind: "approval" | "handoff", attribution: string, text: string, id: string, at?: string): Promise<void> {
     if (!job) return Promise.resolve(); // An unbound pane captures nothing.
-    return note(ctx, job.binding, { change: (current) => nstarCapture(current, kind, attribution, text, id, at) }).then(() => undefined).catch((error) => warn(ctx, error));
+    return note(ctx, job.binding, { skipArchived: true, change: (current) => nstarCapture(current, kind, attribution, text, id, at) }).then(() => undefined).catch((error) => warn(ctx, error));
   }
   /** This terminal's open requests and blockers, from the in-process inbox log. */
   function openItems(): string {
@@ -175,7 +175,7 @@ export function registerNstar(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "notes", label: "Northstar Notes", exposure: "codemode", executionMode: "sequential",
-    description: "Read or update the one bound job's northstar note. A Task is never written: its title and scope frame the note, and the job's captures and notes live in this Pi session. Task-free jobs use ignored project-local .pi/notes/<work-label>.md. Native Workers/manus bind automatically. Herdra/Ceph bind explicitly with taskId OR label+brief; omit binding fields to keep the current job, or unbind:true to stop capture. Optional next/append (and goal/limits, Task-free only) are agent bookkeeping, never authority or approvals. You cannot edit the approvals/input or hand-off blocks. Archived Tasks are read-only. Returns up to 50000 characters.",
+    description: "Read or update the one bound job's northstar note. A Task is never written: its title and scope frame the note, and the job's captures and notes live in this Pi session. Task-free jobs use ignored project-local .pi/notes/<work-label>.md. Native Workers/manus bind automatically. Herdra/Ceph bind explicitly with taskId OR label+brief; omit binding fields to keep the current job, or unbind:true to stop capture. With no job bound, a read returns a status (no error) and writes are refused. Optional next/append (and goal/limits, Task-free only) are agent bookkeeping, never authority or approvals. You cannot edit the approvals/input or hand-off blocks. Archived Tasks are read-only. Returns up to 50000 characters.",
     promptSnippet: "Read/update the current job's northstar; explicitly bind a Task or Task-free label+brief when needed.",
     parameters: Type.Object({
       taskId: Type.Optional(Type.String({ pattern: "^task-[0-9]+(?:-[0-9]+)?$" })), label: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })), brief: Type.Optional(Type.String({ minLength: 1, maxLength: 16000 })), unbind: Type.Optional(Type.Boolean()),
@@ -200,7 +200,10 @@ export function registerNstar(pi: ExtensionAPI): void {
           await bind({ binding: { cwd, label: params.label! }, label: params.label! }, ctx, params.brief);
         }
       }
-      if (!job) throw new Error("No bound job. Bind with taskId OR Task-free label+brief. No note or capture was created.");
+      if (!job) {
+        if (changes) throw new Error("No bound job. Bind with taskId OR Task-free label+brief. No note or capture was created.");
+        return { content: [{ type: "text", text: "No bound job; no note or capture exists. Bind with taskId OR Task-free label+brief to start one." }], details: { location: "unbound", action: "status", archived: false } };
+      }
       if ("taskId" in job.binding && (params.goal !== undefined || params.limits !== undefined)) throw new Error("A Task-backed goal and limits come from the Task itself; update the Task instead.");
       const result = await note(ctx, job.binding, changes ? { change: (current) => {
         if (params.goal !== undefined) current.goal = params.goal;
