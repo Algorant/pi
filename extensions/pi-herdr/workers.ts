@@ -28,6 +28,7 @@ import {
   withCheckIn, workerModelArgument, benchmarkWorkerModelArgument, type WorkerProgressInput, type WorkerReportInput,
 } from "../pi-agency/workers/shared.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
+import { finishOutcome, withHook, workDone, workStart, type HookCaller, type HookReport } from "./herdra-work.ts";
 import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
 import { provider429Diagnostic, registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { CHILD_EXIT, coreId as appCoreId, hcFind, hcJson, hcText, isHc } from "./core.ts";
@@ -62,7 +63,7 @@ const FinishParameters = Type.Object({
   crashSummary: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Only when no Worker invocation is running and it ended without a ready report: your own verified summary of the surviving checkout, which replaces that report. A manus never takes this." })),
 }, { additionalProperties: false });
 
-type Owner = { core: string; terminal: string; sessionId: string };
+type Owner = { core: string; terminal: string; sessionId: string; hc: HookCaller["record"] };
 /** A control record with what its invocation produced. A read-only view: never persisted. */
 type WorkerView = { record: HcWorkerRecord; started?: HcWorkerStart; handoff?: HcWorkerHandoff };
 /** The invocation one Worker run serves, captured once from its own label when the run starts. */
@@ -443,7 +444,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   async function currentOwner(ctx: ExtensionContext): Promise<Owner> {
     const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
     if (workerMode || self.labels?.[INVOCATION_LABEL]) throw new Error("Workers may not own Workers; return a handoff to your owner instead.");
-    return { core: await coreId(), terminal: self.address, sessionId: ctx.sessionManager.getSessionId() };
+    return { core: await coreId(), terminal: self.address, sessionId: ctx.sessionManager.getSessionId(), hc: self };
   }
 
   /** `adoptManus` (worker_finish and worker_discard only, inside their lifecycle guard): a manus whose starter a
@@ -732,6 +733,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     };
     await createHcWorkerRecord(next);
     let terminal: string;
+    let rowHook: HookReport | undefined;
     try {
       if (live) {
         // Recheck the strict quota gate immediately before sending a new invocation to a kept child.
@@ -748,6 +750,8 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         terminal = live.address;
       } else {
         terminal = (await launchInvocation(next, prompt, ctx.modelRegistry)).address;
+        // The launch is confirmed: a replacement invocation repeats the same attempt's row at its new address.
+        rowHook = await workStart(next, terminal, { core: owner.core, terminal: owner.terminal, record: owner.hc });
       }
     } catch (error) {
       // Never retried here. A refusal proves nothing arrived: the delivery fails and keeps its exact
@@ -761,11 +765,11 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
         ? "Inspect worker_status: a live invocation of this delivery continues as is; once none is running, worker_resume delivers the same direction."
         : "worker_resume delivers exactly this direction when you choose; do not resend it as new feedback."}`);
     }
-    return text(`${undelivered ? "Delivered the preserved direction to" : answering ? "Answered clarification for" : params.redeliver ? "Sent the generic continuation to" : "Sent feedback to"} Worker ${params.agent} in the same session and checkout (${terminal}); opened delivery ${next.deliveryId}.`,
+    return withHook(text(`${undelivered ? "Delivered the preserved direction to" : answering ? "Answered clarification for" : params.redeliver ? "Sent the generic continuation to" : "Sent feedback to"} Worker ${params.agent} in the same session and checkout (${terminal}); opened delivery ${next.deliveryId}.`,
       // The invocation now carrying this delivery: a kept one got a new turn, otherwise a new one is starting.
       { host: "hc", agent: params.agent, terminal, taskId: previous.taskId, deliveryId: next.deliveryId, invocationId: next.invocationId, state: live ? "kept · turn sent" : "new invocation · starting", routed: "new-cycle",
         direction: undelivered ? "redelivered" : "new", ...(live ? { kept: true } : {}), ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}),
-        ...(planPending && !answering ? { plan: params.approve ? "approved" : "revise" } : {}), ...(answering ? { questionId: params.questionId, answer: params.message.trim() } : {}) });
+        ...(planPending && !answering ? { plan: params.approve ? "approved" : "revise" } : {}), ...(answering ? { questionId: params.questionId, answer: params.message.trim() } : {}) }), rowHook);
   }
 
   async function recoverWorker(params: { taskId?: string; agent: string }, ctx: ExtensionContext, manus = false) {
@@ -905,9 +909,11 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       catch (error) { launchUncertain = error instanceof LaunchError ? error.uncertain : true; throw error; }
       if (ordinary?.set && ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${workerModel}; set ${ordinary.set}, quota ${ordinary.quota}`, "info");
       const switched = ordinaryResolution && "switched" in ordinaryResolution ? ordinaryResolution.switched : undefined;
-      return text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${workerModel} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${switched ? ` Set ${switched.from} → ${switched.to} for worker (cutover ${switched.operation ?? "none"}${switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
+      // The launch is confirmed; the row hook never throws, so it cannot turn this into an uncertain launch.
+      const rowHook = await workStart(record, started.address, { core: owner.core, terminal: owner.terminal, record: owner.hc });
+      return withHook(text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${workerModel} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${switched ? ` Set ${switched.from} → ${switched.to} for worker (cutover ${switched.operation ?? "none"}${switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
         { host: "hc", state: "starting", taskId: task?.id, title: task?.title, label, worktree, needsAlgorant, from: params.from, agent, terminal: started.address, core: owner.core, worktreePath: checkoutPath, branch, deliveryId, invocationId: record.invocationId,
-          integrationTarget: record.integration.target, sessionId: record.childSessionId, model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(switched ? { modelSwitched: switched } : {}), outlivesParent: true });
+          integrationTarget: record.integration.target, sessionId: record.childSessionId, model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(switched ? { modelSwitched: switched } : {}), outlivesParent: true }), rowHook);
     } catch (error) {
       const note = workerSwitch ? `${workerSwitch} That cutover stays applied.` : "";
       const identity = `${task ? `Task ${task.id}, ` : ""}Worker ${agent}, checkout ${checkoutPath ?? "(none)"}, branch ${branch}, delivery ${deliveryId}`;
@@ -1096,7 +1102,9 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       parameters: FinishParameters,
       ...createWorkerToolRenderer("finish"),
       async execute(_id: string, params: { agent: string; crashSummary?: string }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
-        return withHcWorkerLifecycle(params.agent, () => finishWorker(params, signal, ctx));
+        const finished = await withHcWorkerLifecycle(params.agent, () => finishWorker(params, signal, ctx));
+        // After the lifecycle lock is released and the whole native finish succeeded.
+        return withHook(finished, await closeRow(ctx, finished.details.childSessionId, finishOutcome(finished.details.integrationOutcome)));
       },
     },
     {
@@ -1106,10 +1114,21 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       parameters: DiscardParameters,
       ...createWorkerToolRenderer("discard"),
       async execute(_id: string, params: { agent: string; note: string }, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
-        return withHcWorkerLifecycle(params.agent, () => discardWorker(params, ctx));
+        const discarded = await withHcWorkerLifecycle(params.agent, () => discardWorker(params, ctx));
+        return withHook(discarded, await closeRow(ctx, discarded.details.childSessionId, { text: `discarded: ${params.note.trim()}` }));
       },
     },
   ];
+
+  /** The row's one close edge, run only after a native finish or discard returned. Never throws. */
+  async function closeRow(ctx: ExtensionContext, key: string, outcome: { text: string; undo?: string }): Promise<HookReport | undefined> {
+    try {
+      const owner = await currentOwner(ctx);
+      return await workDone(key, outcome, { core: owner.core, terminal: owner.terminal, record: owner.hc });
+    } catch (error) {
+      return { edge: "work-done", key, status: "failed", message: diagnosticText(error).slice(0, 300) };
+    }
+  }
 
   async function finishWorker(params: { agent: string; crashSummary?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) {
     const { owner, worker } = await ownedWorker(params.agent, ctx, true);
@@ -1303,7 +1322,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
           : `Finished Worker ${record.taskId}: integrated ${route}, recorded the accepted Tandem outcome, closed its terminal, and removed its captured checkout.`;
     const checked = manus ? "" : checks === "reused" ? " Checks passed at worker_report on this HEAD; not rerun." : checks === "rerun" ? " Checks rerun and passed." : "";
     return text(`${summary}${checked}${metrics ? ` ${metrics.attemptCount} attempt(s), ${metrics.reworkCount} rework(s), ${metrics.elapsedMs} ms.` : ""}${inboxNote ? ` ${inboxNote}` : ""}`,
-      { agent: params.agent, kind: record.kind ?? "worker", taskId: record.taskId, deliveryId: record.deliveryId, source: integration.source, target: integration.target, accepted: true, merged: true, ...(checks && !manus ? { checks } : {}),
+      { agent: params.agent, kind: record.kind ?? "worker", taskId: record.taskId, deliveryId: record.deliveryId, childSessionId: record.childSessionId, source: integration.source, target: integration.target, accepted: true, merged: true, ...(checks && !manus ? { checks } : {}),
         alreadyIntegrated: outcomes.length > 0 || alreadyMerged, presentationClosed: true, removed: hasWorktree(record), checkoutRetained: !hasWorktree(record), worktree: hasWorktree(record), needsAlgorant: record.needsAlgorant ?? false, ...(crashSummary ? { deadRuntime: true } : {}), integrationOutcome: outcome, host: "hc", state: "closed" });
   }
 
@@ -1316,7 +1335,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const chainIds = new Set((await workerChain(params.agent, owner.core)).map((entry) => entry.deliveryId));
     if ((await listHcWorkerOutcomes()).some((outcome) => chainIds.has(outcome.deliveryId))) throw new Error(`${kindName} ${params.agent} has an integrated outcome; finish it instead of discarding integrated work.`);
     const integration = current.integration;
-    const base = { host: "hc", agent: params.agent, kind: current.kind ?? "worker", taskId: current.taskId, deliveryId: current.deliveryId, disposition: "discarded", branch: integration.source.branch, worktreePath: integration.source.checkoutPath };
+    const base = { host: "hc", agent: params.agent, kind: current.kind ?? "worker", taskId: current.taskId, deliveryId: current.deliveryId, childSessionId: current.childSessionId, disposition: "discarded", branch: integration.source.branch, worktreePath: integration.source.checkoutPath };
     const branchDeleted = (record: HcWorkerRecord) => hasWorktree(record) && Boolean(record.discardRemovalCompletedAt) &&
       (/\"branch_outcome\"\s*:\s*\"deleted\"/.test(record.discardRemovalResult ?? "") || /branch no longer exist/i.test(record.discardRemovalResult ?? ""));
     if (current.state === "discarded") return text(`${kindName} ${params.agent} was already discarded; receipt ${current.deliveryId} made no changes.`, { ...base, state: "closed", removed: hasWorktree(current), branchDeleted: branchDeleted(current), checkoutRetained: !hasWorktree(current), alreadyDiscarded: true });
@@ -1437,9 +1456,11 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     }
     const after: string = outcome.finished.details.integrationOutcome.targetTip;
     const receipt = outcome.finished.details.integrationOutcome as HcWorkerOutcome;
+    // After the lifecycle lock is released and the whole native finish succeeded; its line joins the finish text below.
+    const finished = withHook(outcome.finished, await closeRow(ctx, outcome.finished.details.childSessionId, finishOutcome(receipt)));
     const headline = `Worker auto-finished: ${(receipt.label ?? agent).slice(0, 50)}${receipt.taskId ? ` [${receipt.taskId}]` : ""} (${agent}) at ${after.slice(0, 12)}`;
     return { ...env, body: [headline,
-      (outcome.finished.content[0] as { text: string }).text,
+      (finished.content[0] as { text: string }).text,
       `${receipt.integration.worktree === false ? "Accepted on shared checkout (no merge)" : "Merged"} into ${outcome.branch} in ${outcome.target}: ${receipt.mergeRange ?? `${outcome.before}..${after}`}.`,
       `Revert: ${receipt.revert ?? `git -C ${outcome.target} revert --no-edit ${outcome.before}..${after}`}`,
       "Auto-finished: small work, needsAlgorant:false, diff inside declared scope and checks passed at this HEAD; no owner call needed.",

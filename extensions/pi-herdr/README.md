@@ -176,6 +176,16 @@ job you never need to hear from (a server, the agent Chromium) keeps plain
 child only on an explicit request with native `hc keep`/`--keep`, then release
 with native close/remove. No label taxonomy, expiry table or parent-side cleanup watcher.
 
+## Herdra lifecycle rows (herdra task-250)
+
+Herdra's main terminal owns one `herdra-open` row per Worker or manus it starts. `herdra-work.ts` calls Herdra's `~/Projects/herdra/bin/herdra-open` at exactly two edges and nothing else: no tool, state file, timer, watcher or notification.
+
+- **`work-start <key> <kind> <project> <address> <label> [<project>:<task>]`** after a confirmed launch: `startWorker`, `manusStart`, and `continueWorker` only where it launches a new terminal (a replacement invocation repeats it with its new address; a kept terminal keeps its address, an unconfirmed launch makes no call).
+- **`work-done <key> <outcome> [<undo>]`** after the whole native finish or discard succeeded and its lifecycle lock was released: `worker_finish`, `worker_discard` and auto-finish, including their already-finished/already-discarded returns. A real merge (a worktree and a non-empty `a..b` range) passes the receipt's `revert` as the undo; accepted-without-merge and discard pass none.
+- **Key:** the child's `childSessionId`, raw. It is minted once at launch and copied unchanged by continuation, redelivery and adoption; `deliveryId` and `invocationId` change.
+- **Who:** only a live, parentless Pi (`hc get`: `state` live, `parent` null, `status.app` pi) whose `where` label is exactly `herdra / main`, with `herdr.space` and `herdr.tab` and no `kind`, `starter` or `pi.worker.invocation`. Its hc name is null, so no name is tested. `work-start` also requires that this terminal first launched the attempt (the owner of the root of the `recoveryOfDeliveryId` chain), so a child first launched by another owner and later adopted never gets a row. `work-done` needs only the Herdra-main proof: herdra-open writes nothing for a key it has no row for or one already closed. Every other caller, helper, Ceph and Worker does nothing.
+- **Failure:** the tool call still succeeds with the native outcome intact. The result gains one distinct line, `Herdra row hook <edge> NOT confirmed (key ...): <exit and stderr | timed out after 5 s, row state unknown | herdra-open not found>`, and `details.herdraHook`. Nothing native is rolled back, repeated or suggested again. The call is bounded at 5 s (herdra-open reads no hc and appends under a flock). The cards render only `details` fields, so the line is read in the result text, not on the card.
+
 ## Scriptify
 
 `scriptify` resolves the caller's actual work pane before launch (native

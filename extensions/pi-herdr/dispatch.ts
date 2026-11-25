@@ -19,6 +19,7 @@ import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, terminalWho } from "../../scri
 import { CHILD_EXIT, coreId as appCoreId, hcJson, hcMachines } from "./core.ts";
 import { appCommand, localAppHost, resolveAppSpace, type AppHost } from "./app-host.ts";
 import { ownerExtensionArgs, type StartWorker } from "./workers.ts";
+import { withHook, workStart, type HookCaller } from "./herdra-work.ts";
 
 /**
  * One call to start any child, manus or Ceph (task-65 contract, task-559). Each tool checks its
@@ -70,7 +71,7 @@ const CephParameters = Type.Object({
   from: From,
 }, { additionalProperties: false });
 
-type Caller = { address: string; route: string; label: string; core: string; space?: string; tab?: string; labels: Record<string, string> };
+type Caller = { address: string; route: string; label: string; core: string; space?: string; tab?: string; labels: Record<string, string>; hc: HookCaller["record"] };
 type Result = AgentToolResult<Record<string, unknown>>;
 
 const result = (text: string, details: Record<string, unknown>): Result => ({ content: [{ type: "text", text }], details });
@@ -81,7 +82,7 @@ async function caller(): Promise<Caller> {
   if (!id) throw new Error("Dispatch tools require a native hc terminal (HC_TERMINAL_ID is unset).");
   const [self, server] = await Promise.all([hcJson(["get", id]), hcJson(["server", "status"])]);
   if (typeof self.address !== "string" || typeof server.core?.id !== "string") throw new Error("hc did not return this terminal's address and core id.");
-  return { address: self.address, route: self.name || self.address, label: terminalWho(self).label, core: server.core.id, space: self.labels?.["herdr.space"] || undefined, tab: self.labels?.["herdr.tab"] || undefined, labels: self.labels ?? {} };
+  return { address: self.address, route: self.name || self.address, label: terminalWho(self).label, core: server.core.id, space: self.labels?.["herdr.space"] || undefined, tab: self.labels?.["herdr.tab"] || undefined, labels: self.labels ?? {}, hc: self };
 }
 
 /** `from` must be an open request or blocker addressed to this terminal; checked before anything starts. */
@@ -382,12 +383,14 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     } catch (error) {
       throw new Error(`Manus ${label} (${name}, ${started.address}) is running, but its record ${record.deliveryId} could not record that terminal. Finish or discard it by name. ${diagnosticText(error)}`);
     }
+    // The launch is confirmed and recorded: the row hook never throws, and runs before the tab step can fail.
+    const rowHook = await workStart(record, started.address, { core: self.core, terminal: self.address, record: self.hc });
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
     // Task-free briefs only: a Task-backed manus reads its contract from the Task.
     const cold = params.brief === undefined ? undefined : await coldRead("brief", label, params.brief, repo.repoRoot, ctx);
-    return result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed });
+    return withHook(result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed }), rowHook);
     } catch (error) {
       // A switch that already happened stays applied; a later failure never hides it.
       throw new Error(`${diagnosticText(error)}${manusSwitch ? `${manusSwitch} That cutover stays applied.` : ""}`);
