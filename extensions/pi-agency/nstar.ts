@@ -2,8 +2,8 @@ import { Type } from "typebox";
 import { getKeybindings } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONTEXT_PREFIX_EVENT, type ContextPrefix } from "../lib/context-prefix.ts";
-import { hcEndpoint } from "../pi-herdr/core.ts";
-import { hcAddress, peerName, terminalWho } from "../../scripts/whois.ts";
+import { hcEndpoint, hcFind } from "../pi-herdr/core.ts";
+import { peerName, terminalWho } from "../../scripts/whois.ts";
 import { headlineOf, inboxKey, openMessages, type Envelope } from "./inbox/envelope.ts";
 import { requireContract } from "./workers/contract.ts";
 import { nativeProjectIdentity } from "./workers/shared.ts";
@@ -30,7 +30,8 @@ export function registerNstar(pi: ExtensionAPI): void {
   let author = "Agent";
   let self: string | undefined;
   let endpoint: Starter | undefined;
-  let starter: Starter | undefined;
+  // The starter's route (a name or address) as labelled at launch; never resolved before an incoming message needs it.
+  let starterRoute: string | undefined;
   let pending: Promise<void> = Promise.resolve();
   let live = false;
   let submittedText: string | undefined;
@@ -70,7 +71,7 @@ export function registerNstar(pi: ExtensionAPI): void {
 
   async function bind(next: Job, ctx: ExtensionContext, brief?: string): Promise<void> {
     await note(ctx, next.binding, { initialize: !("taskId" in next.binding) && brief !== undefined, brief });
-    job = { ...next, starter: next.starter ?? starter };
+    job = next;
     if (!next.automatic) pi.appendEntry(BINDING, { sessionId: ctx.sessionManager.getSessionId(), job: next });
   }
   function capture(ctx: ExtensionContext, kind: "approval" | "handoff", attribution: string, text: string, id: string, at?: string): Promise<void> {
@@ -87,6 +88,21 @@ export function registerNstar(pi: ExtensionAPI): void {
       ...open.map((m) => `- ${m.id} ${m.kind} ${m.from.label || m.from.terminal} → ${m.to.label || m.to.terminal}: ${m.headline} (${inboxKey(m.to) === key ? "owed by you" : "awaiting a reply"})`)].join("\n");
   }
 
+  /**
+   * The starter's terminal now, or undefined when its route definitively names no live terminal (hc not_found,
+   * or a gone terminal): names move and a restarted starter may be unnamed, so a stale route proves nothing.
+   * Any other failure (unreachable core, a machine/terminal route this core cannot verify) throws.
+   */
+  async function currentStarter(route: string): Promise<Starter | undefined> {
+    if (!route.includes("/")) {
+      const found = await hcFind(route);
+      if (!found || found.state !== "live") return undefined;
+      route = found.address;
+    }
+    const { terminal, core } = await hcEndpoint(route);
+    return { terminal, core };
+  }
+
   // Native Workers publish their already-validated control binding, not a second lookup/registry.
   const detach = pi.events.on(NSTAR_WORKER, (value: unknown) => {
     const data = value as WorkerBinding;
@@ -94,7 +110,7 @@ export function registerNstar(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    live = true; archived.clear(); job = undefined; pending = Promise.resolve(); submittedText = undefined; endpoint = undefined;
+    live = true; archived.clear(); job = undefined; pending = Promise.resolve(); submittedText = undefined; endpoint = undefined; starterRoute = undefined; author = "Agent"; self = undefined;
     // One-use proof of an actual editor submission. CLI/hc/RPC cannot mint it.
     if (ctx.mode === "tui") {
       const stop = ctx.ui.onTerminalInput((data) => {
@@ -103,24 +119,24 @@ export function registerNstar(pi: ExtensionAPI): void {
       pi.on("session_shutdown", stop);
     }
     const saved = ctx.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === BINDING && (entry.data as any)?.sessionId === ctx.sessionManager.getSessionId()).at(-1);
-    if (saved?.type === "custom") job = (saved.data as { job?: Job }).job;
+    // A persisted starter is never identity: it is resolved again from the live terminal when a message arrives.
+    const savedJob = saved?.type === "custom" ? (saved.data as { job?: Job }).job : undefined;
+    if (savedJob) job = { ...savedJob, starter: undefined };
     try {
       if (process.env.HC_TERMINAL_ID) {
         const { terminal, core, record } = await hcEndpoint(process.env.HC_TERMINAL_ID);
         endpoint = { terminal, core };
         author = terminalWho(record).label;
         self = record.name ?? terminal;
-        const source = record.labels?.starter ? await hcAddress(record.labels.starter) : undefined;
-        starter = source?.terminal && source.core ? { terminal: source.terminal, core: source.core } : undefined;
+        starterRoute = record.labels?.starter || undefined;
         if (record.labels?.["pi.worker.invocation"]) { job = undefined; return; }
         if (record.labels?.kind === "manus") {
           const task = /(?:^|:)(task-\d+(?:-\d+)?)$/.exec(record.labels.task ?? "")?.[1];
           const cwd = (await nativeProjectIdentity(ctx.cwd)).repoRoot;
-          await bind({ binding: task ? { cwd, taskId: task } : { cwd, label: record.labels.label }, label: record.labels.label, starter, automatic: true }, ctx);
+          await bind({ binding: task ? { cwd, taskId: task } : { cwd, label: record.labels.label }, label: record.labels.label, automatic: true }, ctx);
           return;
         }
       }
-      if (job) job = { ...job, starter: starter ?? job.starter };
     } catch (error) { warn(ctx, error); }
   });
 
@@ -136,7 +152,11 @@ export function registerNstar(pi: ExtensionAPI): void {
     const { env, ctx } = value as { env: Envelope; ctx: ExtensionContext };
     if (!job) return;
     pending = pending.then(async () => {
-      const source = job?.starter;
+      let source = job?.starter;
+      if (!source && starterRoute) {
+        try { source = await currentStarter(starterRoute); }
+        catch (error) { warn(ctx, error); } // unverifiable: an ordinary hand-off below
+      }
       const from = peerName(env.from, env.to.machine);
       // A starter relay may carry Algorant's words: verbatim. Any other message is a one-line hand-off.
       if (source?.terminal === env.from.terminal && source?.core === env.from.core) await capture(ctx, "approval", `relayed by ${from}`, env.body, env.id, env.at);
