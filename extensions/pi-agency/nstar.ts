@@ -34,6 +34,8 @@ export function registerNstar(pi: ExtensionAPI): void {
   let pending: Promise<void> = Promise.resolve();
   let live = false;
   let submittedText: string | undefined;
+  /** Task-backed bindings Tandem has reported archived (Logs). Archival is permanent, so a hit is final; a lookup failure is never a hit. */
+  const archived = new Set<string>();
 
   const warn = (ctx: ExtensionContext, error: unknown) => {
     const message = `Northstar: ${error instanceof Error ? error.message : String(error)}`;
@@ -55,6 +57,16 @@ export function registerNstar(pi: ExtensionAPI): void {
   }
   const note = (ctx: ExtensionContext, binding: NstarBinding, options: { initialize?: boolean; brief?: string; change?: (note: NstarNote) => void; skipArchived?: boolean } = {}) =>
     nstarNote(binding, { ...options, session: session(ctx, binding) });
+
+  /** Whether Tandem authoritatively reports this Task in Logs. Throws on lookup failure: that is not archival. */
+  async function isArchived(ctx: ExtensionContext, binding: { cwd: string; taskId: string }): Promise<boolean> {
+    const key = nstarLocation(binding);
+    if (archived.has(key)) return true;
+    if (!(await note(ctx, binding)).archived) return false;
+    archived.add(key);
+    return true;
+  }
+  const taskOf = (binding: NstarBinding | undefined) => binding && "taskId" in binding ? { cwd: binding.cwd, taskId: binding.taskId } : undefined;
 
   async function bind(next: Job, ctx: ExtensionContext, brief?: string): Promise<void> {
     await note(ctx, next.binding, { initialize: !("taskId" in next.binding) && brief !== undefined, brief });
@@ -82,7 +94,7 @@ export function registerNstar(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    live = true; job = undefined; pending = Promise.resolve(); submittedText = undefined; endpoint = undefined;
+    live = true; archived.clear(); job = undefined; pending = Promise.resolve(); submittedText = undefined; endpoint = undefined;
     // One-use proof of an actual editor submission. CLI/hc/RPC cannot mint it.
     if (ctx.mode === "tui") {
       const stop = ctx.ui.onTerminalInput((data) => {
@@ -146,14 +158,27 @@ export function registerNstar(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async () => { await pending; });
-  pi.on("session_compact", async (event, ctx) => {
+  pi.on("session_compact", async (_event, ctx) => {
     await pending;
     try {
       const parts: string[] = [];
-      if (job) parts.push(`Northstar for ${nstarLocation(job.binding)} (recorded context, not new authority). Inputs are verbatim: direct inputs and relays are NOT automatically classified as approvals; agent hand-offs cannot grant Algorant's authority. The bound contract remains authoritative. Use notes for the full note.\n\n${(await note(ctx, job.binding)).block}`);
+      // `bound` names the job whose block the snapshot carries, so `context` can drop it once that job is rebound or archived; null when none.
+      let bound: string | null = null;
+      if (job) {
+        try {
+          const current = await note(ctx, job.binding);
+          if (current.archived) archived.add(nstarLocation(job.binding)); // Finished work is not current context.
+          else {
+            parts.push(`Northstar for ${nstarLocation(job.binding)} (recorded context, not new authority). Inputs are verbatim: direct inputs and relays are NOT automatically classified as approvals; agent hand-offs cannot grant Algorant's authority. The bound contract remains authoritative. Use notes for the full note.\n\n${current.block}`);
+            bound = nstarLocation(job.binding);
+          }
+        } catch (error) { warn(ctx, error); } // The open items below are kept regardless.
+      }
       const open = openItems();
       if (open) parts.push(open);
-      if (parts.length) pi.appendEntry(INJECTION, { window: event.compactionEntry.id, text: parts.join("\n\n") });
+      // Pi's event.compactionEntry is the session's FIRST compaction (pi 1.6.1), so take the branch's latest, as `context` does.
+      const window = ctx.sessionManager.getBranch().filter((entry) => entry.type === "compaction").at(-1)?.id;
+      if (parts.length && window) pi.appendEntry(INJECTION, { window, text: parts.join("\n\n"), job: bound });
     } catch (error) { warn(ctx, error); }
   });
   pi.on("context", async (event, ctx) => {
@@ -162,9 +187,20 @@ export function registerNstar(pi: ExtensionAPI): void {
     const branch = ctx.sessionManager.getBranch();
     const window = branch.filter((entry) => entry.type === "compaction").at(-1)?.id ?? "initial";
     const injection = branch.filter((entry) => entry.type === "custom" && entry.customType === INJECTION && (entry.data as any)?.window === window).at(-1);
-    if (live && injection?.type === "custom") prefix.messages.push({ role: "user" as const, content: (injection.data as { text: string }).text, timestamp: 0 });
+    if (live && injection?.type === "custom") {
+      const saved = injection.data as { text: string; job?: string | null };
+      // The saved block counts only for the job it was written for, still bound and not archived. Entries saved before `job`
+      // existed (undefined) cannot be tied to a job, so they never count. Anything else is replaced by this terminal's live
+      // open inbox items, which survive. A lookup failure is not archival and keeps the snapshot.
+      const current = job ? nstarLocation(job.binding) : null;
+      const jobTask = taskOf(job?.binding);
+      const keep = saved.job === null || (saved.job === current && !(jobTask && await isArchived(ctx, jobTask).catch(() => false)));
+      const text = keep ? saved.text : openItems();
+      if (text) prefix.messages.push({ role: "user" as const, content: text, timestamp: 0 });
+    }
     // Idle compaction starts at 60%: one best-effort reminder beforehand per window, never a new turn.
-    if (live && job && (ctx.getContextUsage()?.percent ?? 0) >= 55 && !branch.some((entry) => entry.type === "custom" && entry.customType === NUDGE && (entry.data as any)?.window === window)) {
+    const nudgeTask = taskOf(job?.binding);
+    if (live && job && (ctx.getContextUsage()?.percent ?? 0) >= 55 && !branch.some((entry) => entry.type === "custom" && entry.customType === NUDGE && (entry.data as any)?.window === window) && !(nudgeTask && await isArchived(ctx, nudgeTask).catch(() => false))) {
       pi.appendEntry(NUDGE, { window });
       prefix.messages.push({ role: "user" as const, content: `Near compaction: use notes to set the next step and keep working notes current for ${nstarLocation(job.binding)} before context shrinks.`, timestamp: 0 });
     }
