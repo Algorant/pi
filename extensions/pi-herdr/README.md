@@ -463,11 +463,14 @@ a requested result is never counted as verified. Rerun is explicit, not a watche
 ### Self-reload at a turn boundary (one fingerprint, three trigger points)
 
 One fingerprint and one mechanism, reached from three places in a Pi's own lifecycle. `fingerprint.ts`
-hashes the sources this Pi actually loads by path, mtime and size, never by reading a file: the agent
+hashes the sources this Pi actually loads by path, mtime and size, never by reading a source's contents (the one file it parses is the project's `.pi/settings.json`, for its `extensions` field): the agent
 dir's `extensions`, `skills`, `prompts` and `themes` (under `PI_CODING_AGENT_DIR`, else `~/.pi/agent`)
 plus `settings.json`, `config-manifest.json`, `model-roles.json`, `models.json` and `keybindings.json`,
-and the current project's `.pi` `extensions`, `skills`, `prompts` and `themes` plus `AGENTS.md`,
-`SYSTEM.md` and `APPEND_SYSTEM.md`. The project half is what `/pi-reload` never covered: a project's
+and the current project's `.pi` `extensions`, `skills`, `prompts` and `themes` plus `settings.json`, `AGENTS.md`,
+`SYSTEM.md` and `APPEND_SYSTEM.md`, and every local path in that project `settings.json`'s `extensions`
+(resolved as Pi does: relative to the project `.pi`, `~` and absolute allowed, `+path` included, `-`/`!`/`builtin:`
+entries skipped; a directory is walked without `node_modules` or `.git`, a glob stamps the directory it starts in),
+so an extension kept outside `.pi/` still triggers the reload. Local `packages` and user-settings `extensions` paths are not followed. The project half is what `/pi-reload` never covered: a project's
 own extension, or a change outside `~/.pi`'s history. `session_start` records the stamp once
 (about 1-2 ms and no child process, no timer, no watcher for ~220 entries; re-measured 1.65-2.17 ms
 per check on a real Pi); all three triggers compare against it and never write it back unless a reload lands.
