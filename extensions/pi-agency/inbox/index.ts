@@ -5,11 +5,11 @@ import { createAgentSendRenderer, renderAgentMessage } from "../../pi-ui/tool-ui
 import { NSTAR_INBOX } from "../nstar-note.ts";
 import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, readTarget, sendAgentMessage, statusText, type SendParams } from "./send.ts";
-import { requestStart, withHook } from "../../pi-herdr/herdra-work.ts";
+import { isCephTerminal, requestStart, withHook } from "../../pi-herdr/herdra-work.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
 import { addressText, ageText, closeMessage, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, recordDelivery, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
-import { hcJson, hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
-import { collectFailures, renderFailures, startedHelpers, trackScope, validateFailures } from "../../pi-tandem/failure-summary.ts";
+import { hcEndpoint, hcJson, hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
+import { collectCephFailures, collectFailures, deliveredRequest, renderFailures, startedHelpers, trackScope, validateFailures } from "../../pi-tandem/failure-summary.ts";
 import { listHcWorkerRecords } from "../workers/hc-record.ts";
 import { hcAddress, KIND_KEY, peerName, peerText } from "../../../scripts/whois.ts";
 
@@ -249,7 +249,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
   pi.registerTool({
     name: "agent_send",
     label: "Agent Send",
-    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. A recipient that is working holds a request or result until that turn ends, then starts the next turn with it; only a blocked message or a reply (reply_to) is steered into the running turn. interrupt: true stops the recipient's current turn first, then queues this message for its next turn. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is split at its last word boundary within 160, and the rest becomes the first body line before any existing details (nothing is dropped). Kinds: request, result, blocked. A reply_to message id closes that request; so does a dispatch naming it (from:) or its explicitly linked Task (the sender's project-qualified task= label) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen). On a manus’s final result use complete: ‘track’; omit it on plans, questions, check-ins and ordinary results. The summary is attached automatically; never write it yourself.",
+    description: "Queue a durable labelled message to another Pi. The recipient is terminal: an HC terminal id/name, or machine/terminal for another machine in hc machine ls, resolved at send time by its own core. Use hc ls for HC discovery; do not reuse a saved Herdra terminal id after relaunch. Delivery uses Pi's conversation API, never its composer; queued messages survive reload. A recipient that is working holds a request or result until that turn ends, then starts the next turn with it; only a blocked message or a reply (reply_to) is steered into the running turn. interrupt: true stops the recipient's current turn first, then queues this message for its next turn. Line 1 of body is the answer: one headline line of at most 160 characters, details below; a longer first line is split at its last word boundary within 160, and the rest becomes the first body line before any existing details (nothing is dropped). Kinds: request, result, blocked. A reply_to message id closes that request; so does a dispatch naming it (from:) or its explicitly linked Task (the sender's project-qualified task= label) completing or being cancelled. The result says what the recipient is doing now. Results, questions and blockers go up one level: a manus to its starter, a Ceph to Herdra (local terminal herdra, or its supplied machine-qualified route), which relays choices Algorant must make. History: ~/.pi/agent/scripts/inbox (open, recent, thread, close, reopen). On a manus’s final result use complete: ‘track’; omit it on plans, questions, check-ins and ordinary results. A Ceph’s result with reply_to to a request it was sent carries that request’s summary. The summary is attached automatically; never write it yourself.",
     promptSnippet: "Message another Pi by native HC terminal/name using its durable inbox.",
     parameters: {
       type: "object",
@@ -278,6 +278,14 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         const own = await hcAddress(process.env.HC_TERMINAL_ID);
         const workers = new Set((await listHcWorkerRecords()).filter((record) => record.owner.core === own.core && record.owner.terminal === own.terminal).map((record) => record.invocationId));
         failures = collectFailures(pi, context, trackScope(context.sessionManager.getSessionId()), { children: { core: own.core, workers, helperTerminals: startedHelpers(context.sessionManager.getBranch() as any) } });
+      } else if (send.kind === "result" && send.reply_to && process.env.HC_TERMINAL_ID) {
+        // A Ceph's answer to a request it was delivered carries that request's own failures and nothing else's; any other
+        // reply (and any send that is not exactly kind result with reply_to) carries none.
+        const { terminal, core, record } = await hcEndpoint(process.env.HC_TERMINAL_ID);
+        if (isCephTerminal({ core, terminal, record }) && deliveredRequest(context.sessionManager.getBranch() as any, context.sessionManager.getSessionId(), send.reply_to, { core, terminal })) {
+          const children = (await listHcWorkerRecords()).filter((child) => child.owner.core === core && child.owner.terminal === terminal);
+          failures = collectCephFailures(pi, context, send.reply_to, { core, terminal }, children);
+        }
       }
       const { env, file, interruptOutcome, self } = await sendAgentMessage(context, { ...send, ...(failures ? { failures } : {}) });
       const to = peerName(env.to, localMachine());

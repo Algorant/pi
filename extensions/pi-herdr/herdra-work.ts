@@ -117,13 +117,26 @@ export async function workDone(key: string, outcome: { text: string; undo?: stri
  * the status read reports) whose `where` is exactly `<project> / main`, carrying no Worker, manus, helper or
  * starter marking (`kind` only ever `ceph`). A label alone never makes a Ceph: undefined for anything else.
  */
-function cephMainProject(record: { state?: string; parent?: unknown; status?: { app?: string }; labels?: Record<string, string> }, status: { state: string }): string | undefined {
+export function cephMainProject(record: { state?: string; parent?: unknown; status?: { app?: string }; labels?: Record<string, string> }, status?: { state: string }): string | undefined {
   const { state, parent, labels = {} } = record;
   const where = labels.where ?? "";
-  if (state !== "live" || record.status?.app !== "pi" || parent !== null || status.state === "background" || !where.endsWith(" / main")) return undefined;
+  if (state !== "live" || record.status?.app !== "pi" || parent !== null || status?.state === "background" || !where.endsWith(" / main")) return undefined;
   if ((labels.kind && labels.kind !== "ceph") || labels.starter || labels["pi.worker.invocation"]) return undefined;
   const project = where.slice(0, -" / main".length);
   return project && !project.includes(" / ") ? project : undefined;
+}
+
+/**
+ * Whether this terminal is a Ceph for failed-call attribution (task-852): a live, parentless Pi that is not Herdra main
+ * and carries no Worker invocation, and either is labelled `kind=ceph` explicitly (a `ceph_start` Ceph) or, with no `kind`
+ * label at all, is the project's main-tab Pi by the same `cephMainProject` test requestStart uses (a Ceph started by hand).
+ * Any other kind (manus, worker, helper) is refused.
+ */
+export function isCephTerminal(caller: HookCaller): boolean {
+  const { state, parent, status, labels = {} } = caller.record;
+  if (isHerdraMain(caller) || state !== "live" || status?.app !== "pi" || parent !== null || labels["pi.worker.invocation"]) return false;
+  if (labels.kind) return labels.kind === "ceph";
+  return cephMainProject(caller.record) !== undefined;
 }
 
 /**
