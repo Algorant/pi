@@ -7,10 +7,10 @@ import { createDispatchRenderer, type DispatchTool } from "../pi-ui/tool-ui/cust
 import { closeMessage, ID_PATTERN, isOpen, localMachine, messages, readEvents } from "../pi-agency/inbox/envelope.ts";
 import { localSettingsPath, temporaryAgencySettings } from "../pi-agency/local-settings.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
-import { resolveFableResearcherModel, resolveReviewEntry, resolveRoleEntry } from "../pi-agency/model-roles.ts";
-import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
+import { describeSelection, explicitFlagArgs, explicitLaunchArgs, selectLaunchModel, type LaunchOverride, type LaunchSelection } from "../pi-agency/launch-model.ts";
+import { THINKING_LEVELS } from "../pi-agency/subagents/profile.ts";
 import { WORKER_CONTEXT_FLAG } from "../pi-agency/workers/context.ts";
-import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, manusModelArgument, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
+import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch, checkoutBranch, requireActiveTask, tandemShow } from "../pi-agency/workers/shared.ts";
 import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
 import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
@@ -25,13 +25,21 @@ import { withHook, workStart, type HookCaller } from "./herdra-work.ts";
  * One call to start any child, manus or Ceph (task-65 contract, task-559). Each tool checks its
  * preconditions before any side effect, launches once, checks the launch, and returns. None selects
  * or focuses anything (except the approved new-project space of ceph_start), waits, polls, retries,
- * falls back or overrides a model: hc, the Herdr app, Tandem, Worktrunk and the inbox stay the authorities.
+ * or falls back: hc, the Herdr app, Tandem, Worktrunk and the inbox stay the authorities. Every one that
+ * starts a Pi takes the same optional exact `model` and `thinking` (task-851, pi-agency/launch-model.ts):
+ * omitted, the role/set default; given, exact, preflighted and never replaced.
  */
 const NAME = "^[a-z0-9_-]{1,32}$";
 const NAME_PATTERN = new RegExp(NAME);
 const HELPER_KINDS = ["scout", "researcher", "reviewer"] as const;
 /** The Worker start requires a direction; with none given, the Task contract and managed brief are the direction. */
 const DEFAULT_WORKER_DIRECTION = "Start your assigned work under the authoritative managed contract. Report the actual outcome to your owner.";
+
+/** The one per-launch model pair every Pi-starting tool takes (task-851); omitted fields inherit the role's choice and level. */
+const ModelOverride = {
+  model: Type.Optional(Type.String({ minLength: 3, description: "Exact provider/id to run this child on (e.g. anthropic/claude-fable-5-1). Omitted: the role/set default. Checked before anything starts (catalog, configured auth, provider policy, quota); refuses instead of substituting, never cut over or switched on a 429." })),
+  thinking: Type.Optional(Type.Union([...THINKING_LEVELS].map((level) => Type.Literal(level)), { description: "Thinking level for this child. Omitted: the role's level (or, with model, the role's level for that model if supported). Refused when the model does not support it; with no model, the role default's model is resolved first and then locked." })),
+};
 
 /** A label is 2-5 plain words; its slug is the hc name (and branch). */
 const LABEL_MAX = 80;
@@ -48,8 +56,7 @@ const DendraParameters = Type.Object({
   worktree: Type.Optional(Type.Boolean({ description: "Worker: default true, false explicitly skips isolation and uses this checkout." })),
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true delivers for Algorant judgement and forbids auto-finish." })),
   prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: optional temporary direction; durable scope stays in the Task." })),
-  benchmarkModel: Type.Optional(Type.Union([Type.Literal("openai/gpt-6-luna"), Type.Literal("anthropic/claude-sonnet-5-5")], { description: "Worker only: explicit benchmark contender; high thinking is fixed, Luna uses Fast, and strict fresh quota preflight applies. No general model override." })),
-  fableResearcher: Type.Optional(Type.Boolean({ description: "Researcher only: explicitly select anthropic/claude-fable-5-1 at fixed high thinking. Use only when Algorant explicitly instructs this selection; exact catalog, configured auth and fresh quota are required. Refuses rather than falling back." })),
+  ...ModelOverride,
   from: From,
 }, { additionalProperties: false });
 
@@ -60,6 +67,7 @@ const ManusParameters = Type.Object({
   label: Label("the Task title; the label is also its tab name and its slug its branch"),
   worktree: Type.Optional(Type.Boolean({ description: "Default true: own Worktrunk checkout; false explicitly skips it (research/shared checkout)." })),
   direction: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Optional extra direction appended to the brief." })),
+  ...ModelOverride,
   from: From,
 }, { additionalProperties: false });
 
@@ -68,6 +76,7 @@ const CephParameters = Type.Object({
   folder: Type.String({ minLength: 1, description: "Existing project directory: its own Git checkout root with a prepared Tandem workspace (projectify makes them first)." }),
   kickoff: Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Agreed context for the new Ceph; the caller's return route and \"report back when ready\" are appended." }),
   label: Type.Optional(Type.String({ minLength: 1, maxLength: LABEL_MAX, description: "Its name for Algorant, stored as hc label label=. Default: \"<project> Ceph\". The hc name stays the project (its route)." })),
+  ...ModelOverride,
   from: From,
 }, { additionalProperties: false });
 
@@ -175,37 +184,35 @@ const COLD_READ = fileURLToPath(new URL("../../skills/audit/cold-read.md", impor
 /**
  * The one read-only helper launch: `dendra_start` scout/researcher/reviewer, and the cold read after a
  * brief or kickoff. Preconditions are settled by the caller; this names the terminal, resolves the
- * child's own role (cutting over only when quota alone blocks it) and runs one hc child. It never
- * selects, waits, polls or retries.
+ * child's model (a role default cuts over only when quota alone blocks it; an explicit one never)
+ * and runs one hc child. It never selects, waits, polls or retries.
  */
-async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: string, task: string, ctx: ExtensionContext, fableResearcher?: boolean): Promise<{ name: string; address: string; switched?: Record<string, unknown>; helperSwitch: string; fable?: Record<string, unknown> }> {
+async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: string, task: string, ctx: ExtensionContext, override: LaunchOverride = {}): Promise<{ name: string; address: string; switched?: Record<string, unknown>; helperSwitch: string; selection: LaunchSelection }> {
   const name = await nameFor(label);
-  // Helpers resolve their own role inside the child; resolving it here — after every
-  // read-only precondition, before any terminal — refuses a blocked launch, cutting over
-  // first only when quota alone blocks it. A reviewer's author model is this Pi's own
-  // current model (the same fact it publishes as pi.model, which the child reads), so a
-  // session without one fails here instead of launching a reviewer that cannot route.
+  // The child's model is settled here, after every read-only precondition and before any terminal:
+  // a blocked or unavailable launch refuses first, cutting a role default over only when quota alone
+  // blocks it. A role default launches without a model argument (the child resolves the same role
+  // itself); an explicit model or thinking is exact, passed to the child, and kept there. A
+  // reviewer's author model is this Pi's own current model (the fact it publishes as pi.model, which
+  // a default child reads), so a default reviewer without one fails here; an explicit reviewer model
+  // replaces that routing.
   const callerModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-  if (kind === "reviewer" && callerModel === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
-  if (fableResearcher && kind !== "researcher") throw new Error("fableResearcher is available only for kind researcher. Nothing was started.");
-  const fable = fableResearcher ? resolveFableResearcherModel(ctx.modelRegistry) : undefined;
-  const helper = fable || kind === "reviewer"
-    ? (fable ? undefined : await resolveRoleForSwitch("review", ctx.modelRegistry, () => resolveReviewEntry(callerModel!, ctx.modelRegistry), { callerModel }))
-    : await resolveRoleForSwitch("subagent", ctx.modelRegistry, () => resolveRoleEntry("subagent", ctx.modelRegistry));
-  if (helper && "refusal" in helper) throw new Error(`${helper.refusal} Nothing was started.`);
-  const helperSwitch = helper && helper.switched
-    ? ` Set ${helper.switched.from} → ${helper.switched.to} for ${kind} (cutover ${helper.switched.operation ?? "none"}${helper.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+  if (kind === "reviewer" && callerModel === undefined && override.model === undefined) throw new Error(`A reviewer needs this Pi's current model (published as pi.model) to choose the opposite-company reviewer; nothing was started.`);
+  const resolved = await selectLaunchModel(kind === "reviewer" ? "review" : "subagent", override, ctx.modelRegistry, { callerModel });
+  if ("refusal" in resolved) throw new Error(`${resolved.refusal} Nothing was started.`);
+  const helperSwitch = resolved.switched
+    ? ` Set ${resolved.switched.from} → ${resolved.switched.to} for ${kind} (cutover ${resolved.switched.operation ?? "none"}${resolved.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
     : "";
-  // The caller is the native parent: the report comes to its inbox, a reviewer reads its pi.model.
+  // The caller is the native parent: the report comes to its inbox, a default reviewer reads its pi.model.
   // The task is Pi's first message on its command line; child-exit tells the parent if it ends unreported.
   let started: any;
   try {
     started = await launchRaw(["--bg", "--rm", "--no-notify", "--json", "--name", name, "--cwd", ctx.cwd, "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=${kind}`,
-      "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), ...(fable ? ["--model", `${fable.model}:${fable.thinking}`, "--agency-fable"] : []), "--agency-profile", kind, "--", `${task.trim()}\n\nUse the automatic failed-call summary in your final report for this invocation; do not infer failures or repeat the summary.`], name);
+      "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), ...explicitLaunchArgs(resolved.selection), "--agency-profile", kind, "--", `${task.trim()}\n\nUse the automatic failed-call summary in your final report for this invocation; do not infer failures or repeat the summary.`], name);
   } catch (error) {
     throw new Error(`${diagnosticText(error)}${helperSwitch ? `${helperSwitch} That cutover stays applied.` : ""}`);
   }
-  return { name, address: started.address, ...(helper?.switched ? { switched: helper.switched } : {}), helperSwitch, ...(fable ? { fable: { model: fable.model, thinking: fable.thinking, quota: fable.quota, quotaCheckedAt: fable.quotaCheckedAt } } : {}) };
+  return { name, address: started.address, ...(resolved.switched ? { switched: resolved.switched } : {}), helperSwitch, selection: resolved.selection };
 }
 
 /**
@@ -257,15 +264,14 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   // Rows rebuilt by /reload or resume before session_start registers the tools keep their cards.
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
 
-  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: "openai/gpt-6-luna" | "anthropic/claude-sonnet-5-5"; fableResearcher?: boolean; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function dendraStart(params: { kind: string; label?: string; task?: string; taskId?: string; brief?: string; prompt?: string; worktree?: boolean; needsAlgorant?: boolean; model?: string; thinking?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     if (params.kind === "worker") {
       requireContract(params);
       if (params.label !== undefined) labelOf(params.label, "");
-      if (params.fableResearcher !== undefined) throw new Error("fableResearcher is for researcher helpers, not workers. Nothing was started.");
       if (params.task !== undefined) throw new Error("dendra_start worker takes taskId or brief, not task. Nothing was started.");
       requireOpenRequest(params.from, self);
-      const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, benchmarkModel: params.benchmarkModel, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
+      const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, model: params.model, thinking: params.thinking, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
       const d = started.details as Record<string, any>;
       const closed = closeRequest(params.from, `${d.label} (${d.agent})`, self);
       // Task-free briefs only: a Task-backed Worker's scope is the Task, not a starter's prose.
@@ -273,8 +279,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
       return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}${coldReadNote(cold)}`,
         { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...(cold ? { coldRead: cold } : {}), ...closed });
     }
-    if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant, params.benchmarkModel].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
-    if (params.fableResearcher !== undefined && params.kind !== "researcher") throw new Error("fableResearcher is available only for kind researcher. Nothing was started.");
+    if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
     // The temporary machine policy pauses reviews before any launch side effect; the
     // reviewer child would also refuse inside resolveReviewEntry, but nothing starts.
@@ -283,13 +288,13 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     }
     const label = labelOf(params.label, params.task);
     requireOpenRequest(params.from, self);
-    const helper = await launchHelper(params.kind as "scout" | "researcher" | "reviewer", label, params.task, ctx, params.fableResearcher);
+    const helper = await launchHelper(params.kind as "scout" | "researcher" | "reviewer", label, params.task, ctx, { model: params.model, thinking: params.thinking });
     const closed = closeRequest(params.from, `${label} (${helper.name})`, self);
-    return result(`Started ${params.kind} ${label} (${helper.name}, ${helper.address}) in ${ctx.cwd}.${helper.fable ? ` Model ${helper.fable.model} at ${helper.fable.thinking}; quota ${helper.fable.quota}.` : " Its report arrives in your inbox; do not wait or poll."}${helper.helperSwitch}`,
-      { kind: params.kind, label, name: helper.name, terminal: helper.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), ...(helper.fable ? { fable: helper.fable } : {}), ...closed });
+    return result(`Started ${params.kind} ${label} (${helper.name}, ${helper.address}) in ${ctx.cwd}.Model ${describeSelection(helper.selection)}. Its report arrives in your inbox; do not wait or poll.${helper.helperSwitch}`,
+      { kind: params.kind, label, name: helper.name, terminal: helper.address, cwd: ctx.cwd, route: self.route, ...(helper.switched ? { modelSwitched: helper.switched } : {}), selection: helper.selection, ...closed });
   }
 
-  async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; model?: string; thinking?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     // Preconditions, all before any side effect.
     requireContract(params);
     const worktree = params.worktree ?? true;
@@ -297,8 +302,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const self = await caller();
     if (params.label !== undefined) labelOf(params.label, "");
     requireOpenRequest(params.from, self);
-    // The manus role (its own entry, never the orchestrator or worker one) is resolved
-    // before any worktree, record or terminal. A missing role or cell fails closed here.
+    // The manus role (its own entry, never the orchestrator or worker one) or an explicit model is
+    // resolved before any worktree, record or terminal. A missing role or cell fails closed here.
     const repo = await nativeProjectIdentity(ctx.cwd);
     const project = basename(dirname(repo.repoKey));
     const task = params.taskId ? await tandemShow(params.taskId, repo.repoRoot) : undefined;
@@ -317,11 +322,12 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const branch = name;
     const baseHead = await nativeHead(repo.repoRoot, "Manus project");
     const targetBranch = await checkoutBranch(repo.repoRoot, "Manus project");
-    // Every read-only precondition has passed: resolve the manus role now, cutting over only
-    // when quota alone blocks its set, and before any checkout, record or terminal exists.
-    const manus = await resolveRoleForSwitch("manus", ctx.modelRegistry, () => manusModelArgument(ctx.modelRegistry), { signal });
+    // Every read-only precondition has passed: resolve the manus model now, before any checkout,
+    // record or terminal exists. A role default cuts over only when quota alone blocks its set; an
+    // explicit model or thinking is preflighted exactly and refuses instead.
+    const manus = await selectLaunchModel("manus", { model: params.model, thinking: params.thinking }, ctx.modelRegistry, { signal });
     if ("refusal" in manus) throw new Error(`${manus.refusal} Nothing was started.`);
-    const manusModel = manus.value;
+    const manusModel = manus.selection;
     const manusSwitch = manus.switched
       ? ` Set ${manus.switched.from} → ${manus.switched.to} for manus (cutover ${manus.switched.operation ?? "none"}${manus.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
       : "";
@@ -376,7 +382,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", cwd,
-        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", childSessionId, "--model", manusModel.argument, "--", brief], name);
+        ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", childSessionId, "--model", manusModel.argument, ...explicitFlagArgs(manusModel), "--", brief], name);
     } catch (error) { throw new Error(`${diagnosticText(error)}${failedAfter} Record ${record.deliveryId} is preserved: finish or discard ${name} with worker_finish/worker_discard.`); }
     // The record's own observation of the terminal the launch returned; finish closes it by this.
     try {
@@ -390,15 +396,15 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const closed = closeRequest(params.from, `${label} (${name})`, self);
     // Task-free briefs only: a Task-backed manus reads its contract from the Task.
     const cold = params.brief === undefined ? undefined : await coldRead("brief", label, params.brief, repo.repoRoot, ctx);
-    return withHook(result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${manusModel.argument}${manusModel.set ? ` from set ${manusModel.set}; quota ${manusModel.quota}` : ""}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed }), rowHook);
+    return withHook(result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${describeSelection(manusModel)}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, selection: manusModel, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed }), rowHook);
     } catch (error) {
       // A switch that already happened stays applied; a later failure never hides it.
       throw new Error(`${diagnosticText(error)}${manusSwitch ? `${manusSwitch} That cutover stays applied.` : ""}`);
     }
   }
 
-  async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
+  async function cephStart(params: { project: string; folder: string; kickoff: string; label?: string; model?: string; thinking?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     const self = await caller();
     // A Ceph's hc name is its project (its route and the duplicate check); its label names it for Algorant.
     const name = params.project;
@@ -425,13 +431,15 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     if (existing && existing.folder !== folder) throw new Error(`App space ${existing.id} is named ${name} but its folder is ${existing.folder}, not ${folder}; clarify. Nothing was started.`);
     if (existing?.tabs?.some((tab: any) => tab.name === "main")) throw new Error(`App space ${existing.name} (${existing.id}) already has a main tab without a live Ceph named ${name}: a repair to clarify, not a second Ceph. Nothing was started.`);
 
-    // Only now — every read-only precondition has passed — is the Ceph's own role resolved,
-    // and, when this machine's set is blocked by quota alone, cut over by Herdra's same
-    // selector. The child then starts on this exact model, so its startup role hook skips
-    // and it can never refuse to consume the kickoff already on its command line.
-    const orchestrator = await resolveRoleForSwitch("orchestrator", ctx.modelRegistry, () => resolveRoleEntry("orchestrator", ctx.modelRegistry), { signal });
+    // Only now — every read-only precondition has passed — is the Ceph's model resolved: its
+    // orchestrator role, cut over by Herdra's same selector when this machine's set is blocked by
+    // quota alone, or an explicit model or thinking, preflighted exactly with no cutover. The child
+    // then starts on this exact model, so its startup role hook skips and it can never refuse to
+    // consume the kickoff already on its command line.
+    const orchestrator = await selectLaunchModel("orchestrator", { model: params.model, thinking: params.thinking }, ctx.modelRegistry, { signal });
     if ("refusal" in orchestrator) throw new Error(`${orchestrator.refusal} Nothing was started.`);
-    const cephModel = `${orchestrator.value.entry.model}:${orchestrator.value.entry.thinking}`;
+    const cephChoice = orchestrator.selection;
+    const cephModel = cephChoice.argument;
     const cephSwitch = orchestrator.switched
       ? ` Set ${orchestrator.switched.from} → ${orchestrator.switched.to} for orchestrator (cutover ${orchestrator.switched.operation ?? "none"}${orchestrator.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
       : "";
@@ -471,13 +479,13 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     let started: any;
     try {
       started = await launchRaw(["--bg", "--rm", "--no-parent", "--json", "--name", name, "--cwd", folder, "--label", `herdr.space=${spaceId}`,
-        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--model", cephModel, kickoff], name);
+        "--label", `${LABEL_KEY}=${label}`, "--label", `${KIND_KEY}=ceph`, "--label", `starter=${self.route}`, "--", CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--model", cephModel, ...explicitFlagArgs(cephChoice), kickoff], name);
     } catch (error) { throw new Error(`${diagnosticText(error)} Space ${spaceId} is kept as it is; no automatic removal.`); }
     const tab = await nameTab(await localAppHost(), spaceId, started.address, "main");
     const closed = closeRequest(params.from, `${label} (${name})`, self);
     const cold = await coldRead("kickoff", label, params.kickoff, folder, ctx);
-    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, not shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${cephModel}${orchestrator.value.set ? ` from set ${orchestrator.value.set}` : ""}${orchestrator.value.quota ? `; quota ${orchestrator.value.quota}` : ""}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.${coldReadNote(cold)}`,
-      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, modelSet: orchestrator.value.set, modelQuota: orchestrator.value.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, coldRead: cold, ...tab, ...closed });
+    return result(`Started Ceph ${label} (${name}, ${started.address}) in ${folder}, space ${name} ${existing ? "(reused, not switched)" : "(new, not shown)"}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab main)" : tab.tabName}. Model ${describeSelection(cephChoice)}.${cephSwitch}${notChecked.length ? ` Duplicate check skipped unreachable ${notChecked.join(", ")}.` : ""} It reports back to ${self.route}; do not wait or poll.${coldReadNote(cold)}`,
+      { label, name, terminal: started.address, cwd: folder, space: spaceId, spaceName: name, createdSpace: !existing, tandemTab, notChecked, route: self.route, model: cephModel, selection: cephChoice, modelSet: cephChoice.set, modelQuota: cephChoice.quota, ...(orchestrator.switched ? { modelSwitched: orchestrator.switched } : {}), brief: kickoff, coldRead: cold, ...tab, ...closed });
     } catch (error) {
       // A switch that already happened is a committed machine change: never hide it behind a
       // later failure of the space, tab or launch.
@@ -488,22 +496,22 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   const tools = [
     {
       name: "dendra_start", label: "Dendra Start", executionMode: "sequential" as const,
-      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). Worker-only benchmarkModel explicitly selects one approved contender at fixed high thinking with strict fresh quota preflight and a narrowly recorded provider exemption; it is not a general override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. A temporary machine policy can pause reviewer launches; nothing is started then. It resolves the child's own role after the read-only checks and, when quota alone blocks that set, cuts it over first. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
-      promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); optional benchmarkModel is Worker-only and selects a fixed approved contender; outcomes arrive in your inbox.",
+      description: "Start one child of this Pi: a read-only helper (scout, researcher or reviewer; task required, its report arrives in your inbox) or a Worker (exactly taskId OR brief; required label without a Task; worktree default true, explicit false skips it; needsAlgorant forbids auto-finish; handoffs through worker_handoff). model (exact provider/id) and thinking are optional for every kind: omitted, the role default; given, exact and preflighted (catalog, auth, provider policy, quota) before anything is created, refused rather than substituted, and kept by the child through startup, continuation and a provider 429. The result shows the resolved model, thinking and default/override. label (2-5 plain words) names it for Algorant; its slug is the hc name (and a Worker's branch), returned. A temporary machine policy can pause reviewer launches; nothing is started then. A role default is resolved after the read-only checks and, when quota alone blocks that set, cut over first; an explicit model is never cut over. Never selects/focuses, waits or polls. from closes the inbox request it dispatches.",
+      promptSnippet: "Delegate a bounded helper or Worker (exactly taskId OR brief; label required Task-free); optional model/thinking choose any child's exact model; outcomes arrive in your inbox.",
       parameters: DendraParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => dendraStart(params, signal, ctx),
     },
     {
       name: "manus_start", label: "Manus Start",
-      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. It resolves the native manus role (or the selected model set's manus cell) before any worktree, record or terminal, cutting that role over first when quota alone blocks its set, and passes that exact model; there is no orchestrator or worker fallback. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
-      promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement; reports through your inbox.",
+      description: "Start a manus: a full Pi in its own tab of your app space for exactly one taskId OR brief. Task-free label required. Worktree defaults true (created through Worktrunk from your HEAD); false explicitly skips it for research/shared checkout. needsAlgorant delivers for human judgement. It resolves the model before any worktree, record or terminal: the native manus role (or the selected model set's manus cell), cut over first when quota alone blocks its set, or the optional exact model/thinking you pass (preflighted, never cut over, kept by the child); it passes that exact model and shows it, with default/override, in the result. There is no orchestrator or worker fallback. label (2-5 plain words, default the Task title) names it and its tab; its slug is the hc name and branch. Writes the manus record you later finish or discard; it reports through your inbox and never merges or closes itself. Labels task= and starter=, never changes Algorant's view, never waits. from closes the inbox request it dispatches.",
+      promptSnippet: "Delegate a track in your own space with exactly taskId OR brief, label required Task-free; worktree default true, needsAlgorant for human judgement, optional model/thinking; reports through your inbox.",
       parameters: ManusParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => manusStart(params, signal, ctx),
     },
     {
       name: "ceph_start", label: "Ceph Start",
-      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created without switching, as is an existing one), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. After those read-only checks it resolves the orchestrator role, cutting it over first when quota alone blocks the set, and launches the Pi with that exact model so its kickoff is consumed. The kickoff ends with your return route.",
-      promptSnippet: "Start a named Ceph for a prepared project (projectify first); it reports back to you when ready.",
+      description: "Start a project's Ceph: a Pi named after the project in the main tab of its app space (a new project's space is created without switching, as is an existing one), with a tandem tab. Requires the project's git checkout and Tandem workspace (projectify first); refuses when a Ceph already runs on this or a connected machine. After those read-only checks it resolves the model, the orchestrator role (cut over first when quota alone blocks the set) or the optional exact model/thinking you pass (preflighted, never cut over, kept by the child), and launches the Pi with that exact model so its kickoff is consumed; the result shows it with default/override. The kickoff ends with your return route.",
+      promptSnippet: "Start a named Ceph for a prepared project (projectify first), optional model/thinking; it reports back to you when ready.",
       parameters: CephParameters,
       execute: (_id: string, params: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) => cephStart(params, signal, ctx),
     },

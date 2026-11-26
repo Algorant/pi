@@ -15,7 +15,7 @@ import {
   acknowledgeHcWorkerStart, createHcDeliveryId, createHcInvocationId, createHcWorkerRecord, hcRecordPath, isManusRecord, listHcWorkerOutcomes,
   listHcWorkerRecords, publishHcWorkerHandoff, readHcWorkerHandoff, readHcWorkerRecord, readHcWorkerStart, updateHcWorkerRecord,
   withHcWorkerLifecycle, writeHcWorkerOutcome, type HcWorkerDirection, type HcWorkerHandoff, type HcWorkerOutcome, type HcWorkerRecord,
-  type HcWorkerStart, type HcWorkerBenchmarkSelection,
+  type HcWorkerStart, type HcWorkerBenchmarkSelection, type HcWorkerSelection,
 } from "../pi-agency/workers/hc-record.ts";
 import {
   DiscardParameters, FeedbackParameters, MAX_PROMPT_LENGTH, PauseParameters, REJECTED_REPORT_SUFFIX,
@@ -26,11 +26,13 @@ import {
   requireActiveTask, requireCleanCheckout, requireNoOpenWorkerSubtasks, runRunnableValidations, runTandemCommand,
   runWorkerProgressNative, sourceAlreadyIntegrated, tandemCounts, tandemShow,
   tandemTaskMetrics, taskPlanRequired, validateCapturedCheckout, WORKER_LIGHT_EFFORTS, validateNativeRemovalResult, validateWorkerDispatch,
-  withCheckIn, workerModelArgument, benchmarkWorkerModelArgument, type WorkerProgressInput, type WorkerReportInput,
+  withCheckIn, benchmarkWorkerModelArgument, type WorkerProgressInput, type WorkerReportInput,
 } from "../pi-agency/workers/shared.ts";
 import { hcProfileRequested } from "../pi-agency/subagents/profile.ts";
 import { finishOutcome, withHook, workDone, workStart, type HookCaller, type HookReport } from "./herdra-work.ts";
-import { resolveRoleForSwitch } from "../pi-agency/herdra-role.ts";
+import { EXPLICIT_MODEL_FLAG, describeSelection, explicitLaunchActive, selectLaunchModel } from "../pi-agency/launch-model.ts";
+import { resolveExplicitModel } from "../pi-agency/model-roles.ts";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { provider429Diagnostic, registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { CHILD_EXIT, coreId as appCoreId, hcFind, hcJson, hcText, isHc, KICKOFF_FLAG } from "./core.ts";
 import { resolveAppSpace } from "./app-host.ts";
@@ -282,6 +284,23 @@ async function recordReworkOnce({ record, handoff }: WorkerView, cwd: string, me
 
 class LaunchError extends Error { constructor(message: string, readonly uncertain: boolean) { super(message); } }
 
+/**
+ * An explicit Worker model is exact for the Worker's life (task-851): before every new invocation
+ * (launch, recovery relaunch, feedback, answer, resume, in-place kept send) the saved pair repeats
+ * the same model preflight it passed at start. A failure refuses the continuation; nothing is
+ * substituted and no cutover is asked.
+ */
+function checkSelection(record: HcWorkerRecord, registry: ExtensionContext["modelRegistry"]): void {
+  const saved = record.selection;
+  if (!saved) return;
+  try {
+    const exact = resolveExplicitModel("worker", saved.model, saved.thinking as ThinkingLevel, registry);
+    if (`${exact.model}:${exact.thinking}` !== record.model) throw new Error(`it resolves to ${exact.model}:${exact.thinking}, not the recorded ${record.model}`);
+  } catch (error) {
+    throw new Error(`Saved Worker ${record.childAgent} explicit selection ${record.model} is no longer available: ${diagnosticText(error)} No launch or continuation was started; no other model was substituted.`);
+  }
+}
+
 async function refreshBenchmarkQuota(record: HcWorkerRecord, registry: ExtensionContext["modelRegistry"]): Promise<HcWorkerRecord> {
   if (!record.benchmark) return record;
   const resolved = benchmarkWorkerModelArgument(registry, record.benchmark.requestedModel);
@@ -306,11 +325,12 @@ async function refreshBenchmarkQuota(record: HcWorkerRecord, registry: Extension
  */
 async function launchInvocation(record: HcWorkerRecord, prompt: string, registry: ExtensionContext["modelRegistry"]): Promise<any> {
   record = await refreshBenchmarkQuota(record, registry);
+  checkSelection(record, registry);
   // The label and kind name it (whois); task= carries its Task (the label never depends on it).
   const labels = { [INVOCATION_LABEL]: record.invocationId, [KIND_KEY]: "worker", ...(record.taskId ? { task: `${basename(dirname(record.integration.repoKey))}:${record.taskId}` } : {}), needsAlgorant: String(record.needsAlgorant ?? false), ...(record.label ? { [LABEL_KEY]: record.label } : {}) };
   const args = ["run", "--bg", "--rm", "--no-notify", "--outlive-parent", "--json", "--name", record.childAgent,
     "--cwd", record.integration.source.checkoutPath, ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]), "--",
-    CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", record.childSessionId, "--model", record.model, `--${WORKER_CONTEXT_FLAG}`, "--", prompt];
+    CHILD_EXIT, "pi", `--${KICKOFF_FLAG}`, ...ownerExtensionArgs(), "--session-id", record.childSessionId, "--model", record.model, ...(record.selection || record.benchmark ? [`--${EXPLICIT_MODEL_FLAG}`, record.model] : []), `--${WORKER_CONTEXT_FLAG}`, "--", prompt];
   let started: any;
   try {
     started = await hcJson(args, 30_000);
@@ -382,7 +402,7 @@ const NATIVE_TOOL_CARDS = {
   worker_ask: "ask", worker_report: "report", worker_progress: "progress",
 } as const;
 
-export type StartWorker = (params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; benchmarkModel?: HcWorkerBenchmarkSelection["requestedModel"]; from?: string; prompt: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<any>>;
+export type StartWorker = (params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; model?: string; thinking?: string; from?: string; prompt: string }, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<any>>;
 export type ReadyNotice = (env: Envelope, ctx: ExtensionContext) => Promise<Envelope | undefined>;
 
 const READY_HEADLINE = /^Worker handoff ready for review: .+ \(([a-z0-9_-]+)\)$/;
@@ -393,7 +413,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
   const cards = new Map(Object.entries(NATIVE_TOOL_CARDS).map(([name, kind]) => [name, createWorkerToolRenderer(kind) as ToolRenderers]));
   pi.registerToolRenderer((toolName, next) => next() ?? cards.get(toolName));
   let workerMode = false;
-  registerProvider429Recovery(pi, async () => workerMode ? { role: "worker" } : undefined);
+  registerProvider429Recovery(pi, async () => workerMode && !explicitLaunchActive(pi) ? { role: "worker" } : undefined);
   let contextFailure: string | undefined;
   let questionAsked = false;
   /** Captured at the first agent_start after settlement and used until the next settlement:
@@ -710,6 +730,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark
       ? { ...previous.benchmark!, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt }
       : undefined;
+    checkSelection(previous, ctx.modelRegistry);
     const assignment = task ? await captureWorkerAssignment(task, target) : undefined;
     // A plan handoff supersedes any earlier approval: only approve:true approves it again.
     const planAcceptedAt = params.approve ? Date.now() : planPending ? undefined : previous.planAcceptedAt;
@@ -732,7 +753,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     const next: HcWorkerRecord = {
       version: 8, deliveryId: createHcDeliveryId(), recoveryOfDeliveryId: previous.deliveryId, invocationId: createHcInvocationId(), taskId: previous.taskId,
       ownerSessionId: owner.sessionId, owner: { core: owner.core, terminal: owner.terminal }, childAgent: previous.childAgent,
-      ...(previous.label ? { label: previous.label } : {}), brief: previous.brief, needsAlgorant: previous.needsAlgorant, from: previous.from, childSessionId: previous.childSessionId, model: previous.model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), integration, assignment, planRequired,
+      ...(previous.label ? { label: previous.label } : {}), brief: previous.brief, needsAlgorant: previous.needsAlgorant, from: previous.from, childSessionId: previous.childSessionId, model: previous.model, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(previous.selection ? { selection: previous.selection } : {}), integration, assignment, planRequired,
       ...(live ? { child: { core: owner.core, terminal: live.address } } : {}),
       ...(planAcceptedAt !== undefined ? { planAcceptedAt } : {}),
       direction, createdAt: now, updatedAt: now, state: "pending",
@@ -744,6 +765,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       if (live) {
         // Recheck the strict quota gate immediately before sending a new invocation to a kept child.
         await refreshBenchmarkQuota(next, ctx.modelRegistry);
+        checkSelection(next, ctx.modelRegistry);
         // Refuse before changing the label. Settled is idle or done; `--if` only
         // distinguishes idle from working.
         if (!["idle", "done"].includes(runtimeState(live))) throw new LaunchError(`Kept Worker ${live.address} is ${runtimeState(live)}, not settled.`, false);
@@ -774,7 +796,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     return withHook(text(`${undelivered ? "Delivered the preserved direction to" : answering ? "Answered clarification for" : params.redeliver ? "Sent the generic continuation to" : "Sent feedback to"} Worker ${params.agent} in the same session and checkout (${terminal}); opened delivery ${next.deliveryId}.`,
       // The invocation now carrying this delivery: a kept one got a new turn, otherwise a new one is starting.
       { host: "hc", agent: params.agent, terminal, taskId: previous.taskId, deliveryId: next.deliveryId, invocationId: next.invocationId, state: live ? "kept · turn sent" : "new invocation · starting", routed: "new-cycle",
-        direction: undelivered ? "redelivered" : "new", ...(live ? { kept: true } : {}), ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}),
+        direction: undelivered ? "redelivered" : "new", ...(live ? { kept: true } : {}), ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(previous.selection ? { selection: previous.selection } : {}),
         ...(planPending && !answering ? { plan: params.approve ? "approved" : "revise" } : {}), ...(answering ? { questionId: params.questionId, answer: params.message.trim() } : {}) }), rowHook);
   }
 
@@ -819,12 +841,6 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     requireContract(params);
     const worktree = params.worktree ?? true;
     const needsAlgorant = params.needsAlgorant ?? false;
-    const benchmark = params.benchmarkModel ? benchmarkWorkerModelArgument(ctx.modelRegistry, params.benchmarkModel) : undefined;
-    const model = benchmark?.argument;
-    const benchmarkRecord: HcWorkerBenchmarkSelection | undefined = benchmark ? {
-      requestedModel: params.benchmarkModel!, selectedModel: benchmark.model, providerExemption: benchmark.providerExemption,
-      providerExemptionModel: benchmark.providerExemptionModel, fast: benchmark.fast, quota: benchmark.quota, quotaCheckedAt: benchmark.quotaCheckedAt,
-    } : undefined;
     const project = await nativeProjectIdentity(ctx.cwd);
     const task = params.taskId ? await tandemShow(params.taskId, ctx.cwd) : undefined;
     if (task) {
@@ -851,16 +867,21 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (!label) throw new Error("Worker requires label (2-5 plain words).");
     const agent = await nameFor(label, worktree ? project.repoRoot : undefined);
     const branch = worktree ? agent : targetBranch;
-    // Every read-only precondition has passed: resolve the ordinary worker role now, cutting
-    // over only when quota alone blocks its set, before any checkout, record or terminal. The
-    // explicit benchmark selector above is a separate named path and keeps its own preflight.
-    const ordinaryResolution = benchmark ? undefined : await resolveRoleForSwitch("worker", ctx.modelRegistry, () => workerModelArgument(ctx.modelRegistry), { signal });
-    if (ordinaryResolution && "refusal" in ordinaryResolution) throw new Error(`${ordinaryResolution.refusal} Nothing was started.`);
-    const ordinary = ordinaryResolution && "value" in ordinaryResolution ? ordinaryResolution.value : undefined;
-    const workerModel = model ?? ordinary!.argument;
-    const workerSwitch = ordinaryResolution && "switched" in ordinaryResolution && ordinaryResolution.switched
-      ? ` Set ${ordinaryResolution.switched.from} → ${ordinaryResolution.switched.to} for worker (cutover ${ordinaryResolution.switched.operation ?? "none"}${ordinaryResolution.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
+    // Every read-only precondition has passed: resolve the worker's model now, before any checkout,
+    // record or terminal. A role default cuts over first only when quota alone blocks its set; an
+    // explicit model or thinking is preflighted exactly and refuses rather than cutting over.
+    const resolved = await selectLaunchModel("worker", { model: params.model, thinking: params.thinking }, ctx.modelRegistry, { signal });
+    if ("refusal" in resolved) throw new Error(`${resolved.refusal} Nothing was started.`);
+    const chosen = resolved.selection;
+    const workerModel = chosen.argument;
+    const workerSwitch = resolved.switched
+      ? ` Set ${resolved.switched.from} → ${resolved.switched.to} for worker (cutover ${resolved.switched.operation ?? "none"}${resolved.switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).`
       : "";
+    const selectionRecord: HcWorkerSelection | undefined = chosen.source === "override" ? {
+      model: chosen.model, thinking: chosen.thinking, ...(chosen.requestedModel ? { requestedModel: chosen.requestedModel } : {}),
+      ...(chosen.requestedThinking ? { requestedThinking: chosen.requestedThinking } : {}), ...(chosen.quota ? { quota: chosen.quota } : {}),
+      ...(chosen.quotaCheckedAt !== undefined ? { quotaCheckedAt: chosen.quotaCheckedAt } : {}),
+    } : undefined;
     const deliveryId = createHcDeliveryId();
     let checkoutPath: string | undefined;
     let provisioningFailed = false;
@@ -897,7 +918,7 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       const now = Date.now();
       const record: HcWorkerRecord = {
         version: 8, deliveryId, invocationId: createHcInvocationId(), ...(task ? { taskId: task.id, assignment } : { brief: params.brief! }), needsAlgorant, from: params.from, ownerSessionId: owner.sessionId, owner: { core: owner.core, terminal: owner.terminal },
-        childAgent: agent, label, childSessionId: newId(), model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), createdAt: now, updatedAt: now, state: "pending", planRequired,
+        childAgent: agent, label, childSessionId: newId(), model: workerModel, ...(selectionRecord ? { selection: selectionRecord } : {}), createdAt: now, updatedAt: now, state: "pending", planRequired,
         direction: { request: params.prompt.trim(), ofDeliveryId: deliveryId },
         integration: { repoKey: project.repoKey, worktree, baseHead, source: { checkoutPath, branch }, target: { checkoutPath: project.repoRoot, branch: targetBranch } },
       };
@@ -913,13 +934,13 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
       let started: any;
       try { started = await launchInvocation(record, prompt, ctx.modelRegistry); }
       catch (error) { launchUncertain = error instanceof LaunchError ? error.uncertain : true; throw error; }
-      if (ordinary?.set && ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${workerModel}; set ${ordinary.set}, quota ${ordinary.quota}`, "info");
-      const switched = ordinaryResolution && "switched" in ordinaryResolution ? ordinaryResolution.switched : undefined;
+      if (ctx.hasUI) ctx.ui.notify(`Worker ${label}: ${describeSelection(chosen)}`, "info");
+      const switched = resolved.switched;
       // The launch is confirmed; the row hook never throws, so it cannot turn this into an uncertain launch.
       const rowHook = await workStart(record, started.address, { core: owner.core, terminal: owner.terminal, record: owner.hc });
-      return withHook(text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}.${ordinary?.set ? ` Model ${workerModel} from set ${ordinary.set}; quota ${ordinary.quota}.` : ""}${switched ? ` Set ${switched.from} → ${switched.to} for worker (cutover ${switched.operation ?? "none"}${switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).` : ""}${benchmarkRecord ? ` Benchmark contender ${benchmarkRecord.selectedModel} at high thinking; provider exemption ${benchmarkRecord.providerExemption}; ${benchmarkRecord.quota}; Fast ${benchmarkRecord.fast ? "on" : "off"}.` : ""}`,
+      return withHook(text(`Started native Worker ${label} (${agent}, ${started.address}) ${task ? `for ${task.id}` : "(Task-free)"} under ${owner.terminal}. Checkout: ${checkoutPath} (${worktree ? "created through Worktrunk" : "shared; no merge or removal"}). needsAlgorant:${needsAlgorant}. Model ${describeSelection(chosen)}.${switched ? ` Set ${switched.from} → ${switched.to} for worker (cutover ${switched.operation ?? "none"}${switched.partial ? "; some typed requests failed or a Pi was skipped" : ""}).` : ""}`,
         { host: "hc", state: "starting", taskId: task?.id, title: task?.title, label, worktree, needsAlgorant, from: params.from, agent, terminal: started.address, core: owner.core, worktreePath: checkoutPath, branch, deliveryId, invocationId: record.invocationId,
-          integrationTarget: record.integration.target, sessionId: record.childSessionId, model: workerModel, ...(benchmarkRecord ? { benchmark: benchmarkRecord } : {}), ...(switched ? { modelSwitched: switched } : {}), outlivesParent: true }), rowHook);
+          integrationTarget: record.integration.target, sessionId: record.childSessionId, model: workerModel, selection: chosen, ...(switched ? { modelSwitched: switched } : {}), outlivesParent: true }), rowHook);
     } catch (error) {
       const note = workerSwitch ? `${workerSwitch} That cutover stays applied.` : "";
       const identity = `${task ? `Task ${task.id}, ` : ""}Worker ${agent}, checkout ${checkoutPath ?? "(none)"}, branch ${branch}, delivery ${deliveryId}`;

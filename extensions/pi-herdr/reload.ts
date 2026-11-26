@@ -11,6 +11,7 @@ import { sendAgentMessage } from "../pi-agency/inbox/send.ts";
 import { OPENAI_FAST_STATE_EVENT, type OpenAIFastState } from "../pi-providers/openai/events.ts";
 import { hcEndpoint, hcJson, hcMachines } from "./core.ts";
 import { sourceFingerprint } from "./fingerprint.ts";
+import { explicitLaunch, explicitLaunchActive } from "../pi-agency/launch-model.ts";
 import { cutoverStatus, isSuccess, settleCutover, settleOf, summaryCutover, summarySweep, type Ack, type Row, type Sweep } from "./reload-summary.ts";
 import { SELF_RELOAD_EVENT, type SelfReloadState } from "./turn-label.ts";
 
@@ -277,6 +278,16 @@ export function registerPiReload(pi: ExtensionAPI): {
     // A local record with no operation is a rejection; an accepted remote ungrouped request is applied.
     const invalid = request.control.operation ? operationError(request.control.operation, own) : request.owner.core === own.core ? "a model request that resolves to this core needs a cutover operation" : undefined;
     if (invalid) { void finishModel(ctx, request, invalid, false).catch((error) => ctx.ui.notify(`Model request outcome could not be sent: ${reason(error)}`, "warning")); return; }
+    // A session launched with an explicit model pair (task-851) is exact: a role-set cutover cannot
+    // replace it. Only a request for that same pair applies; any other fails visibly in the ack.
+    if (explicitLaunchActive(pi)) {
+      let pair: { model: string; thinking: string } | undefined;
+      try { pair = explicitLaunch(pi); } catch { pair = undefined; }
+      if (pair?.model !== request.control.model || pair.thinking !== request.control.thinking) {
+        void finishModel(ctx, request, `this session was launched with an explicit model pair${pair ? ` (${pair.model}:${pair.thinking})` : ""}; a set cutover cannot replace it (use /model or relaunch)`).catch((error) => ctx.ui.notify(`Model request outcome could not be sent: ${reason(error)}`, "warning"));
+        return;
+      }
+    }
     const state: Applying = applying = { request, ctx, fast: false };
     void (async () => {
       try {

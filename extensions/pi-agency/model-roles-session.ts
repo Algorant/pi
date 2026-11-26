@@ -7,6 +7,7 @@ import { ModelSetUnavailableError, committedCellModels, resolveRoleEntry, type R
 import { resolveRoleForSwitch, type RoleResolution } from "./herdra-role.ts";
 import { workerContextRequested } from "./workers/context.ts";
 import { hcProfileRequested } from "./subagents/profile.ts";
+import { carriedExplicitFailure, explicitLaunch, EXPLICIT_MODEL_FLAG, recordExplicitStartup, verifyExplicitLaunch } from "./launch-model.ts";
 import { registerProvider429Recovery } from "./provider-rate-limit.ts";
 
 /**
@@ -17,7 +18,8 @@ import { registerProvider429Recovery } from "./provider-rate-limit.ts";
  * configured thinking level. This startup application is skipped for Workers,
  * resumed sessions, reloads and forks, and whenever the command line names a
  * model or thinking level, which still win (a launched manus or Ceph passes its
- * resolved `--model`).
+ * resolved `--model`). A session launched with an explicit per-launch pair
+ * (`--agency-explicit-model`, launch-model.ts) is never managed: it keeps that exact pair.
  *
  * Without named sets the legacy behavior is unchanged: a terminal named herdra
  * uses the declared orchestrator list, because the herdra row exists only in
@@ -131,8 +133,29 @@ export function registerOrchestratorModel(pi: ExtensionAPI): void {
     reconciliationOwed = false;
     notices.clear();
     if (ctx.mode !== "tui") return;
-    if (workerContextRequested()) return;
     if (hcProfileRequested()) return;
+    // An explicit per-launch pair (task-851) is exact: this session is never role-managed, so no
+    // startup replacement, pre-turn quota move or 429 switch can change it. A start that did not
+    // retain it refuses every run instead of continuing on another model.
+    try {
+      const exact = explicitLaunch(pi);
+      if (exact) {
+        // The launch startup verifies; reload, resume and fork carry a recorded startup refusal forward.
+        const launching = event.reason === "startup" || event.reason === "new";
+        const failure = launching ? verifyExplicitLaunch(pi, ctx, exact) : carriedExplicitFailure(ctx, exact);
+        if (launching) recordExplicitStartup(pi, exact, failure);
+        if (failure) {
+          refusal = failure;
+          ctx.ui.notify(failure, "error");
+        }
+        return;
+      }
+    } catch (error) {
+      refusal = `--${EXPLICIT_MODEL_FLAG} is invalid, so this session refuses to run: ${error instanceof Error ? error.message : String(error)}`;
+      ctx.ui.notify(refusal, "error");
+      return;
+    }
+    if (workerContextRequested()) return;
     let named = false;
     try {
       named = localAgencySettings().modelSets !== undefined;

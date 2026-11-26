@@ -8,7 +8,7 @@ import { labelFrom } from "../../../../scripts/whois.ts";
 
 /** The pi-herdr dispatch tools (pi-herdr/dispatch.ts): dendra_start, manus_start, ceph_start. */
 export type DispatchTool = "dendra_start" | "manus_start" | "ceph_start";
-type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; benchmarkModel?: unknown; fableResearcher?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
+type Args = { kind?: unknown; label?: unknown; task?: unknown; taskId?: unknown; brief?: unknown; needsAlgorant?: unknown; prompt?: unknown; worktree?: unknown; direction?: unknown; model?: unknown; thinking?: unknown; project?: unknown; folder?: unknown; kickoff?: unknown; from?: unknown };
 type Details = Record<string, any>;
 
 const LABEL: Record<DispatchTool, string> = { dendra_start: "Dendra Start", manus_start: "Manus Start", ceph_start: "Ceph Start" };
@@ -67,18 +67,34 @@ function coldReadLong(d: Details): string {
     : `not started · ${text(cold.error) || "refused"} · the launch stands`;
 }
 
-function fableText(args: Args, d: Details): string {
-  const fable = d.fable && typeof d.fable === "object" ? d.fable : undefined;
-  return fable || args.fableResearcher === true ? ` · Fable ${text(fable?.model) || "anthropic/claude-fable-5-1"} · ${text(fable?.thinking) || "high"}` : "";
+/** The pair a launch resolved (task-851), or before the result the override the call asked for. */
+function selectionOf(d: Details): Details | undefined {
+  return d.selection && typeof d.selection === "object" ? d.selection : undefined;
+}
+function selectionShort(args: Args, d: Details): string {
+  const chosen = selectionOf(d);
+  if (chosen) return ` · ${text(chosen.model)} · ${text(chosen.thinking)} · ${text(chosen.source) || "default"}`;
+  return text(args.model) || text(args.thinking) ? ` · override ${[text(args.model), text(args.thinking)].filter(Boolean).join(" · ")}` : "";
+}
+function selectionLong(chosen: Details, expanded: boolean): string {
+  const asked = text(chosen.source) === "override"
+    ? `override${text(chosen.requestedModel) ? "" : " · thinking only, model from the role default"}${text(chosen.requestedThinking) || !text(chosen.requestedModel) ? "" : " · thinking inherited"}`
+    : "role default";
+  return joinTitleParts([text(chosen.model), `${text(chosen.thinking)} thinking`, asked, text(chosen.set) ? `set ${text(chosen.set)}` : undefined, text(chosen.quota) ? truncatePlain(text(chosen.quota), expanded ? 300 : 120) : undefined]);
 }
 
-function benchmarkText(args: Args, d: Details): string {
-  const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : {};
-  const selected = text(benchmark.selectedModel) || text(args.benchmarkModel);
-  if (!selected) return "";
-  const exemption = text(benchmark.providerExemption) || "approved-benchmark-provider-exception";
-  const exceptionModel = text(benchmark.providerExemptionModel) || selected;
-  return ` · benchmark ${selected} · ${exemption} for ${exceptionModel}`;
+/** Saved results only: the retired researcher Fable selector (task-851) stays readable in old transcripts. */
+function fableText(d: Details): string {
+  const fable = d.fable && typeof d.fable === "object" ? d.fable : undefined;
+  return fable ? ` · Fable ${text(fable.model)} · ${text(fable.thinking)}` : "";
+}
+
+/** Saved results only: the retired Worker benchmark selector; a saved benchmark record still continues. */
+function benchmarkText(d: Details): string {
+  const benchmark = d.benchmark && typeof d.benchmark === "object" ? d.benchmark : undefined;
+  if (!benchmark) return "";
+  const selected = text(benchmark.selectedModel);
+  return ` · benchmark ${selected} · ${text(benchmark.providerExemption)} for ${text(benchmark.providerExemptionModel) || selected}`;
 }
 
 /** Where it started, in a few words: the place Algorant would look for it. */
@@ -93,7 +109,7 @@ function whereOf(tool: DispatchTool, d: Details): string {
 function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: Theme, status?: string): string {
   const details = d ?? {};
   const parts = [theme.fg("accent", "⇢"), " ", theme.fg("toolTitle", kindOf(tool, args, details)), " ", theme.fg("text", labelOf(tool, args, details))];
-  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}${benchmarkText(args, details)}${fableText(args, details)}`));
+  if (status) parts.push(theme.fg("muted", ` · ${status}${args.needsAlgorant === true ? " · needsAlgorant:true" : ""}${selectionShort(args, details)}`));
   else {
     parts.push(theme.fg("dim", idsOf(details)));
     const where = whereOf(tool, details);
@@ -104,9 +120,11 @@ function line(tool: DispatchTool, args: Args, d: Details | undefined, theme: The
     if (move) parts.push(theme.fg("warning", ` · ${move}`));
     const cold = coldReadShort(details);
     if (cold) parts.push(theme.fg(coldReadOf(details)!.status === "started" ? "dim" : "warning", ` · ${cold}`));
-    const benchmark = benchmarkText(args, details);
+    const chosen = selectionOf(details);
+    if (chosen) parts.push(theme.fg(text(chosen.source) === "override" ? "accent" : "dim", selectionShort(args, details)));
+    const benchmark = benchmarkText(details);
     if (benchmark) parts.push(theme.fg("warning", benchmark));
-    const fable = fableText(args, details);
+    const fable = fableText(details);
     if (fable) parts.push(theme.fg("accent", fable));
   }
   return ` ${parts.join("")}`;
@@ -122,7 +140,7 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
     ? [section("Error", [
       theme.fg("error", truncatePlain(output, expanded ? 4000 : 500)),
       switchLong(d) ? fieldLine(theme, "role set", switchLong(d), "warning") : undefined,
-      text(args.benchmarkModel) ? fieldLine(theme, "benchmark", `${text(args.benchmarkModel)} · approved-benchmark-provider-exception for selected contender`, "warning") : undefined,
+      text(args.model) || text(args.thinking) ? fieldLine(theme, "requested", [text(args.model), text(args.thinking) ? `${text(args.thinking)} thinking` : ""].filter(Boolean).join(" · ") + " · nothing substituted", "warning") : undefined,
     ])]
     : pending ? [] : [section("Started", [
       fieldLine(theme, "label", labelOf(tool, args, d), "accent"),
@@ -131,7 +149,8 @@ function build(tool: DispatchTool, { args, result, options, theme, pending, erro
       text(d.taskId) ? fieldLine(theme, "task", joinTitleParts([text(d.taskId), text(d.title) ? truncatePlain(text(d.title), expanded ? 200 : 80) : undefined]), "toolOutput") : undefined,
       d.benchmark ? fieldLine(theme, "benchmark", `${text(d.benchmark.requestedModel)} → ${text(d.benchmark.selectedModel)} · ${text(d.benchmark.providerExemption)} for ${text(d.benchmark.providerExemptionModel)} · high thinking · ${text(d.benchmark.quota)} · Fast ${d.benchmark.fast ? "on" : "off"}`, "warning") : undefined,
       d.fable ? fieldLine(theme, "researcher model", `${text(d.fable.model)} · ${text(d.fable.thinking)} thinking · ${text(d.fable.quota)}`, "accent") : undefined,
-      text(d.model) && tool === "manus_start" ? fieldLine(theme, "model", joinTitleParts([text(d.model), text(d.modelSet) ? `set ${text(d.modelSet)}` : undefined, text(d.modelQuota) ? truncatePlain(text(d.modelQuota), expanded ? 300 : 120) : undefined]), "muted") : undefined,
+      selectionOf(d) ? fieldLine(theme, "model", selectionLong(selectionOf(d)!, expanded), text(selectionOf(d)!.source) === "override" ? "accent" : "muted")
+        : text(d.model) && tool === "manus_start" ? fieldLine(theme, "model", joinTitleParts([text(d.model), text(d.modelSet) ? `set ${text(d.modelSet)}` : undefined, text(d.modelQuota) ? truncatePlain(text(d.modelQuota), expanded ? 300 : 120) : undefined]), "muted") : undefined,
       switchLong(d) ? fieldLine(theme, "role set", switchLong(d), "warning") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "needsAlgorant", String(d.needsAlgorant ?? false), d.needsAlgorant ? "warning" : "muted") : undefined,
       tool !== "ceph_start" && (tool === "manus_start" || d.kind === "worker") ? fieldLine(theme, "isolation", d.worktree === false ? "shared checkout · retained on finish" : "Worktrunk worktree", "muted") : undefined,

@@ -42,6 +42,21 @@ export type HcWorkerBenchmarkSelection = {
   quotaCheckedAt: number;
 };
 
+/**
+ * An explicit per-launch Worker model (task-851): the exact pair the owner chose or locked
+ * (a thinking-only override locks the default model it resolved). Every new invocation repeats
+ * the model preflight on this pair and launches the child with it; nothing substitutes another.
+ * `record.model` is always `${model}:${thinking}`.
+ */
+export type HcWorkerSelection = {
+  model: string;
+  thinking: string;
+  requestedModel?: string;
+  requestedThinking?: string;
+  quota?: string;
+  quotaCheckedAt?: number;
+};
+
 /** Owner-only control record. Captured workflow facts, never a mirror of live HC
  * status and never a copy of the Worker's handoff. One record kind covers both a
  * Worker and a manus: same shape and same completeness, without the Worker-only
@@ -88,8 +103,10 @@ export type HcWorkerRecord = {
   /** Captured `provider/model:thinking` for every invocation of this Worker; a manus
    * records the exact model its own `manus` role selection resolved. */
   model: string;
-  /** Present only for explicitly selected, approved benchmark Worker launches. */
+  /** Saved benchmark Worker records only (task-851 retired the selector): decoded and continued exactly as recorded. */
   benchmark?: HcWorkerBenchmarkSelection;
+  /** Present only for a Worker launched with an explicit model or thinking override. */
+  selection?: HcWorkerSelection;
   integration: HcWorkerIntegration;
   assignment?: WorkerAssignment;
   planRequired: boolean;
@@ -217,6 +234,14 @@ export function validateHcWorkerRecord(value: unknown): HcWorkerRecord {
         record.model !== `${benchmark.selectedModel}:high` || benchmark.fast !== (benchmark.selectedModel === "openai/gpt-6-luna" || benchmark.selectedModel === "openai-codex/gpt-6-luna") ||
         typeof benchmark.quota !== "string" || !benchmark.quota.trim()) {
       throw new Error("Invalid native Worker benchmark selection or provider exemption.");
+    }
+  }
+  if (record.selection !== undefined) {
+    const selection = record.selection;
+    if (isManusRecord(record) || record.benchmark !== undefined || !selection || typeof selection.model !== "string" || typeof selection.thinking !== "string" ||
+        record.model !== `${selection.model}:${selection.thinking}` ||
+        (selection.quotaCheckedAt !== undefined && (typeof selection.quotaCheckedAt !== "number" || !Number.isFinite(selection.quotaCheckedAt) || selection.quotaCheckedAt < 0))) {
+      throw new Error("Invalid native Worker explicit model selection.");
     }
   }
   if (typeof record.planRequired !== "boolean") throw new Error("Invalid native plan policy.");

@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import { resolveRole, resolveBenchmarkWorkerModel, type BenchmarkWorkerModel, type RoleRegistry } from "../model-roles.ts";
+import { resolveBenchmarkWorkerModel, type BenchmarkWorkerModel, type RoleRegistry } from "../model-roles.ts";
 import type { WorkerProjectRule } from "./brief.ts";
 import { tandemShow } from "../state.ts";
 import { nstarContractBody } from "../nstar-note.ts";
@@ -154,26 +154,7 @@ export const MAX_PROMPT_LENGTH = 16_000;
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 
-export const WORKER_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-
-export type WorkerThinkingLevel = (typeof WORKER_THINKING_LEVELS)[number];
-
-/**
- * The `--model` argument: caller arguments win, then the first available "worker" entry of model-roles.json
- * (or the selected named set's, with its `set` and quota notice for the launch result).
- */
-export function workerModelArgument(registry: RoleRegistry, model?: string, thinkingLevel?: WorkerThinkingLevel): { argument: string; set?: string; quota?: string } {
-  const { set, quota, ...resolved } = resolveRole("worker", registry, { model, thinking: thinkingLevel });
-  return { argument: `${resolved.model}:${resolved.thinking}`, ...(set ? { set, quota } : {}) };
-}
-
-/** A manus selects its own "manus" role, never the orchestrator or worker one. */
-export function manusModelArgument(registry: RoleRegistry): { argument: string; set?: string; quota?: string } {
-  const { set, quota, ...resolved } = resolveRole("manus", registry);
-  return { argument: `${resolved.model}:${resolved.thinking}`, ...(set ? { set, quota } : {}) };
-}
-
-/** Closed benchmark-only selection; never accepts a general model/thinking override. */
+/** Saved benchmark Worker records only: the strict recheck a continuation repeats (no new launch uses it). */
 export function benchmarkWorkerModelArgument(registry: RoleRegistry, benchmarkModel: BenchmarkWorkerModel) {
   const resolved = resolveBenchmarkWorkerModel(benchmarkModel, registry);
   return { ...resolved, argument: `${resolved.model}:${resolved.thinking}` };

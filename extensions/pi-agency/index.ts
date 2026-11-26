@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNstarHistory } from "./nstar-history.ts";
 import { registerNstar } from "./nstar.ts";
 import { registerOrchestratorModel } from "./model-roles-session.ts";
+import { registerExplicitModelFlag } from "./launch-model.ts";
 import registerNoSleep from "./conduct.ts";
 
 /**
@@ -10,6 +11,7 @@ import registerNoSleep from "./conduct.ts";
  * by pi-herdr, which reuses this extension's shared modules.
  */
 export default function piAgency(pi: ExtensionAPI): void {
+  registerExplicitModelFlag(pi);
   registerNstar(pi);
   registerNstarHistory(pi);
   registerOrchestratorModel(pi);

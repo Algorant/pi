@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { isOpenAICodexFastTarget } from "../pi-providers/openai/model.ts";
 import { currentWindowUsage, readCachedLimits } from "../pi-providers/quota/quota-service.ts";
 import { THINKING_LEVELS, validateModelIdentifier } from "./subagents/profile.ts";
@@ -10,8 +11,8 @@ import { holdActive, localAgencySettings, localSettingsPath, quotaHolds, tempora
 
 /**
  * The single source of default models (task-404). `agent/model-roles.json` holds
- * an ordered list per role; the first entry that is available wins. Explicit
- * model/thinking arguments from a caller still win over the file. An entry whose
+ * an ordered list per role; the first entry that is available wins. A per-launch
+ * `model`/`thinking` override (launch-model.ts, `resolveExplicitModel`) bypasses the list. An entry whose
  * provider (anthropic, openai, plus a saved legacy openai-codex benchmark record) is at or above `quota.weeklyThreshold` or
  * `quota.fiveHourThreshold` in the corresponding window counts as unavailable.
  * On a machine whose local settings set `"pi-agency": { "modelProviders": [...] }`,
@@ -52,8 +53,8 @@ const BENCHMARK_QUOTA_THRESHOLD = 0.9;
 function limitsProviderOf(provider: string): string {
   return provider === "openai-codex" ? "openai" : provider;
 }
+/** Saved benchmark records only; never a new selection. */
 export const BENCHMARK_WORKER_MODELS = ["openai/gpt-6-luna", "anthropic/claude-sonnet-5-5"] as const;
-export const FABLE_RESEARCHER_MODEL = "anthropic/claude-fable-5-1" as const;
 /** Legacy benchmark id: decodes saved records and continues a live old contender only; never a new selection. */
 export const LEGACY_BENCHMARK_WORKER_MODELS = ["openai-codex/gpt-6-luna"] as const;
 export type BenchmarkWorkerModel = (typeof BENCHMARK_WORKER_MODELS)[number] | (typeof LEGACY_BENCHMARK_WORKER_MODELS)[number];
@@ -78,12 +79,17 @@ function roleEntry(item: unknown, at: string, path: string): RoleEntry {
   if (typeof entry.thinking !== "string" || !THINKING_LEVELS.has(entry.thinking as ThinkingLevel)) throw new TypeError(`${path}: ${at}.thinking must be one of ${[...THINKING_LEVELS].join(", ")}`);
   if (entry.fast !== undefined && typeof entry.fast !== "boolean") throw new TypeError(`${path}: ${at}.fast must be a boolean`);
   const model = validateModelIdentifier(entry.model, `${path}: ${at}.model`);
-  if (model.startsWith("opencode-go/")) {
-    const family = model.slice("opencode-go/".length).split("-")[0]!;
-    const company = Object.hasOwn(MODEL_FAMILY_COMPANY, family) ? MODEL_FAMILY_COMPANY[family] : undefined;
-    if (company && MAJOR_COMPANIES.has(company)) throw new TypeError(`${path}: ${at} routes ${company} model ${model} through opencode-go; Anthropic, OpenAI and xAI models go direct (no approved exception)`);
-  }
+  const routed = opencodeGoMajorCompany(model);
+  if (routed) throw new TypeError(`${path}: ${at} routes ${routed} model ${model} through opencode-go; Anthropic, OpenAI and xAI models go direct (no approved exception)`);
   return { model, thinking: entry.thinking as ThinkingLevel, fast: entry.fast === true };
+}
+
+/** The major company (Anthropic, OpenAI, xAI) an `opencode-go/…` model would route through Go, else undefined. */
+function opencodeGoMajorCompany(model: string): string | undefined {
+  if (!model.startsWith("opencode-go/")) return undefined;
+  const family = model.slice("opencode-go/".length).split("-")[0]!;
+  const company = Object.hasOwn(MODEL_FAMILY_COMPANY, family) ? MODEL_FAMILY_COMPANY[family] : undefined;
+  return company && MAJOR_COMPANIES.has(company) ? company : undefined;
 }
 
 function entries(value: unknown, where: string, path: string): readonly RoleEntry[] {
@@ -344,36 +350,64 @@ export function resolveRoleEntry(role: RoleName | "herdra", registry: RoleRegist
   throw new Error(`No available model for role "${role}" in ${path}: ${rejected.join("; ")}`);
 }
 
-/**
- * Model and thinking for a Worker or Subagent launch. An explicit model skips
- * the list (its thinking defaults to the role's first entry); an explicit
- * thinking level replaces only the chosen entry's thinking.
- */
-export function resolveRole(role: Exclude<RoleName, "orchestrator">, registry: RoleRegistry, overrides: { model?: string; thinking?: ThinkingLevel } = {}, path = modelRolesPath()): { model: string; thinking: ThinkingLevel; set?: string; quota?: string } {
-  if (overrides.model !== undefined) {
-    const { roles, sets } = loadModelRoles(path);
-    const selection = localAgencySettings().modelSets;
-    const thinking = selection ? selectedCell(sets, selection, role, path).cell.thinking : roles[role][0]!.thinking;
-    return { model: validateModelIdentifier(overrides.model, `${role} model`), thinking: overrides.thinking ?? thinking };
+/** The thinking level a role's default choice carries (its selected set cell, else its first list entry), read without any availability check. */
+export function roleDefaultThinking(role: RoleName | "review", path = modelRolesPath()): ThinkingLevel {
+  const { roles, sets } = loadModelRoles(path);
+  const selection = localAgencySettings().modelSets;
+  if (selection) {
+    const cell = selectedCell(sets, selection, role, path).cell;
+    return (Array.isArray(cell) ? cell[0]! : cell as RoleEntry).thinking;
   }
-  const { entry, set, quota } = resolveRoleEntry(role, registry, path);
-  return { model: entry.model, thinking: overrides.thinking ?? entry.thinking, ...(set ? { set, quota } : {}) };
+  return (role === "review" ? roles.review.models[0]! : roles[role][0]!).thinking;
 }
 
-/** The approved researcher-only Fable selection: fixed high, no provider exemption, exact catalog/auth and fresh quota. */
-export function resolveFableResearcherModel(registry: RoleRegistry, path = modelRolesPath()): { model: typeof FABLE_RESEARCHER_MODEL; thinking: "high"; quota: string; quotaCheckedAt: number } {
+/** Why a thinking level cannot be used on a catalog model, or undefined when Pi would apply it as given (Pi otherwise clamps silently). */
+export function unsupportedThinking(catalog: CatalogModel, thinking: ThinkingLevel): string | undefined {
+  const supported = getSupportedThinkingLevels(catalog);
+  return supported.includes(thinking) ? undefined : `thinking ${thinking} is not supported by ${catalog.provider}/${catalog.id} (supported: ${supported.join(", ")})`;
+}
+
+/** Applicable ordinary quota check for an exact model: the selected-set rule when named sets are in force, else the legacy list rule. */
+function ordinaryQuota(entry: RoleEntry, registry: RoleRegistry, path: string): { reason: string } | { catalog: CatalogModel; quota?: string } {
   const { quota } = loadModelRoles(path);
-  const entry: RoleEntry = { model: FABLE_RESEARCHER_MODEL, thinking: "high", fast: false };
-  const checked = checkEntry(entry, registry, quota, localAgencySettings().modelProviders, { requireFreshQuota: true, additionalQuotaLabels: ["Fable"] });
-  if ("reason" in checked) throw new Error(`Fable researcher selection ${FABLE_RESEARCHER_MODEL} is unavailable: ${checked.reason}. Nothing was started.`);
-  if (checked.quota === undefined) throw new Error(`Fable researcher selection ${FABLE_RESEARCHER_MODEL} passed availability without strict quota evidence. Nothing was started.`);
-  return { model: FABLE_RESEARCHER_MODEL, thinking: "high", quota: checked.quota, quotaCheckedAt: Date.now() };
+  const settings = localAgencySettings();
+  if (!settings.modelSets) return checkEntry(entry, registry, quota, settings.modelProviders);
+  const checked = checkSetEntry(entry, registry, "explicit model");
+  return "failure" in checked ? { reason: checked.failure.reason } : checked;
 }
 
 /**
- * The approved native-Worker benchmark route. Its selector is a closed union,
- * thinking is fixed at high, and only this path can make the selected model's
- * provider exception while retaining the shared catalog/auth/quota check.
+ * An explicit per-launch model (task-851): the exact `provider/id` the caller chose, no list walk,
+ * no set cutover, no fallback. Catalog, configured auth, the machine provider policy, the
+ * opencode-go direct-routing rule and the ordinary quota policy for the model's provider all apply,
+ * as for a role default; a Fable model additionally keeps its strict fresh-quota rule. A thinking
+ * level the model does not support refuses instead of being clamped. `thinking` omitted inherits
+ * the role's level.
+ */
+export function resolveExplicitModel(role: RoleName | "review", model: string, thinking: ThinkingLevel | undefined, registry: RoleRegistry, path = modelRolesPath()): { model: string; thinking: ThinkingLevel; quota?: string; quotaCheckedAt?: number } {
+  const exact = validateModelIdentifier(model, "model");
+  const routed = opencodeGoMajorCompany(exact);
+  if (routed) throw new Error(`Model ${exact} routes ${routed} through opencode-go; Anthropic, OpenAI and xAI models go direct, so it cannot be selected.`);
+  const level = thinking ?? roleDefaultThinking(role, path);
+  const entry: RoleEntry = { model: exact, thinking: level, fast: false };
+  // A catalog model's unsupported level refuses first: it needs no credentials to know.
+  const known = registry.find(exact.slice(0, exact.indexOf("/")), exact.slice(exact.indexOf("/") + 1));
+  const unsupported = known ? unsupportedThinking(known, level) : undefined;
+  if (unsupported) throw new Error(`${thinking === undefined ? `The ${role} role's thinking level is inherited, but ` : ""}${unsupported}. ${thinking === undefined ? "Pass thinking explicitly." : "Pass a supported thinking level."}`);
+  const fable = exact.slice(exact.indexOf("/") + 1).includes("fable");
+  const checked = fable
+    ? checkEntry(entry, registry, loadModelRoles(path).quota, localAgencySettings().modelProviders, { requireFreshQuota: true, additionalQuotaLabels: ["Fable"] })
+    : ordinaryQuota(entry, registry, path);
+  if ("reason" in checked) throw new Error(`Model ${exact} is unavailable: ${checked.reason}.`);
+  if (fable && checked.quota === undefined) throw new Error(`Model ${exact} passed availability without its required fresh quota evidence.`);
+  return { model: exact, thinking: level, ...(checked.quota ? { quota: checked.quota } : {}), ...(fable ? { quotaCheckedAt: Date.now() } : {}) };
+}
+
+/**
+ * Saved-record compatibility only (task-851): the benchmark selector is retired from public
+ * input, but a saved benchmark Worker record still continues through this exact strict check
+ * (closed union, fixed high thinking, its recorded provider exception, 30-minute-fresh quota).
+ * No new launch reaches it.
  */
 export function resolveBenchmarkWorkerModel(model: string, registry: RoleRegistry, path = modelRolesPath()): { model: BenchmarkWorkerModel; thinking: "high"; fast: boolean; providerExemption: "approved-benchmark-provider-exception"; providerExemptionModel: BenchmarkWorkerModel; quota: string; quotaCheckedAt: number } {
   if (!([...BENCHMARK_WORKER_MODELS, ...LEGACY_BENCHMARK_WORKER_MODELS] as readonly string[]).includes(model)) {

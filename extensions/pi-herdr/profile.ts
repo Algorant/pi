@@ -1,17 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AGENCY_PROFILE_FLAG, hcProfileRequested, resolveSubagentProfile, loadSubagentProfiles, BUNDLED_SUBAGENT_PROFILES_DIRECTORY, type PiSubagentProfileDefinition, type SubagentProfileName } from "../pi-agency/subagents/profile.ts";
-import { FABLE_RESEARCHER_MODEL, resolveRoleEntry, resolveReviewEntry } from "../pi-agency/model-roles.ts";
+import { resolveRoleEntry, resolveReviewEntry } from "../pi-agency/model-roles.ts";
+import { explicitLaunch, explicitLaunchActive, verifyExplicitLaunch } from "../pi-agency/launch-model.ts";
 import { registerProvider429Recovery } from "../pi-agency/provider-rate-limit.ts";
 import { hcJson } from "./core.ts";
 
-const FABLE_FLAG = "agency-fable";
 let activeProfile: PiSubagentProfileDefinition | undefined;
-let activeFable = false;
 let activeReviewerCallerModel: string | undefined;
 
 /** Register before report so provider recovery runs before report settlement. */
 export function registerAgencyProfileRecovery(pi: ExtensionAPI): void {
-  registerProvider429Recovery(pi, async () => activeProfile && !activeFable ? {
+  registerProvider429Recovery(pi, async () => activeProfile && !explicitLaunchActive(pi) ? {
     role: activeProfile.name === "reviewer" ? "review" : "subagent",
     ...(activeReviewerCallerModel ? { callerModel: activeReviewerCallerModel } : {}),
   } : undefined);
@@ -20,7 +19,6 @@ export function registerAgencyProfileRecovery(pi: ExtensionAPI): void {
 /** Native profile policy only. No launch/placement/observation/retention runtime. */
 export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: ExtensionContext, message: string) => Promise<void>): void {
   pi.registerFlag(AGENCY_PROFILE_FLAG, { type: "string", description: "Native HC read-only child profile: scout, researcher or reviewer." });
-  pi.registerFlag(FABLE_FLAG, { type: "boolean", default: false, description: "Use the explicitly preflighted Fable 5.1 researcher selection at fixed high thinking; only when Algorant explicitly instructs this selection." });
   if (!hcProfileRequested()) return;
   let profile: PiSubagentProfileDefinition | undefined;
   let reviewerCallerModel: string | undefined;
@@ -33,7 +31,6 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
     reviewerCallerModel = undefined;
     activeProfile = undefined;
     activeReviewerCallerModel = undefined;
-    activeFable = false;
     allowed = new Set();
     failure = undefined;
     pi.setActiveTools([]); // fail closed before any async selection
@@ -42,37 +39,37 @@ export function registerAgencyProfile(pi: ExtensionAPI, startupFailed: (ctx: Ext
       if (!["scout", "researcher", "reviewer"].includes(String(name))) throw new Error(`Unknown HC agency profile ${name}.`);
       const self = await hcJson(["get", process.env.HC_TERMINAL_ID!]);
       if (!self.parent) throw new Error("HC profiles must be launched as native children with hc run.");
-      const useFable = pi.getFlag(FABLE_FLAG) === true;
-      if (useFable && name !== "researcher") throw new Error("The Fable selection is available only for the researcher profile.");
-      if (useFable && (!ctx.model || `${ctx.model.provider}/${ctx.model.id}` !== FABLE_RESEARCHER_MODEL)) throw new Error(`Fable researcher launch did not retain the exact preflighted model ${FABLE_RESEARCHER_MODEL}.`);
+      const exact = explicitLaunch(pi);
       const selected = resolveSubagentProfile(name as SubagentProfileName, loadSubagentProfiles(BUNDLED_SUBAGENT_PROFILES_DIRECTORY));
       profile = selected;
       activeProfile = selected;
-      activeFable = useFable;
       let callerModel: string | undefined;
-      if (name === "reviewer") {
+      // An explicit pair (task-851) is exact: no role re-resolution, no reviewer author routing, no 429 recovery.
+      if (name === "reviewer" && !exact) {
         callerModel = (await hcJson(["get", self.parent])).labels?.["pi.model"];
         if (!callerModel) throw new Error("Reviewer requires the native parent's pi.model label; reload that parent Pi before launching a reviewer.");
         reviewerCallerModel = callerModel;
         activeReviewerCallerModel = callerModel;
       }
-      const entry = useFable ? undefined : name === "reviewer"
+      const entry = exact ? undefined : name === "reviewer"
         ? resolveReviewEntry(callerModel!, ctx.modelRegistry)
         : resolveRoleEntry("subagent", ctx.modelRegistry);
       if (entry && !(await pi.setModel(entry.catalog))) throw new Error(`Could not apply profile model ${entry.entry.model}.`);
-      pi.setThinkingLevel(useFable ? "high" : entry!.entry.thinking);
+      if (exact) {
+        const failure = verifyExplicitLaunch(pi, ctx, exact);
+        if (failure) throw new Error(failure);
+      } else pi.setThinkingLevel(entry!.entry.thinking);
       allowed = new Set([...profile.tools, "codemode", "report"]);
       const available = new Set(pi.getAllTools().map(tool => tool.name));
       for (const tool of allowed) if (!available.has(tool)) throw new Error(`Profile tool ${tool} is not registered.`);
       pi.setActiveTools([...allowed]);
-      const model = useFable ? FABLE_RESEARCHER_MODEL : entry!.entry.model;
+      const model = exact ? exact.model : entry!.entry.model;
       pi.appendEntry("pi-herdr-profile", { profile: name, terminal: self.address, parent: self.parent, model });
-      ctx.ui.notify(`HC ${name}: ${model}${entry?.set ? `; set ${entry.set}, quota ${entry.quota}` : useFable ? "; explicit Fable selection, high thinking" : ""}${entry?.skipped?.length ? `; skipped ${entry.skipped.join("; ")}` : ""}`, "info");
+      ctx.ui.notify(`HC ${name}: ${model}${entry?.set ? `; set ${entry.set}, quota ${entry.quota}` : exact ? `; explicit selection, ${exact.thinking} thinking` : ""}${entry?.skipped?.length ? `; skipped ${entry.skipped.join("; ")}` : ""}`, "info");
     } catch (error) {
       profile = undefined;
       activeProfile = undefined;
       activeReviewerCallerModel = undefined;
-      activeFable = false;
       allowed.clear();
       failure = `HC profile startup failed: ${error instanceof Error ? error.message : String(error)}`;
       pi.setActiveTools([]);
