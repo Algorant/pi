@@ -753,6 +753,17 @@ Files left by the retired legacy Worker runtime are not read.
   (archived `completed` for this Worker / released with a higher discard count)
   or Git state (checkout unregistered and gone), never from absence alone. One
   owner's lifecycle tools for the same Worker run one at a time.
+- The merge itself is serialized per repository across every owner Pi on the
+  machine (`integrateSource`, `pi-agency/workers/shared.ts`): `flock(1)` runs one
+  POSIX script that re-verifies the checked source HEAD and a clean source,
+  samples the target tip, runs `wt merge --no-remove`, then samples the real
+  source and target tips, so `mergeRange` and `revert` stay exact. The lock lives
+  on a descriptor that script, wt, git and hooks inherit, so it cannot drop while
+  any of them can still mutate, even if the owner Pi dies. No polling or service.
+  Abort is honoured only before the call spawns; once queued or running the merge
+  settles normally. An unreadable tip after a successful merge is a distinct
+  error (no receipt; do not retry the merge blindly). Not covered: other Git
+  writers into the target, other machines, `worktree:false` and removal.
 - Both tools also take a **manus** record. Its inbox delivery is the handoff, so
   the Worker-only gates are skipped: no typed report, no invocation-id match, no
   Worker scope/assignee equality, and Tandem acceptance only when the record

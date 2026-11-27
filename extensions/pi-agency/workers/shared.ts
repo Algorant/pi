@@ -1,5 +1,7 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -7,7 +9,7 @@ import { Type } from "typebox";
 import type { Static } from "typebox";
 import { resolveBenchmarkWorkerModel, type BenchmarkWorkerModel, type RoleRegistry } from "../model-roles.ts";
 import type { WorkerProjectRule } from "./brief.ts";
-import { tandemShow } from "../state.ts";
+import { stateDir, tandemShow } from "../state.ts";
 import { nstarContractBody } from "../nstar-note.ts";
 import { applyTodoEntry, type TodoItem } from "../../pi-todos/state.ts";
 import type {
@@ -259,6 +261,80 @@ export async function sourceAlreadyIntegrated(integration: { source: { checkoutP
   } catch {
     return undefined;
   }
+}
+
+/** What `integrateSource` observed while holding the repository's integration lock. */
+export type IntegrationSamples = { before: string; sourceTip: string; targetTip: string; result: string };
+
+/** `refused`: nothing was merged. `worktrunk`: wt failed after the merge began (checkouts preserved, as before).
+ * `unsampled`: wt succeeded but the resulting tips could not be read, so the merge happened and must not be retried blindly. */
+export class IntegrationError extends Error {
+  readonly phase: "refused" | "worktrunk" | "unsampled";
+  constructor(phase: "refused" | "worktrunk" | "unsampled", message: string) { super(message); this.phase = phase; }
+}
+
+/** Runs entirely inside `flock`, so the lock is held on a descriptor that this shell, wt, git and any hook inherit:
+ * the kernel releases it only when the last of them exits, never early when the owner Pi dies. POSIX sh, positional
+ * arguments only: $1 source checkout, $2 target branch, $3 target checkout, $4 source HEAD that was checked.
+ * Samples go to fd 3 (closed for wt); wt's own JSON stays on stdout. */
+const INTEGRATE_SCRIPT = [
+  'head=$(git -C "$1" rev-parse HEAD) || { echo "cannot read the source HEAD" >&2; exit 70; }',
+  '[ "$head" = "$4" ] || { echo "source HEAD is now $head, not the checked $4" >&2; exit 71; }',
+  'dirty=$(git -C "$1" status --porcelain) || { echo "cannot inspect the source checkout" >&2; exit 70; }',
+  '[ -z "$dirty" ] || { echo "source checkout has uncommitted changes" >&2; exit 72; }',
+  'before=$(git -C "$3" rev-parse HEAD) || { echo "cannot read the target HEAD" >&2; exit 70; }',
+  'printf "before=%s\\nmerging\\n" "$before" >&3 || exit 70',
+  'wt -C "$1" merge "$2" --no-remove --format json 3>&-',
+  'rc=$?',
+  '[ "$rc" -eq 0 ] || exit "$rc"',
+  'printf "merged\\n" >&3',
+  'source=$(git -C "$1" rev-parse HEAD) && target=$(git -C "$3" rev-parse HEAD) || exit 80',
+  'printf "source=%s\\ntarget=%s\\ndone\\n" "$source" "$target" >&3 || exit 80',
+].join("\n");
+
+/**
+ * The one authoritative target-touching step of a finish: under a per-repository kernel lock (shared by every owner
+ * process on this machine; no polling, timer or service) re-verify the checked source HEAD and cleanliness, sample the
+ * target tip, run `wt merge --no-remove`, then sample the actual source and target tips. A queued call that has spawned
+ * waits inside flock and, once it runs, is not cancellable, like the unlocked wt call it replaces; abort is honoured only
+ * before spawning. Other Git writers, other machines and `worktree:false` are not covered.
+ */
+export async function integrateSource(params: {
+  repoKey: string; source: { checkoutPath: string }; target: { checkoutPath: string; branch: string };
+  expectedSourceHead: string; signal?: AbortSignal;
+}): Promise<IntegrationSamples> {
+  if (params.signal?.aborted) throw new IntegrationError("refused", "Finish was aborted before the merge started; nothing changed.");
+  let lockfile: string;
+  try {
+    const directory = stateDir("pi", "worker-integration-locks");
+    await mkdir(directory, { recursive: true });
+    lockfile = `${directory}/${createHash("sha256").update(await realpath(params.repoKey)).digest("hex")}.lock`;
+  } catch (error) {
+    throw new IntegrationError("refused", `Cannot prepare the integration lock for ${params.repoKey}. ${diagnosticText(error)}`);
+  }
+  // The lock path was prepared asynchronously: this is the last point where abort is honoured.
+  if (params.signal?.aborted) throw new IntegrationError("refused", "Finish was aborted before the merge started; nothing changed.");
+  return new Promise<IntegrationSamples>((done, fail) => {
+    const child = spawn("flock", ["--exclusive", lockfile, "sh", "-c", INTEGRATE_SCRIPT, "sh",
+      params.source.checkoutPath, params.target.branch, params.target.checkoutPath, params.expectedSourceHead], { stdio: ["ignore", "pipe", "pipe", "pipe"] });
+    let stdout = "", stderr = "", samples = "", settled = false;
+    const settle = (finish: () => void) => { if (!settled) { settled = true; finish(); } };
+    child.stdout?.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr?.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    (child.stdio[3] as NodeJS.ReadableStream | null)?.setEncoding("utf8").on("data", (chunk: string) => { samples += chunk; });
+    child.on("error", (error) => settle(() => fail(new IntegrationError("refused", `Cannot run flock for the integration lock (util-linux flock is required); nothing was merged. ${diagnosticText(error)}`))));
+    child.on("close", (code, signal) => settle(() => {
+      const lines = samples.split("\n");
+      const value = (name: string) => lines.find((line) => line.startsWith(`${name}=`))?.slice(name.length + 1);
+      const detail = [stderr, stdout].map((part) => part.trim()).filter(Boolean).join("\n");
+      const exit = signal ? `signal ${signal}` : `exit code ${code}`;
+      if (!lines.includes("merging")) return fail(new IntegrationError("refused", `${detail || exit} (${exit})`));
+      if (!lines.includes("merged")) return fail(new IntegrationError("worktrunk", `${detail || "no output"} (${exit})`));
+      const before = value("before"), sourceTip = value("source"), targetTip = value("target");
+      if (code !== 0 || !before || !sourceTip || !targetTip || !lines.includes("done")) return fail(new IntegrationError("unsampled", `${detail || "no output"} (${exit})`));
+      done({ before, sourceTip, targetTip, result: stdout });
+    }));
+  });
 }
 
 export function validateNativeRemovalResult(output: string, integration: { source: { checkoutPath: string; branch: string } }): string {

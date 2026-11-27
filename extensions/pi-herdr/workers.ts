@@ -20,7 +20,7 @@ import {
 import {
   DiscardParameters, FeedbackParameters, MAX_PROMPT_LENGTH, PauseParameters, REJECTED_REPORT_SUFFIX,
   WorkerAnswerParameters, WorkerAskParameters, WorkerProgressParameters, WorkerReportParameters,
-  approvedHookTypes, captureWorkerAssignment, checkInNotifier, checkoutBranch, command, diagnosticText, formatWorkerDiff, workerDiff,
+  approvedHookTypes, captureWorkerAssignment, checkInNotifier, checkoutBranch, command, diagnosticText, formatWorkerDiff, integrateSource, IntegrationError, workerDiff,
   ensureDeliveredThenRework, latestTodoList, nativeCheckoutPresent, nativeHead, nativeProjectIdentity, nativeWorktreeForBranch,
   providerErrorDiagnostic, rejectedReportDiagnostic, removeNativeWorkerCheckout, reportScopeMatchesCurrent,
   requireActiveTask, requireCleanCheckout, requireNoOpenWorkerSubtasks, runRunnableValidations, runTandemCommand,
@@ -1217,37 +1217,43 @@ export function registerHcWorkers(pi: ExtensionAPI): { startWorker: StartWorker;
     if (!outcome) {
       await validateCapturedCheckout(integration.source, integration.repoKey, "Worker source");
       await requireCleanCheckout(integration.source.checkoutPath, "Worker source");
+      // One capture: the ready-SHA gate, recorded-check reuse and the locked recheck all use this same HEAD.
+      const checkedHead = await nativeHead(integration.source.checkoutPath, "Worker source");
       const reportedHead = report?.source?.head;
-      if (!crashSummary && reportedHead) {
-        const liveHead = await nativeHead(integration.source.checkoutPath, "Worker source");
-        if (liveHead !== reportedHead) throw new Error(`Worker ${params.agent} ready report was made at ${reportedHead}, but its checkout is now at ${liveHead}; finish refuses to merge a commit made after the report. Have the Worker report again. Finish made no changes.`);
-      }
+      if (!crashSummary && reportedHead && checkedHead !== reportedHead) throw new Error(`Worker ${params.agent} ready report was made at ${reportedHead}, but its checkout is now at ${checkedHead}; finish refuses to merge a commit made after the report. Have the Worker report again. Finish made no changes.`);
       // Checks that passed at worker_report on this exact HEAD (the scope check above proved the
       // same validations) are not run again; any other HEAD, or a recorded failure, reruns them.
       const recorded = report?.checks;
-      if (!crashSummary && recorded && checksPassed(recorded) && recorded.head === await nativeHead(integration.source.checkoutPath, "Worker source")) checks = "reused";
+      if (!crashSummary && recorded && checksPassed(recorded) && recorded.head === checkedHead) checks = "reused";
       else {
         checks = "rerun";
         const runnable = record.taskId ? await runRunnableValidations(record.taskId, target, integration.source.checkoutPath, checkInNotifier(ctx), signal) : await taskFreeChecks(record, checkInNotifier(ctx), signal);
         const failed = runnable.results.find((result) => result.exitCode !== 0);
         if (failed) throw new Error(`Runnable validation failed before Worker finish merge: ${failed.command} (exit code ${failed.exitCode}). Not run: ${runnable.notRun.join("; ") || "none"}.\nOutput tail:\n${failed.outputTail || "(no output)"}`);
       }
-      const before = hasWorktree(record) ? await nativeHead(target, "Integration target") : integration.baseHead!;
+      let before = integration.baseHead!;
       let result: string;
       let tips = await sourceAlreadyIntegrated(integration);
       if (!hasWorktree(record)) {
         alreadyMerged = true;
         tips = { sourceTip: await nativeHead(target, "Shared checkout"), targetTip: await nativeHead(target, "Shared checkout") };
         result = "worktree:false: commit already on target; no merge";
-      } else if (tips) { alreadyMerged = true; result = JSON.stringify({ alreadyMerged: true, ...tips }); }
-      else {
+      } else if (tips) {
+        // Already on the target: an empty range, so a concurrent neighbour's commits never enter this revert range.
+        alreadyMerged = true; before = tips.targetTip; result = JSON.stringify({ alreadyMerged: true, ...tips });
+      } else {
+        const route = `${integration.source.branch} to ${integration.target.branch}`;
         try {
-          result = await withCheckIn(checkInNotifier(ctx), `Worktrunk merge of ${integration.source.branch} into ${integration.target.branch}`, () =>
-            command("wt", ["-C", integration.source.checkoutPath, "merge", integration.target.branch, "--no-remove", "--format", "json"], undefined, 0));
+          // Target tips and the merge are sampled together under the per-repository integration lock.
+          const merged = await withCheckIn(checkInNotifier(ctx), `Worktrunk merge of ${integration.source.branch} into ${integration.target.branch}`, () =>
+            integrateSource({ repoKey: integration.repoKey, source: integration.source, target: integration.target, expectedSourceHead: checkedHead, signal }));
+          before = merged.before; result = merged.result; tips = { sourceTip: merged.sourceTip, targetTip: merged.targetTip };
         } catch (error) {
-          throw new Error(`Worktrunk refused the finish merge from ${integration.source.branch} to ${integration.target.branch}. ${diagnosticText(error)} Both checkouts are preserved.`);
+          if (!(error instanceof IntegrationError)) throw error;
+          if (error.phase === "refused") throw new Error(`Finish refused the merge from ${route}; nothing was merged and both checkouts are preserved. ${error.message}`);
+          if (error.phase === "unsampled") throw new Error(`Worktrunk merged ${route}, but finish could not read the resulting source and target tips, so no receipt was written. Do not retry the merge blindly: inspect both checkouts with git; worker_finish retried afterwards records an already-integrated empty-range receipt if the source is on the target. ${error.message}`);
+          throw new Error(`Worktrunk refused the finish merge from ${route}. ${error.message} Both checkouts are preserved.`);
         }
-        tips = { sourceTip: await nativeHead(integration.source.checkoutPath, "Worker source"), targetTip: await nativeHead(target, "Integration target") };
       }
       try {
         await write({ version: 2, disposition: "integrated", deliveryId: record.deliveryId, taskId: record.taskId, ownerSessionId: record.ownerSessionId,
