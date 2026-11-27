@@ -61,6 +61,7 @@ and no clear definition of done.
 
 Apply `cold-read.md` beside this file: the three gaps, how to verify every
 reference against the repository root, and the finding format. It is the same
-definition the dispatch cold read uses: the advisory `scout` helper `pi-herdr`
-starts after a Task-free brief or Ceph kickoff (`../../extensions/pi-herdr/README.md`).
+definition the dispatch cold reads use: the scout a caller starts on a draft
+new Task-free brief before submitting it (`../agency/SKILL.md`, *Cold-read a brief*), and
+the advisory scout `pi-herdr` starts after a Ceph kickoff (`../../extensions/pi-herdr/README.md`).
 Report the findings; never rewrite the skill.

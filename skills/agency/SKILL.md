@@ -64,7 +64,49 @@ A Ceph dispatches independent tracks immediately. Use exactly one of a real Task
 manus_start {taskId?, brief?, label?, worktree?, needsAlgorant?, direction?, model?, thinking?, from?}
 ```
 
-Task-free starts require a starter label and nonempty Outcome / Scope / Exclusions / Check / Done sections (Markdown headings accepted). Scope lists repo-relative files/directories (directories end in `/`); Check carries runnable `$ ` lines plus any manual outcome. Keep the request verbatim. Worktrees default on; `worktree:false` skips isolation for research/shared checkout. `needsAlgorant:true` requires human judgement before integration. The fixed brief supplies label, return route, project/checkout and needsAlgorant. No Task is fabricated.
+Task-free starts require a starter label and a brief in the [brief template](#brief-template-and-cold-read) below. Scope lists repo-relative files/directories (directories end in `/`); Check carries runnable `$ ` lines plus any manual outcome. Worktrees default on; `worktree:false` skips isolation for research/shared checkout. `needsAlgorant:true` requires human judgement before integration. The fixed brief supplies label, return route, project/checkout and needsAlgorant. No Task is fabricated.
+
+#### Brief template and cold read
+
+A NEW Task-free Worker or manus brief carries all nine headings, in this order: `Request`, `Sources`, `Rejected`, `Return`, then `Outcome` / `Scope` / `Exclusions` / `Check` / `Done` (`## ` headings or `Name:`). The start refuses before any side effect when one is missing, empty (or only a `<placeholder>`) or out of order, and prints the copyable template (`BRIEF_SKELETON` in `agent/extensions/pi-agency/workers/contract.ts` is the one copy). `taskId` starts and the helper `task` are not held to it, and saved or recovered work keeps the five-section reader.
+
+- **Request**: two shapes, told apart by the first line. Either `> ` then Algorant's exact words (relayed: add a line `Relayed by <label> (m1234abcd)` after the quote), or, with no direct quote, exactly `No direct quote:` then the reason, with no quote lines: never invent or paraphrase a quote, and cite the durable source in Sources. The tool does not check the words are verbatim.
+- **Sources**: free text: the inbox id, Task, path, URL or commit where the ask and evidence live. With `No direct quote:` it cannot be `none`, `n/a` or a placeholder.
+- **Rejected**: options Algorant ruled out, in his words; `none` only when true.
+- **Return**: the output format wanted back ("plan only, no edits", "one commit + proof").
+- Success check is `Check` (runnable `$ ` lines) plus `Done` (what Algorant or the owner observes).
+
+Placeholders for the two shapes (replace each with the real text; never style your own words as his):
+
+```
+## Request
+> <Algorant's exact words>
+Relayed by <label> (m1234abcd)
+## Sources
+Inbox m1234abcd; task-N item <n>; <path or URL>
+## Rejected
+<option he ruled out, in his words>   (or: none)
+## Return
+<format wanted>
+## Outcome
+...
+```
+
+```
+## Request
+No direct quote: <why there is none; e.g. derived from a Task item, not said aloud>
+## Sources
+task-N item <n>; <path or commit that carries the ask>
+```
+
+**Cold-read a brief** before launching it. The tool does not do this; you do, with the existing scout, on the draft you are about to submit:
+
+```
+dendra_start {kind:"scout", label:"Cold read <2-3 words>", task:
+"You are a cold reader, not an editor. Read ~/.pi/agent/skills/audit/cold-read.md and apply exactly its checks to the draft contract below. Repository root for every path and command you check: <absolute repo root>. Report only its three gaps, in its format; never rewrite.\n\n--- draft contract, verbatim ---\n<the whole draft brief>"}
+```
+
+End the turn; its findings arrive in your inbox. Fix or consciously accept each gap, then make the ordinary `dendra_start` Worker / `manus_start` call. The draft must fit the helper `task` limit (16000 characters including this wrapper); a larger one is a Task or a smaller brief. A Ceph kickoff still gets the tool's advisory cold read after launch.
 
 A Worker or manus whose proof needs its own hc core uses `~/.pi/agent/scripts/hc-test` (`HC_TEST_ROOT=/tmp/<dir>`) for every test-core call, never bare `hc` with a sourced env file (AGENTS.md, *Testing*); say so in briefs that call for an isolated core.
 
@@ -100,7 +142,7 @@ A Reviewer is the exception, not a step every change goes through: start one onl
 
 ### Native Workers
 
-One `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?, model?, thinking?, from?}` path accepts exactly taskId OR brief. Task-free Workers are small, self-contained work by definition: require a label and the five-section contract above; larger work gets a Task or manus. No Effort field, `change` shortcut, Task-only gate, fabricated board record or alternate launcher. The brief is durable scope; `prompt` is temporary direction only.
+One `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?, model?, thinking?, from?}` path accepts exactly taskId OR brief. Task-free Workers are small, self-contained work by definition: require a label and the [brief template](#brief-template-and-cold-read); larger work gets a Task or manus. No Effort field, `change` shortcut, Task-only gate, fabricated board record or alternate launcher. The brief is durable scope; `prompt` is temporary direction only.
 
 Default `worktree:true` uses Worktrunk's approved creation lifecycle. Explicit `false` uses the clean captured checkout and refuses a second active worktree-less Worker there before launch; its finish/discard closes only the captured child (never merge, remove the checkout or delete its branch). No locks or queue. Workers are the last delegation level and start no further agents.
 

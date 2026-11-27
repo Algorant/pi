@@ -14,7 +14,7 @@ import { command, diagnosticText, MAX_PROMPT_LENGTH, captureWorkerAssignment, na
 import { createHcManusRecord, updateHcWorkerRecord, type HcWorkerIntegration } from "../pi-agency/workers/hc-record.ts";
 import { newId } from "../pi-agency/state.ts";
 import { nstarNote } from "../pi-agency/nstar-note.ts";
-import { requireContract } from "../pi-agency/workers/contract.ts";
+import { requireContract, requireLaunchBrief } from "../pi-agency/workers/contract.ts";
 import { KIND_KEY, LABEL_KEY, labelFrom, nameFor, terminalWho } from "../../scripts/whois.ts";
 import { CHILD_EXIT, coreId as appCoreId, hcJson, hcMachines, KICKOFF_FLAG } from "./core.ts";
 import { appCommand, localAppHost, resolveAppSpace, type AppHost } from "./app-host.ts";
@@ -52,7 +52,7 @@ const DendraParameters = Type.Object({
   label: Label("the Task title (Worker); required without a Task; or the task first line (helper)"),
   task: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Helpers: the self-contained bounded assignment (required)." })),
   taskId: Type.Optional(Type.String({ minLength: 1, description: "Worker: existing root Task; exactly one taskId or brief." })),
-  brief: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: verbatim small-work contract with nonempty Outcome / Scope / Exclusions / Check / Done sections. Scope lists repo-relative files/dirs (dirs end in /); Check uses runnable `$ ` lines. Exactly one taskId or brief; label required without a Task." })),
+  brief: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: small-work contract with nonempty Request / Sources / Rejected / Return, then Outcome / Scope / Exclusions / Check / Done sections, all nine required in that order (a refusal prints the skeleton). Request's first line is `> ` Algorant's exact words (relayed metadata may follow), or exactly `No direct quote: <reason>` with a durable source in Sources; Rejected says `none` only when true. Scope lists repo-relative files/dirs (dirs end in /); Check uses runnable `$ ` lines. Cold-read the draft with a scout first (agency skill). Exactly one taskId or brief; label required without a Task." })),
   worktree: Type.Optional(Type.Boolean({ description: "Worker: default true, false explicitly skips isolation and uses this checkout." })),
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true delivers for Algorant judgement and forbids auto-finish." })),
   prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Worker: optional temporary direction; durable scope stays in the Task." })),
@@ -62,7 +62,7 @@ const DendraParameters = Type.Object({
 
 const ManusParameters = Type.Object({
   taskId: Type.Optional(Type.String({ minLength: 1, description: "Existing project Task; exactly one taskId or brief." })),
-  brief: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Verbatim track contract with nonempty Outcome / Scope / Exclusions / Check / Done sections; Scope lists repo-relative files/dirs. Exactly one taskId or brief; label required without a Task." })),
+  brief: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH, description: "Track contract with nonempty Request / Sources / Rejected / Return, then Outcome / Scope / Exclusions / Check / Done sections, all nine required in that order (a refusal prints the skeleton). Request's first line is `> ` Algorant's exact words (relayed metadata may follow), or exactly `No direct quote: <reason>` with a durable source in Sources; Rejected says `none` only when true. Scope lists repo-relative files/dirs. Cold-read the draft with a scout first (agency skill). Exactly one taskId or brief; label required without a Task." })),
   needsAlgorant: Type.Optional(Type.Boolean({ description: "Default false; true requires Algorant judgement before integration." })),
   label: Label("the Task title; the label is also its tab name and its slug its branch"),
   worktree: Type.Optional(Type.Boolean({ description: "Default true: own Worktrunk checkout; false explicitly skips it (research/shared checkout)." })),
@@ -183,7 +183,7 @@ const COLD_READ = fileURLToPath(new URL("../../skills/audit/cold-read.md", impor
 
 /**
  * The one read-only helper launch: `dendra_start` scout/researcher/reviewer, and the cold read after a
- * brief or kickoff. Preconditions are settled by the caller; this names the terminal, resolves the
+ * Ceph kickoff. Preconditions are settled by the caller; this names the terminal, resolves the
  * child's model (a role default cuts over only when quota alone blocks it; an explicit one never)
  * and runs one hc child. It never selects, waits, polls or retries.
  */
@@ -216,12 +216,12 @@ async function launchHelper(kind: "scout" | "researcher" | "reviewer", label: st
 }
 
 /**
- * One advisory cold read after a confirmed Task-free brief or a Ceph kickoff. The definition is inline
+ * One advisory cold read after a confirmed Ceph kickoff (a Task-free brief is cold-read by its caller before launch, never here). The definition is inline
  * in the helper's task with the text and the repository root, so the helper never depends on which
  * agent directory it loaded. It never delays, blocks or retries the launch: a refusal or launch error
  * leaves the launch standing and returns one reported line for the card.
  */
-async function coldRead(what: "brief" | "kickoff", label: string, text: string, root: string, ctx: ExtensionContext): Promise<Record<string, unknown>> {
+async function coldRead(what: "kickoff", label: string, text: string, root: string, ctx: ExtensionContext): Promise<Record<string, unknown>> {
   let definition: string;
   try { definition = readFileSync(COLD_READ, "utf8").trim(); }
   catch (error) { return { status: "not started", error: `${COLD_READ} is unreadable: ${diagnosticText(error)}` }; }
@@ -268,16 +268,15 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const self = await caller();
     if (params.kind === "worker") {
       requireContract(params);
+      requireLaunchBrief(params);
       if (params.label !== undefined) labelOf(params.label, "");
       if (params.task !== undefined) throw new Error("dendra_start worker takes taskId or brief, not task. Nothing was started.");
       requireOpenRequest(params.from, self);
       const started = await startWorker({ taskId: params.taskId, brief: params.brief, label: params.label?.trim(), worktree: params.worktree ?? true, needsAlgorant: params.needsAlgorant ?? false, model: params.model, thinking: params.thinking, from: params.from, prompt: params.prompt ?? DEFAULT_WORKER_DIRECTION }, signal, ctx);
       const d = started.details as Record<string, any>;
       const closed = closeRequest(params.from, `${d.label} (${d.agent})`, self);
-      // Task-free briefs only: a Task-backed Worker's scope is the Task, not a starter's prose.
-      const cold = params.brief === undefined ? undefined : await coldRead("brief", d.label ?? params.label ?? "", params.brief, ctx.cwd, ctx);
-      return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}${coldReadNote(cold)}`,
-        { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...(cold ? { coldRead: cold } : {}), ...closed });
+      return result(`${(started.content[0] as { text: string }).text}${closed.requestClosed ? ` Closed request ${params.from}.` : closed.requestCloseError ? ` ${closed.requestCloseError}` : ""}`,
+        { ...d, kind: "worker", name: d.agent, cwd: d.worktreePath, route: self.route, ...closed });
     }
     if ([params.taskId, params.brief, params.prompt, params.worktree, params.needsAlgorant].some((value) => value !== undefined)) throw new Error(`dendra_start ${params.kind} takes task and an optional label; Worker fields are for kind worker. Nothing was started.`);
     if (!params.task?.trim()) throw new Error(`dendra_start ${params.kind} requires task, the self-contained bounded assignment. Nothing was started.`);
@@ -297,6 +296,7 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
   async function manusStart(params: { taskId?: string; brief?: string; label?: string; worktree?: boolean; needsAlgorant?: boolean; direction?: string; model?: string; thinking?: string; from?: string }, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<Result> {
     // Preconditions, all before any side effect.
     requireContract(params);
+    requireLaunchBrief(params);
     const worktree = params.worktree ?? true;
     const needsAlgorant = params.needsAlgorant ?? false;
     const self = await caller();
@@ -394,10 +394,8 @@ export function registerDispatch(pi: ExtensionAPI, startWorker: StartWorker): vo
     const rowHook = await workStart(record, started.address, { core: self.core, terminal: self.address, record: self.hc });
     const tab = await nameTab(host, spaceId, started.address, label);
     const closed = closeRequest(params.from, `${label} (${name})`, self);
-    // Task-free briefs only: a Task-backed manus reads its contract from the Task.
-    const cold = params.brief === undefined ? undefined : await coldRead("brief", label, params.brief, repo.repoRoot, ctx);
-    return withHook(result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${describeSelection(manusModel)}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.${coldReadNote(cold)}`,
-      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, selection: manusModel, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...(cold ? { coldRead: cold } : {}), ...tab, ...closed }), rowHook);
+    return withHook(result(`Started manus ${label} (${name}, ${started.address}) ${task ? `for ${task.id} ` : "(Task-free) "}in ${cwd}, space ${space.name}; tab ${tab.tab === "pending" ? "adoption pending (it names its own tab)" : `${tab.tabName}`}. Model ${describeSelection(manusModel)}${manusSwitch}. Its reports arrive in your inbox; do not wait or poll. Finish it with worker_finish {agent: "${name}"} once it delivers, or dispose it with worker_discard.`,
+      { label, name, terminal: started.address, taskId: task?.id, title: task?.title, worktree, needsAlgorant, cwd, ...(worktree ? { branch } : {}), model: record.model, selection: manusModel, modelSet: manusModel.set, modelQuota: manusModel.quota, ...(manus.switched ? { modelSwitched: manus.switched } : {}), space: spaceId, spaceName: space.name, appHost: host.machine ?? "local", labels, route: self.route, brief, deliveryId: record.deliveryId, ...tab, ...closed }), rowHook);
     } catch (error) {
       // A switch that already happened stays applied; a later failure never hides it.
       throw new Error(`${diagnosticText(error)}${manusSwitch ? `${manusSwitch} That cutover stays applied.` : ""}`);

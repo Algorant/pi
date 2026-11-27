@@ -291,18 +291,17 @@ checkout or space) and names it; nothing is removed automatically.
   this machine's inbox log; after a confirmed launch it is closed through the
   shared inbox close (`closeMessage`) with the note `dispatched to <label> (<name>)`. A failed close is reported, the
   launch stands.
-- Cold read (task-755): after a confirmed Task-free Worker or manus `brief`, or a
-  Ceph `kickoff`, the launch starts one read-only `scout` helper through the same
-  `launchHelper` path a `dendra_start` helper uses. Its task holds
-  `agent/skills/audit/cold-read.md` inline (not a path, so the helper never
-  depends on which agent directory it loaded), then the brief or kickoff verbatim
-  and the repository root. It reports only three gaps — context only the
-  conversation explains, references that do not resolve, and no clear definition
-  of done — and never rewrites. It is advisory: the launch is never delayed,
-  blocked or retried, a refused or failed cold read leaves the launch standing,
-  and one line in the tool details and card says it started or why it did not.
-  Task-backed and helper launches skip it, and it costs one extra read-only child
-  per brief or kickoff launch.
+- Cold read (task-755): after a confirmed Ceph `kickoff`, the launch starts one
+  advisory read-only `scout` helper through the same `launchHelper` path a
+  `dendra_start` helper uses. Its task holds `agent/skills/audit/cold-read.md`
+  inline (not a path, so the helper never depends on which agent directory it
+  loaded), then the kickoff verbatim and the repository root. It reports only three
+  gaps — context only the conversation explains, references that do not resolve,
+  and no clear definition of done — and never rewrites. The launch is never
+  delayed, blocked or retried, a refused or failed cold read leaves the launch
+  standing, and one line in the tool details and card says it started or why it
+  did not. Task-backed, brief and helper launches skip it: a Task-free Worker or
+  manus `brief` is cold-read by its caller before launch (below), never by the tool.
 - `dendra_start {kind, task, label?}` for `scout`/`researcher`/`reviewer` runs
   `hc run --bg --rm --no-notify --json --name <slug> --cwd <cwd> --label label=<label>
   --label kind=<kind> -- child-exit pi <owner's -e set> --agency-profile <kind> -- "<task>"`
@@ -319,7 +318,7 @@ checkout or space) and names it; nothing is removed automatically.
 - `dendra_start {kind:"worker", taskId?, brief?, label?, worktree?, needsAlgorant?, prompt?, model?, thinking?}` is the one Worker start. Exactly taskId OR brief, label required Task-free. A Task-free Worker is small self-contained work; larger work gets a Task or manus. No fabricated Task, `change` shortcut or alternate launcher. Its ordinary `worker` role is resolved after the read-only dispatch preconditions and before the checkout, record and terminal, and a quota-only block of a role default is answered by Herdra's selector first; an explicit `model`/`thinking` is never cut over.
 - Filing a Task meant for a Worker: set `effort` when filing (never guessed by the dispatcher). Medium or larger effort also needs at least one `relatedFiles` entry and a runnable `$ <command>` validation; `trivial` and `small` need only effort. `dendra_start {kind:"worker", taskId}` checks these before any checkout, record or terminal and refuses once, naming every missing field (with effort unset it lists effort plus the two conditional on medium or larger), so fix them all in one pass. A subtask is refused separately: a Worker owns the root Task.
 - `manus_start {taskId?, brief?, label?, worktree?, needsAlgorant?, direction?, model?, thinking?}` resolves the unique app host whose native space ID matches the caller's `herdr.space` label and whose tab contains the caller terminal; when `herdr.tab` exists it must match too. This also supports existing local callers that have no `herdr.tab` label, while still requiring unique actual terminal membership. It checks the app space's native machine alias against the caller's permanent HC core id using that app host's `hc machine ls`; it discovers only the local app and currently connected peers. Missing app binaries are skipped; no membership, multiple memberships, or unresolved identity refuses before side effects. The HC launch, worktree, starter and inbox return route remain on the caller's core. With default worktree:true it creates the checkout through Worktrunk, `wt switch --create <branch> --base @ --no-cd`, so a manus branches from its starter's HEAD exactly as a Worker does, then writes a manus record (below) before launching, so a created checkout always has an owner. It resolves the `manus` role (its own entry, or the selected named set's `manus` cell) before any worktree or record and passes that exact `--model provider/model:thinking` to the child; there is no orchestrator or worker fallback, and a missing role or cell refuses before side effects. Its record's `model` states that selection (historical records may still say `pi-default`). Native `--rm --no-parent` under `child-exit` (its `starter=` hears an unreported end), optional task=, starter=, label= and needsAlgorant= labels. The child receives the unqualified native `herdr.space` id and uses the resolved host for its one app rename; it never merges or closes itself. A failed launch keeps the checkout and names the record, so the starter can finish or discard it. No focus/wait/poll.
-- Task-free brief strings preserve the request verbatim with nonempty Outcome / Scope / Exclusions / Check / Done sections (Markdown headings accepted). Scope lists repo-relative files/directories, directories ending in `/`; Check uses runnable `$ ` lines plus manual observations. Managed context adds label, owner/return route, project/checkout and needsAlgorant. Git and originating inbox thread are the record, alongside existing Worker lifecycle/receipts.
+- Task-free brief strings (a NEW Worker or manus launch) carry all nine headings, in this order: `Request`, `Sources`, `Rejected`, `Return`, then the existing `Outcome` / `Scope` / `Exclusions` / `Check` / `Done` (Markdown headings accepted); `requireLaunchBrief` in `agent/extensions/pi-agency/workers/contract.ts` refuses otherwise, before any side effect, printing its one copyable `BRIEF_SKELETON`. A section that is empty or only `<placeholders>` is missing. `Request` has two shapes, told apart by its first line: `> ` followed by nonblank quote text (relayed metadata may follow), or exactly `No direct quote:` with a nonblank reason, no quote lines, and then `Sources` must hold something other than `none`/`n/a`/a placeholder (inbox id, Task, path, URL, commit). Verbatim truth and Sources text are not checked. `Sources`, `Rejected` and `Return` are free text; `Rejected` is `none` only when true. Scope lists repo-relative files/directories, directories ending in `/`; Check uses runnable `$ ` lines plus manual observations. Saved, recovered and finished work, `taskId` starts and helper `task` keep the historical five-section reader (`briefContract`) and are never held to the new sections. The tool does no cold read: the caller runs one with an ordinary `dendra_start` scout on the draft before submitting (agency skill, *Cold-read a brief*) and addresses its findings. Managed context adds label, owner/return route, project/checkout and needsAlgorant. Git and originating inbox thread are the record, alongside existing Worker lifecycle/receipts.
 - `ceph_start {project, folder, kickoff, label?, model?, thinking?}` requires `folder` to be its own Git
   checkout root with a Tandem workspace (projectify prepares both). It refuses
   when `hc ls` shows a live terminal named `<project>` or at `<project> / main`
