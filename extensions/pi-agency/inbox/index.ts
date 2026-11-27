@@ -5,7 +5,7 @@ import { createAgentSendRenderer, renderAgentMessage } from "../../pi-ui/tool-ui
 import { NSTAR_INBOX } from "../nstar-note.ts";
 import { inboxGate } from "./gate.ts";
 import { deliveryHint, dropLocalEnvelope, readTarget, sendAgentMessage, statusText, type SendParams } from "./send.ts";
-import { isCephTerminal, requestStart, withHook } from "../../pi-herdr/herdra-work.ts";
+import { ASK_MARK, askRefusal, checkAskTarget, isCephTerminal, requestStart, trackAsk, withHook, type AskPlan } from "../../pi-herdr/herdra-work.ts";
 import { InboxOverlay, type InboxRow } from "../../pi-ui/tool-ui/custom-tools/inbox-overlay";
 import { addressText, ageText, closeMessage, HEADLINE_MAX, ID_PATTERN, inboxDir, inboxKey, KINDS, localMachine, messages, openMessages, readEvents, recordDelivery, thread, type Endpoint, type Envelope, type MessageView } from "./envelope.ts";
 import { hcEndpoint, hcJson, hcMachines, type HcMachine } from "../../pi-herdr/core.ts";
@@ -260,13 +260,22 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
         body: { type: "string", minLength: 1, description: `Message text: line 1 is the answer, a one-line headline of at most ${HEADLINE_MAX} characters; details below. A longer first line is split at its last word boundary within ${HEADLINE_MAX} and the overflow becomes the first body line, before any existing details; nothing is dropped.` },
         reply_to: { type: "string", pattern: ID_PATTERN.source, description: "Id of the agent message this answers, e.g. m4f1a2c9." },
         complete: { type: "string", enum: ["track"], description: "A manus’s final result only: marks the track complete and attaches the automatic failed-call summary. Omit it everywhere else." },
+        ask: { type: "string", minLength: 1, description: "Herdra main only, kind request to a project Ceph, no reply_to: Algorant's exact words. They are appended to the queued body after \"Algorant's words, verbatim:\" and, after the queue is confirmed, tracked as one ask row (request-start, then ask adoption: two separate writes). Nothing is trimmed or changed. Refused before anything is queued if the words are empty, contain NUL, or are over about 65000 plain bytes (the CLI carries them twice, JSON-escaped, in one 131071-byte argument), or if the headline is blank, has a control character, starts with --, or is over 160 bytes." },
         interrupt: { type: "boolean", description: "Set true to stop the recipient's current turn first, then queue this message for its next turn. The result reports whether hc confirmed a stop or observed the terminal idle; if the stop is unconfirmed, the message is still queued. Default false preserves ordinary durable delivery. Blocked messages and replies (reply_to) still steer." },
       },
       required: ["terminal", "kind", "body"],
     },
     ...createAgentSendRenderer(),
-    async execute(_id: string, params: SendParams & { complete?: "track" }, _signal: unknown, _update: unknown, context: ExtensionContext) {
-      const { complete, ...send } = params;
+    async execute(_id: string, params: SendParams & { complete?: "track"; ask?: string }, _signal: unknown, _update: unknown, context: ExtensionContext) {
+      const { complete, ask, ...send } = params;
+      let askPlan: AskPlan | undefined;
+      if (ask !== undefined) {
+        if (send.kind !== "request" || send.reply_to || complete !== undefined || send.control) throw new Error("ask applies only to a new request (no reply_to, no complete); nothing was queued.");
+        const refusal = askRefusal(ask, send.body);
+        if (refusal) throw new Error(`ask refused: ${refusal}; nothing was queued.`);
+        send.body = `${send.body}${ASK_MARK}${ask}`;
+        send.beforeQueue = async ({ target, self, caller }) => { askPlan = await checkAskTarget(target, caller, self); };
+      }
       let failures: Envelope["failures"];
       if (complete !== undefined) {
         if (complete !== "track") throw new Error('complete must be "track".');
@@ -293,7 +302,7 @@ export default function piAgentInbox(pi: ExtensionAPI, transform?: InboxTransfor
       const read = await readTarget(env.to, env.from.core!);
       const target = read?.status;
       // Herdra main's request to a Ceph opens its widget row; the same recipient read decides, and a failure never touches the queued send.
-      const hook = await requestStart(env, self, read);
+      const hook = ask !== undefined ? await trackAsk(env, self, read, ask, askPlan!) : await requestStart(env, self, read);
       const now = target ? ` ${to} is ${statusText(target)} now: ${deliveryHint(target, interruptOutcome)}.` : interruptOutcome ? ` ${deliveryHint({ state: "unknown", route: params.terminal }, interruptOutcome)}.` : "";
       return withHook({
         content: [{ type: "text" as const, text: `Queued ${env.kind} ${env.id}${env.reply_to ? ` (reply to ${env.reply_to})` : ""} for ${to} (${addressText(env.to)}); it is delivered into that Pi conversation when it is running.${now} inbox thread ${env.id} shows queued, delivered or failed.` }],

@@ -8,7 +8,13 @@ import { hcAddress, terminalWho } from "../../../scripts/whois.ts";
 import { writeAtomic } from "../state.ts";
 import { validateFailures, type Failures } from "../../pi-tandem/failure-summary.ts";
 
-export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"]; failures?: Failures };
+/**
+ * `beforeQueue` is called once with the canonical recipient (what `resolveRecipient` returned, the very
+ * value the drop uses) and the caller's own record and address, before any interrupt, envelope or queue;
+ * a throw aborts the send with nothing queued. Only agent_send's tracked ask passes it (herdra-work.ts).
+ */
+export type BeforeQueue = (resolved: { target: string; self: any; caller: { terminal: string; core: string } }) => Promise<void>;
+export type SendParams = { terminal: string; kind: Envelope["kind"]; body: string; reply_to?: string; interrupt?: boolean; control?: Envelope["control"]; failures?: Failures; beforeQueue?: BeforeQueue };
 
 /** Shared atomic local drop; callers record the same send event after success. */
 export function dropLocalEnvelope(env: Envelope): string {
@@ -168,6 +174,7 @@ export async function sendAgentMessage(context: ExtensionContext, params: SendPa
   if (!process.env.HC_TERMINAL_ID) throw new Error("agent_send requires a Pi running in an HC terminal (HC_TERMINAL_ID is unset).");
   const target = await resolveRecipient(params.terminal);
   const [own, self] = await Promise.all([hcAddress(process.env.HC_TERMINAL_ID), hcJson(["get", process.env.HC_TERMINAL_ID])]);
+  await params.beforeQueue?.({ target, self, caller: { terminal: own.terminal, core: own.core } });
   const machine = localMachine();
   const percent = context.getContextUsage()?.percent;
   // A manus's hc `task=` label links its requests to its track's Task (closed when that Task ends).

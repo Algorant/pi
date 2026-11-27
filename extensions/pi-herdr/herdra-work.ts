@@ -3,8 +3,9 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { Envelope } from "../pi-agency/inbox/envelope.ts";
-import { headlineOf } from "../pi-agency/inbox/envelope.ts";
+import { headlineOf, splitHeadline } from "../pi-agency/inbox/envelope.ts";
 import type { TargetRead } from "../pi-agency/inbox/send.ts";
+import { hcJson } from "./core.ts";
 import { readHcWorkerRecord, isManusRecord, type HcWorkerOutcome, type HcWorkerRecord } from "../pi-agency/workers/hc-record.ts";
 
 /**
@@ -27,7 +28,7 @@ const UNDO_MAX_BYTES = 300;
 
 /** The caller's own `hc get` payload with its address and core: both owner paths already hold them. */
 export type HookCaller = { core: string; terminal: string; record: { state?: string; parent?: unknown; status?: { app?: string }; labels?: Record<string, string> } };
-export type HookReport = { edge: "work-start" | "work-done" | "request-start"; key: string; status: "ok" | "failed" | "skipped"; message: string };
+export type HookReport = { edge: "work-start" | "work-done" | "request-start" | "ask"; key: string; status: "ok" | "failed" | "skipped"; message: string };
 
 /**
  * The current Herdra main terminal, read from its actual `hc get` payload (its hc name is null, so a name
@@ -55,7 +56,8 @@ const oneLine = (value: string, max: number): string => {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 };
 
-async function runHerdraOpen(args: string[]): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+/** `redact` keeps the call's arguments (Algorant's words) out of the failure text: only the exit code, never stderr or the command line. */
+async function runHerdraOpen(args: string[], redact = false): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
   try {
     const { stdout } = await execFileAsync(HERDRA_OPEN, args, { encoding: "utf8", timeout: HOOK_TIMEOUT_MS, maxBuffer: 64 * 1024 });
     return { ok: true, out: stdout.trim().split("\n")[0] ?? "" };
@@ -63,13 +65,14 @@ async function runHerdraOpen(args: string[]): Promise<{ ok: true; out: string } 
     const failure = error as { code?: unknown; killed?: boolean; stderr?: string; message?: string };
     if (failure.code === "ENOENT") return { ok: false, error: `herdra-open not found at ${HERDRA_OPEN}` };
     if (failure.killed) return { ok: false, error: `timed out after ${HOOK_TIMEOUT_MS / 1000} s; the row state is unknown` };
+    if (redact) return { ok: false, error: `exit ${String(failure.code)}` };
     const stderr = oneLine(failure.stderr ?? "", 300);
     return { ok: false, error: `exit ${String(failure.code)}${stderr ? `: ${stderr}` : failure.message ? `: ${oneLine(failure.message, 300)}` : ""}` };
   }
 }
 
-async function call(edge: HookReport["edge"], key: string, args: string[]): Promise<HookReport> {
-  const done = await runHerdraOpen([edge, key, ...args]);
+async function call(edge: HookReport["edge"], key: string, args: string[], redact = false): Promise<HookReport> {
+  const done = await runHerdraOpen([edge, key, ...args], redact);
   return done.ok ? { edge, key, status: "ok", message: done.out || "done" } : { edge, key, status: "failed", message: done.error };
 }
 
@@ -147,7 +150,7 @@ export function isCephTerminal(caller: HookCaller): boolean {
  * The key is the new envelope's id, even for a request that carries `reply_to`; the label is its headline
  * exactly as `headlineOf` reads it (herdra-open refuses an unfit one, which shows as a failed hook).
  */
-export async function requestStart(env: Envelope, sender: HookCaller["record"], target: TargetRead | undefined): Promise<HookReport | undefined> {
+export async function requestStart(env: Envelope, sender: HookCaller["record"], target: TargetRead | undefined, redact = false): Promise<HookReport | undefined> {
   const key = env.id;
   try {
     if (env.kind !== "request" || env.control || !isHerdraMain({ core: env.from.core, terminal: env.from.terminal, record: sender })) return undefined;
@@ -159,10 +162,89 @@ export async function requestStart(env: Envelope, sender: HookCaller["record"], 
     const project = cephMainProject(target.record, target.status);
     if (project === undefined) return undefined;
     if (target.record.address !== target.route) return { edge: "request-start", key, status: "failed", message: `hc reports the recipient at ${String(target.record.address)}, not at the queried route ${target.route}` };
-    const report = await call("request-start", key, [project, target.route, headlineOf(env.body)]);
-    return report.status === "ok" && report.message !== `r-${key}` ? { ...report, status: "failed", message: `unexpected output "${report.message}" (expected r-${key})` } : report;
+    const report = await call("request-start", key, [project, target.route, headlineOf(env.body)], redact);
+    return report.status === "ok" && report.message !== `r-${key}` ? { ...report, status: "failed", message: redact ? `unexpected output (expected r-${key})` : `unexpected output "${report.message}" (expected r-${key})` } : report;
   } catch (error) {
     return { edge: "request-start", key, status: "failed", message: oneLine(error instanceof Error ? error.message : String(error), 300) };
+  }
+}
+
+/**
+ * Tracked ask (task-859 #1): one opt-in `ask` on a Herdra-main request to a Ceph. The queued body is the
+ * caller's body plus ASK_MARK plus Algorant's words, byte for byte; after a confirmed queue `request-start`
+ * opens r-<id>, then `herdra-open ask ... --thread <id>` adopts that same row with the same words string.
+ * They are two separate writes under two separate locks, never atomic; neither is retried, and nothing is
+ * resent. A failure or timeout of either leaves that row's state UNKNOWN: the report names the stage and
+ * the id and points at the existing inbox thread and the raw row, never at the words or a command line.
+ */
+export const ASK_MARK = "\n\nAlgorant's words, verbatim:\n";
+/** Linux caps one argv string at 131072 bytes including its NUL. */
+const ARGV_STRING_MAX = 131071;
+/** Room left in that argument for the row's other fields (thread link, flags, JSON punctuation), measured with margin. */
+const ARGV_RESERVE = 512;
+const HEADLINE_BYTES = 160;
+
+/**
+ * herdra-open's `ask` hands the words to jq twice (`words` and `ask`) JSON-escaped in ONE `--argjson`
+ * argument, so the real bound is twice the escaped size, not the raw size (measured on the CLI: plain text
+ * passes at 65000 bytes and fails at 66000; control bytes, six escaped bytes each, pass at 10000 and fail at
+ * 20000). jq also escapes DEL (U+007F) where JSON.stringify does not.
+ */
+function escapedBytes(words: string): number {
+  return Buffer.byteLength(JSON.stringify(words)) - 2 + 5 * (words.match(/\u007f/g)?.length ?? 0);
+}
+
+/** Why `words` with the caller's own `body` (before ASK_MARK is appended: the marker must never stand in for a missing headline) cannot be tracked as an ask, or undefined. Names reasons and sizes, never the words. */
+export function askRefusal(words: string, body: string): string | undefined {
+  if (!/\S/.test(words)) return "ask is empty or only whitespace";
+  if (words.includes("\u0000")) return "ask contains a NUL byte, which no command argument can carry";
+  const size = escapedBytes(words);
+  if (2 * size + ARGV_RESERVE > ARGV_STRING_MAX) return `ask is ${size} JSON-escaped bytes; herdra-open carries it twice in one ${ARGV_STRING_MAX}-byte argument, so at most ${Math.floor((ARGV_STRING_MAX - ARGV_RESERVE) / 2)} escaped bytes fit`;
+  const headline = headlineOf(splitHeadline(body));
+  if (!headline) return "the headline (first line of body) is empty";
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(headline)) return "the headline contains a control character";
+  if (headline.startsWith("--")) return "the headline starts with `--`, which herdra-open ask reads as a flag";
+  if (Buffer.byteLength(headline) > HEADLINE_BYTES) return `the headline is ${Buffer.byteLength(headline)} bytes; herdra-open counts bytes in some locales, so an ask headline is at most ${HEADLINE_BYTES} bytes`;
+  return undefined;
+}
+
+/** What `checkAskTarget` validated before anything was queued; the post-queue stage must find the same caller and recipient. */
+export type AskPlan = { caller: { core: string; terminal: string }; address: string; project: string };
+
+/** Before the queue, on send's own canonical recipient and caller (send.ts `beforeQueue`): Herdra main to a live project Ceph other than itself. */
+export async function checkAskTarget(target: string, caller: { core: string; terminal: string }, self: HookCaller["record"]): Promise<AskPlan> {
+  if (!isHerdraMain({ ...caller, record: self })) throw new Error("ask: only Herdra's main terminal tracks an ask; nothing was queued.");
+  const record = await hcJson(["get", target]);
+  const project = cephMainProject(record);
+  if (project === undefined || typeof record.address !== "string") throw new Error(`ask: ${target} is not a live project Ceph (a foreground Pi in a <project> / main tab); nothing was queued.`);
+  if (record.address === caller.terminal && !target.includes("/")) throw new Error("ask: the recipient is this terminal; nothing was queued.");
+  if (!/^[.]?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(project)) throw new Error(`ask: the recipient's project name is not one herdra-open accepts; nothing was queued.`);
+  return { caller, address: record.address, project };
+}
+
+/** The no-stage variants: nothing ran after the queue, so this call wrote no row; the id and the no-resend guidance are still exact. */
+const NO_STAGE = (id: string, reason: string) => `request ${id} queued; ${reason}; no row stage ran, so this call wrote no row. Do not resend: inspect inbox thread ${id}, then run request-start and ask for that id in order (never a bare ask).`;
+const INSPECT = (id: string) => `Inspect inbox thread ${id} and the raw row r-${id} in ~/.local/state/herdra/open.jsonl before repairing; repair in order (request-start, then ask on the open row), never a bare ask, never a resend.`;
+
+/**
+ * After a confirmed queue of an `ask` request. One report: `ask` ok when r-<id> was opened and adopted;
+ * otherwise the failed stage. The caller and recipient must be exactly the ones `checkAskTarget` saw.
+ */
+export async function trackAsk(env: Envelope, sender: HookCaller["record"], read: TargetRead | undefined, words: string, plan: AskPlan): Promise<HookReport> {
+  const key = env.id;
+  const failed = (edge: HookReport["edge"], message: string): HookReport => ({ edge, key, status: "failed", message });
+  try {
+    if (env.from.core !== plan.caller.core || env.from.terminal !== plan.caller.terminal) return failed("ask", NO_STAGE(key, "the sender differs from the pre-queue check"));
+    if (!read?.record || read.route !== plan.address || cephMainProject(read.record, read.status) !== plan.project) return failed("ask", NO_STAGE(key, "the recipient differs from the pre-queue check"));
+    const start = await requestStart(env, sender, read, true);
+    if (!start) return failed("request-start", NO_STAGE(key, "request-start did not apply to this request"));
+    if (start.status !== "ok") return failed("request-start", `${start.message}; ask not run; state of r-${key} UNKNOWN. ${INSPECT(key)}`);
+    const done = await runHerdraOpen(["ask", headlineOf(env.body), "--ask", words, "--project", plan.project, "--on", read.route, "--thread", key], true);
+    if (!done.ok) return failed("ask", `ask stage NOT confirmed (${done.error}); state of r-${key} UNKNOWN. ${INSPECT(key)}`);
+    if (done.out !== `r-${key}`) return failed("ask", `ask stage printed unexpected output (expected r-${key}); state of r-${key} UNKNOWN. ${INSPECT(key)}`);
+    return { edge: "ask", key, status: "ok", message: `r-${key} opened and adopted as an ask (two writes; words stored exactly as sent)` };
+  } catch (error) {
+    return failed("ask", `${oneLine(error instanceof Error ? error.message : String(error), 200)}; state of r-${key} UNKNOWN. ${INSPECT(key)}`);
   }
 }
 
@@ -181,7 +263,7 @@ export function finishOutcome(receipt: Pick<HcWorkerOutcome, "integration" | "me
 export function withHook<T extends { content: unknown[]; details?: unknown }>(result: T, hook: HookReport | undefined): T {
   if (!hook) return result;
   const line = hook.status === "failed"
-    ? `Herdra row hook ${hook.edge} NOT confirmed (key ${hook.key}): ${hook.message}. ${hook.edge === "request-start" ? "The request is queued in the inbox" : `The native ${hook.edge === "work-start" ? "launch" : "finish or discard"} is complete`} and was not touched or repeated.`
+    ? `Herdra row hook ${hook.edge} NOT confirmed (key ${hook.key}): ${hook.message.replace(/[.\s]+$/, "")}. ${hook.edge === "request-start" || hook.edge === "ask" ? "The request is queued in the inbox" : `The native ${hook.edge === "work-start" ? "launch" : "finish or discard"} is complete`} and was not touched or repeated.`
     : hook.status === "skipped" ? `Herdra row hook ${hook.edge} not run: ${hook.message}.`
     : `Herdra row ${hook.edge}: ${hook.message}.`;
   const first = result.content[0] as { type: "text"; text: string };
