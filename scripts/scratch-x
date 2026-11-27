@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# One scratch X display (real Xvfb on :99 or above) for ONE foreground app command.
+# Usage: scratch-x [-s WxHxD] [--] <command> [args...]
+# Companion of hc-test: for a scratch app that needs an X display, never the live one.
+#   HC_TEST_ROOT=/tmp/t scratch-x -- ~/.pi/agent/scripts/hc-test run ...
+#
+# Env: SCRATCH_X_FROM first display tried (default 99, must be >= 99)
+#      SCRATCH_X_MAX  last display tried  (default 199, at most 9999)
+#      Both must be canonical decimal (no leading zeros, no sign, no spaces); anything
+#      else is refused before any X server is started.
+# The app sees DISPLAY=:N and SCRATCH_X_DISPLAY=:N; WAYLAND_DISPLAY and XAUTHORITY are
+# unset. That stops accidental defaults to the live session; it is not a security
+# sandbox (Xvfb has no listener but its local unix socket, and no X authority).
+#
+# Exit: the app's own status (128+SIG if killed by a signal), except the runner's own
+#   2 usage / environment      3 another scratch-x holds the host lock
+#   4 no free display in range 5 Xvfb did not start    6 Xvfb died while the app ran
+# (an app that itself exits 2-6 is indistinguishable; the stderr line starting
+# "scratch-x:" tells which).
+#
+# One runner at a time on this host. The exclusive lock is a flock on
+# /run/user/<uid>/scratch-x/lock (private, owner-verified 0700 directory). Xvfb and the
+# app inherit the open lock descriptor, so the lock stays held while any of them
+# survives even if this runner is SIGKILLed: a new runner then refuses (exit 3) rather
+# than start beside the orphan. After a hard kill of the runner its trap cannot run, so
+# the orphan Xvfb/app keep running until stopped by hand with the pids printed in the
+# refusal message; Xvfb removes its own socket/lock when it is terminated.
+#
+# Foreground only: the runner owns one app process group (its own session via setsid)
+# and waits for it. No detached or daemonized jobs, including a detached `hc` app: when
+# the app exits, any leftover members of its session are killed; a job that escapes the
+# session is not tracked, but still holds the lock descriptor, so the lock fails closed.
+#
+# Teardown only stops processes this runner spawned and unlinks only the socket/lock
+# whose recorded identity (device:inode:birth:ctime) still matches what was verified to
+# belong to our Xvfb (lock names its pid; its pid holds the unix socket bound at that
+# path). Never globbed, never :0.
+#
+# Needs: bash >= 5.1 (wait -n -p), Xvfb, flock and setsid (util-linux), pkill (procps-ng),
+# stat/id/sleep (coreutils). No sudo, no network listener, no daemon.
+set -euo pipefail
+
+me() { echo "scratch-x: $*" >&2; }
+die() { local c=$1; shift; me "$*"; exit "$c"; }
+
+size=1280x800x24
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) [ $# -ge 2 ] || die 2 "-s needs WxHxD"; size=$2; shift 2 ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    --) shift; break ;;
+    -*) die 2 "unknown option $1 (usage: scratch-x [-s WxHxD] [--] <command> [args...])" ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || die 2 "usage: scratch-x [-s WxHxD] [--] <command> [args...]"
+[[ $size =~ ^[0-9]+x[0-9]+x(8|16|24|32)$ ]] || die 2 "bad size '$size' (want WxHxD, depth 8/16/24/32)"
+from=${SCRATCH_X_FROM-99}; max=${SCRATCH_X_MAX-199}
+# Canonical decimal only: a leading zero would be octal in bash arithmetic (0100 -> 64).
+[[ $from =~ ^[1-9][0-9]{1,3}$ && $max =~ ^[1-9][0-9]{1,3}$ ]] \
+  || die 2 "SCRATCH_X_FROM/MAX must be canonical decimal integers (no leading zeros or signs; 99..9999)"
+[ "$from" -ge 99 ] || die 2 "SCRATCH_X_FROM must be >= 99 (never a live display)"
+[ "$from" -le "$max" ] || die 2 "SCRATCH_X_FROM > SCRATCH_X_MAX"
+for t in Xvfb flock setsid pkill stat id; do command -v "$t" >/dev/null || die 2 "missing required tool: $t"; done
+command -v "$1" >/dev/null || die 2 "command not found: $1"
+(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )) || die 2 "bash >= 5.1 required"
+
+# Foreground use: when a terminal is attached we must be in its foreground group.
+read -ra sf < <(sed 's/^[0-9]* (.*) //' "/proc/$$/stat")   # state ppid pgrp session tty tpgid ...
+if [ "${sf[5]}" != "-1" ] && [ "${sf[5]}" != "${sf[2]}" ]; then
+  die 2 "not the foreground process group of its terminal; scratch-x must run in the foreground"
+fi
+
+uid=$(id -u)
+base=/run/user/$uid
+dir=$base/scratch-x
+vdir() { # path: real directory, owned by us, mode exactly 700, not a symlink
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u %a' "$1")" = "$uid 700" ]
+}
+[ -d "$base" ] && [ ! -L "$base" ] && [ "$(stat -c '%u' "$base")" = "$uid" ] \
+  || die 2 "$base missing, a symlink, or not owned by uid $uid"
+[ -e "$dir" ] || [ -L "$dir" ] || mkdir -m 700 "$dir"
+vdir "$dir" || die 2 "$dir is not a private (mode 700, owner $uid, non-symlink) directory; refusing to use or change it"
+lockf=$dir/lock; statef=$dir/state
+if [ -e "$lockf" ] || [ -L "$lockf" ]; then
+  [ -f "$lockf" ] && [ ! -L "$lockf" ] && [ "$(stat -c '%u' "$lockf")" = "$uid" ] || die 2 "$lockf is not a regular file owned by uid $uid"
+fi
+
+# Xvfb, the app and any survivor inherit fd 9 on purpose: the lock outlives a SIGKILLed runner.
+exec 9>>"$lockf"
+if ! flock -n 9; then
+  info=$(head -c 400 "$statef" 2>/dev/null | tr -c '[:print:]' ' ' || true)
+  die 3 "another scratch-x already holds the host lock (last recorded: ${info:-none}). If its runner was killed, its leftover Xvfb/app still hold it: stop those pids, then retry. Nothing was started or touched."
+fi
+
+XPID=; APID=; XREAP=1; AREAP=1; PENDING=; LXI=; SXI=; N=; DONE=; LOG=
+ident() { stat -c '%d:%i:%W:%.9Z' -- "$1"; }   # identity of a file, not just its inode number
+alive() { # pid still running (a zombie does not count)
+  local s; [ -r "/proc/$1/stat" ] || return 1
+  s=$(sed 's/^[0-9]* (.*) //' "/proc/$1/stat"); [ "${s%% *}" != Z ]
+}
+stop() { # stop <pid> <group|pid>: TERM, bounded grace, KILL; child of ours, still unreaped so the pid is ours
+  local p=$1 g=${2:-pid} i
+  [ "$g" != group ] || kill -TERM -- "-$p" 2>/dev/null || true
+  kill -TERM "$p" 2>/dev/null || true   # also the leader itself: its group may not exist yet
+  for ((i = 0; i < 40; i++)); do alive "$p" || return 0; sleep 0.1; done
+  [ "$g" != group ] || kill -KILL -- "-$p" 2>/dev/null || true
+  kill -KILL "$p" 2>/dev/null || true
+}
+cleanup() {
+  [ -z "$DONE" ] || return 0; DONE=1
+  trap '' INT TERM HUP
+  if [ -n "$APID" ]; then
+    if [ "$AREAP" = 0 ]; then stop "$APID" group; wait "$APID" 2>/dev/null || true; AREAP=1; fi
+    pkill -KILL -U "$uid" -s "$APID" 2>/dev/null || true   # leftovers of the app's own session
+  fi
+  if [ -n "$XPID" ]; then
+    if [ "$XREAP" = 0 ]; then stop "$XPID"; wait "$XPID" 2>/dev/null || true; XREAP=1; fi
+    # Xvfb removes its own socket/lock on TERM. Remove a leftover only if it is still the exact
+    # file verified at startup as our Xvfb's (identity unchanged); a replaced file is left alone.
+    if [ -n "$LXI" ] && [ -f "/tmp/.X$N-lock" ] && [ ! -L "/tmp/.X$N-lock" ] \
+       && [ "$(ident "/tmp/.X$N-lock")" = "$LXI" ] \
+       && [ "$(tr -d ' \n' <"/tmp/.X$N-lock")" = "$XPID" ]; then rm -f -- "/tmp/.X$N-lock"; fi
+    if [ -n "$SXI" ] && [ -S "/tmp/.X11-unix/X$N" ] && [ ! -L "/tmp/.X11-unix/X$N" ] \
+       && [ "$(ident "/tmp/.X11-unix/X$N")" = "$SXI" ]; then rm -f -- "/tmp/.X11-unix/X$N"; fi
+  fi
+  [ -z "$LOG" ] || rm -f -- "$LOG"
+  rm -f -- "$statef"
+}
+trap cleanup EXIT
+live_traps() { trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; }
+# While a child is being forked and its pid stored, a signal only records itself: the handler
+# kills nothing and guesses no pid. After the pid is stored we act on it (or on the pending signal).
+defer_traps() { PENDING=; trap 'PENDING=130' INT; trap 'PENDING=143' TERM; trap 'PENDING=129' HUP; }
+live_traps
+
+unix_table() { # the kernel's unix-socket table; an unreadable table is an error, never "free"
+  local t; t=$(</proc/net/unix) && [[ $t == Num* ]] && printf '%s\n' "$t"
+}
+occupied() { # display N is taken by anything at all: left untouched, never ours
+  local t; t=$(unix_table) || die 2 "cannot read /proc/net/unix; refusing to choose a display"
+  [ -e "/tmp/.X11-unix/X$1" ] || [ -L "/tmp/.X11-unix/X$1" ] || [ -e "/tmp/.X$1-lock" ] || [ -L "/tmp/.X$1-lock" ] \
+    || [[ $'\n'$t$'\n' == *" @/tmp/.X11-unix/X$1"$'\n'* || $'\n'$t$'\n' == *" /tmp/.X11-unix/X$1"$'\n'* ]]
+}
+owns_socket() { # does process $1 hold the unix socket bound at path $2?
+  local t line ino= f
+  t=$(unix_table) || return 1
+  while read -r line; do
+    read -ra w <<<"$line"
+    [ "${w[7]-}" = "$2" ] && ino=${w[6]}
+  done <<<"$t"
+  [ -n "$ino" ] || return 1
+  for f in "/proc/$1"/fd/*; do [ "$(readlink "$f" 2>/dev/null)" = "socket:[$ino]" ] && return 0; done
+  return 1
+}
+for ((N = from; N <= max; N++)); do occupied "$N" || break; done
+[ "$N" -le "$max" ] || { N=; die 4 "no free display in :$from..:$max"; }
+# Last guard before any X server exists: canonical and at least :99, whatever came before.
+[[ $N =~ ^[1-9][0-9]{1,3}$ ]] && [ "$N" -ge 99 ] || { N=; die 2 "internal: refusing display '$N' (< :99 or not canonical)"; }
+
+LOG=$dir/xvfb-$N.log
+printf 'runner=%s display=:%s\n' "$$" "$N" >"$statef"
+defer_traps; XREAP=0
+setsid Xvfb ":$N" -screen 0 "$size" -nolisten tcp -noreset >"$LOG" 2>&1 &
+XPID=$!
+live_traps; [ -z "$PENDING" ] || exit "$PENDING"
+printf 'runner=%s display=:%s xvfb=%s\n' "$$" "$N" "$XPID" >"$statef"
+
+ready=
+for ((i = 0; i < 100; i++)); do
+  alive "$XPID" || break
+  if [ -f "/tmp/.X$N-lock" ] && [ ! -L "/tmp/.X$N-lock" ] && [ -S "/tmp/.X11-unix/X$N" ] \
+     && [ "$(stat -c '%u' "/tmp/.X$N-lock")" = "$uid" ] && [ "$(stat -c '%u' "/tmp/.X11-unix/X$N")" = "$uid" ] \
+     && [ "$(tr -d ' \n' <"/tmp/.X$N-lock")" = "$XPID" ] && owns_socket "$XPID" "/tmp/.X11-unix/X$N"; then ready=1; break; fi
+  sleep 0.05
+done
+if [ -z "$ready" ]; then
+  me "Xvfb did not become ready on :$N (its output follows; nothing unverified was removed)"; tail -n 5 "$LOG" >&2 || true
+  exit 5
+fi
+LXI=$(ident "/tmp/.X$N-lock"); SXI=$(ident "/tmp/.X11-unix/X$N")
+
+export DISPLAY=":$N" SCRATCH_X_DISPLAY=":$N"
+unset WAYLAND_DISPLAY XAUTHORITY
+defer_traps; AREAP=0
+setsid "$@" <&0 &
+APID=$!
+live_traps; [ -z "$PENDING" ] || exit "$PENDING"
+printf 'runner=%s display=:%s xvfb=%s app=%s\n' "$$" "$N" "$XPID" "$APID" >"$statef"
+
+set +e
+wait -n -p who "$XPID" "$APID"
+rc=$?
+set -e
+if [ "${who:-}" = "$XPID" ]; then
+  XREAP=1
+  me "Xvfb on :$N died while the app was running (exit $rc); stopping the app"
+  tail -n 5 "$LOG" >&2 || true
+  exit 6
+fi
+AREAP=1
+exit "$rc"
