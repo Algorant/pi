@@ -88,6 +88,10 @@ Run `~/Projects/herdra/bin/herdra-triage --rules` for the current rule. It reads
 
 Decisions are never triaged.
 
+### Task evaluation
+
+After the triage rule says a papercut is ready, use `~/Projects/herdra/docs/task-evaluation.md` to pick the simplest layer that fixes it. Apply the same sieve to other triage only after deciding what to act on.
+
 Archiving a Task is `tandem_close action=cancel` with a note; archived records are read-only.
 
 Classify work cheaply, decide who acts, and act. Apply the matching rule line to every Task, research Task and papercut; the work type determines what starting it means. Do not create an Epic or an omnibus papercut Task. Papercut *capture* belongs to *Filing a papercut* above, not this Board-review workflow.
